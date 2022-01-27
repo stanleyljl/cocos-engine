@@ -75,6 +75,191 @@ export const effects = [
     ]
   },
   {
+    "name": "debug-renderer",
+    "techniques": [
+      { "passes": [{ "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "rasterizerState": { "cullMode": 0 }, "program": "debug-renderer|debug-renderer-vs:vert|debug-renderer-fs:frag", "priority": 255, "depthStencilState": { "depthTest": false, "depthWrite": false } }] }
+    ],
+    "shaders": [
+      {
+        "name": "debug-renderer|debug-renderer-vs:vert|debug-renderer-fs:frag",
+        "hash": 938734059,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 21, "location": 0 },
+          { "name": "a_texCoord", "defines": [], "format": 21, "location": 1 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 2 }
+        ],
+        "blocks": [],
+        "samplerTextures": [
+          { "name": "mainTexture", "type": 28, "count": 1, "defines": [], "stageFlags": 16, "binding": 0 }
+        ],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      }
+    ]
+  },
+  {
+    "name": "geometry-renderer",
+    "techniques": [
+      { "passes": [{ "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|line-vs:vert|line-fs:front", "priority": 245, "depthStencilState": { "depthTest": false, "depthWrite": false } }] },
+      { "passes": [{ "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|line-vs:vert|line-fs:front", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false } }, { "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|line-vs:vert|line-fs:back", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false, "depthFunc": 4 } }] },
+      { "passes": [{ "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|dashed-line-vs:vert|dashed-line-fs:front", "priority": 245, "depthStencilState": { "depthTest": false, "depthWrite": false } }] },
+      { "passes": [{ "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|dashed-line-vs:vert|dashed-line-fs:front", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false } }, { "primitive": 1, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|dashed-line-vs:vert|dashed-line-fs:back", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false, "depthFunc": 4 } }] },
+      { "passes": [{ "rasterizerState": { "cullMode": 2 }, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|triangle-vs:vert|triangle-fs:front", "priority": 245, "depthStencilState": { "depthTest": false, "depthWrite": false } }] },
+      { "passes": [{ "rasterizerState": { "cullMode": 2 }, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|triangle-vs:vert|triangle-fs:front", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false } }, { "rasterizerState": { "cullMode": 2 }, "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "program": "geometry-renderer|triangle-vs:vert|triangle-fs:back", "priority": 245, "depthStencilState": { "depthTest": true, "depthWrite": false, "depthFunc": 4 } }] }
+    ],
+    "shaders": [
+      {
+        "name": "geometry-renderer|line-vs:vert|line-fs:front",
+        "hash": 3617431000,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 1 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      },
+      {
+        "name": "geometry-renderer|line-vs:vert|line-fs:back",
+        "hash": 4168905198,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 1 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      },
+      {
+        "name": "geometry-renderer|dashed-line-vs:vert|dashed-line-fs:front",
+        "hash": 4034582016,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 1 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      },
+      {
+        "name": "geometry-renderer|dashed-line-vs:vert|dashed-line-fs:back",
+        "hash": 1762165009,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 1 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      },
+      {
+        "name": "geometry-renderer|triangle-vs:vert|triangle-fs:front",
+        "hash": 4143142643,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_normal", "defines": [], "format": 44, "location": 1 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 2 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      },
+      {
+        "name": "geometry-renderer|triangle-vs:vert|triangle-fs:back",
+        "hash": 826026446,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 39 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [], "samplerTextures": [], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "USE_FORWARD_PIPELINE", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_normal", "defines": [], "format": 44, "location": 1 },
+          { "name": "a_color", "defines": [], "format": 44, "location": 2 }
+        ],
+        "blocks": [],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      }
+    ]
+  },
+  {
     "name": "graphics",
     "techniques": [
       { "passes": [{ "blendState": { "targets": [{ "blend": true, "blendSrc": 1, "blendDst": 4, "blendSrcAlpha": 1, "blendDstAlpha": 4 }] }, "rasterizerState": { "cullMode": 0 }, "program": "graphics|vs:vert|fs:frag", "depthStencilState": { "depthTest": false, "depthWrite": false } }] }
@@ -353,6 +538,42 @@ export const effects = [
             { "name": "alphaThreshold", "type": 13, "count": 1 }
           ]}
         ],
+        "samplerTextures": [],
+        "buffers": [],
+        "images": [],
+        "textures": [],
+        "samplers": [],
+        "subpassInputs": []
+      }
+    ]
+  },
+  {
+    "name": "sprite-gpu",
+    "techniques": [
+      { "passes": [{ "blendState": { "targets": [{ "blend": true, "blendSrc": 2, "blendDst": 4, "blendDstAlpha": 4 }] }, "rasterizerState": { "cullMode": 0 }, "program": "sprite-gpu|sprite-vs-gpu:vert|sprite-fs-gpu:frag", "depthStencilState": { "depthTest": false, "depthWrite": false } }] }
+    ],
+    "shaders": [
+      {
+        "name": "sprite-gpu|sprite-vs-gpu:vert|sprite-fs-gpu:frag",
+        "hash": 2450198964,
+        "builtins": {
+          "statistics": { "CC_EFFECT_USED_VERTEX_UNIFORM_VECTORS": 39, "CC_EFFECT_USED_FRAGMENT_UNIFORM_VECTORS": 0 },
+          "globals": { "blocks": [{ "name": "CCGlobal", "defines": [] }, { "name": "CCCamera", "defines": [] }], "samplerTextures": [], "buffers": [], "images": [] },
+          "locals": { "blocks": [{ "name": "CCUILocal", "defines": [] }], "samplerTextures": [{ "name": "cc_spriteTexture", "defines": ["USE_TEXTURE"] }], "buffers": [], "images": [] }
+        },
+        "defines": [
+          { "name": "SAMPLE_FROM_RT", "type": "boolean" },
+          { "name": "USE_PIXEL_ALIGNMENT", "type": "boolean" },
+          { "name": "CC_USE_EMBEDDED_ALPHA", "type": "boolean" },
+          { "name": "USE_TEXTURE", "type": "boolean" },
+          { "name": "IS_GRAY", "type": "boolean" }
+        ],
+        "attributes": [
+          { "name": "a_position", "defines": [], "format": 32, "location": 0 },
+          { "name": "a_texCoord", "defines": [], "format": 21, "location": 1 },
+          { "name": "a_batch_id", "defines": [], "format": 11, "location": 2 }
+        ],
+        "blocks": [],
         "samplerTextures": [],
         "buffers": [],
         "images": [],
