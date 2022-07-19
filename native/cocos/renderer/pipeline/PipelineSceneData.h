@@ -45,6 +45,10 @@ class Fog;
 class Octree;
 class Light;
 } // namespace scene
+namespace gi {
+class LightProbe;
+}
+
 namespace pipeline {
 
 class CC_DLL PipelineSceneData : public RefCounted {
@@ -69,6 +73,7 @@ public:
     inline scene::Skybox *getSkybox() const { return _skybox; }
     inline scene::Fog *getFog() const { return _fog; }
     inline scene::Octree *getOctree() const { return _octree; }
+    inline gi::LightProbe *getLightProbe() const { return _lightProbe; }
     inline gfx::InputAssembler *getOcclusionQueryInputAssembler() const { return _occlusionQueryInputAssembler; }
     inline scene::Pass *getOcclusionQueryPass() const { return _occlusionQueryPass; }
     inline gfx::Shader *getOcclusionQueryShader() const { return _occlusionQueryShader; }
@@ -124,6 +129,8 @@ protected:
     scene::Shadows *_shadow{nullptr};
     // manage memory manually
     scene::Octree *_octree{nullptr};
+    // manage memory manually
+    gi::LightProbe *_lightProbe{nullptr};
     // manage memory manually
     CSMLayers *_csmLayers{nullptr};
     bool _isHDR{true};
