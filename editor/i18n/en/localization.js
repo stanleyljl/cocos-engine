@@ -860,6 +860,10 @@ module.exports = {
             label: "Terrain",
             description: "Terrain support.",
         },
+        light_probe: {
+            label: "Light Probe",
+            description: "Light Probe support.",
+        },
         audio: {
             label: "Audio",
             description: "Audio playing support.",
