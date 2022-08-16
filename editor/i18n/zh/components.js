@@ -24,6 +24,10 @@ module.exports = {
             change_children: '连同修改子节点',
             change_self: '只修改节点自身',
         },
+        lightProbeGroup:{
+            generateTip: '在场景里重新生成探针',
+            editTip: '切换场景中的探针编辑模式',
+        },
 
         missScriptTip: "脚本编译失败，请检查报错信息并进行修正，该组件将在修正后自动还原。",
     },
