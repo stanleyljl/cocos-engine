@@ -30,6 +30,7 @@ module.exports = {
         },
         lightProbeGroup:{
             generateTip: 'Regenerate probes in the scene',
+            generateWarnTip: 'Do you confirm regenerate probes in the scene?',
             editTip: 'Toggle the probe editing mode in the scene',
         },
 

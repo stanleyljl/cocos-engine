@@ -25,7 +25,8 @@ module.exports = {
             change_self: '只修改节点自身',
         },
         lightProbeGroup:{
-            generateTip: '在场景里重新生成探针',
+            generateTip: '重新生成场景里的探针数据',
+            generateWarnTip: '确定要重新生成场景里的探针数据吗？',
             editTip: '切换场景中的探针编辑模式',
         },
 
