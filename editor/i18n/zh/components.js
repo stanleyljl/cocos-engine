@@ -26,7 +26,7 @@ module.exports = {
         },
         lightProbeGroup:{
             generateTip: '重新生成场景里的探针数据',
-            generateWarnTip: '确定要重新生成场景里的探针数据吗？',
+            generateWarnTip: '继续自动生成新探针会覆盖已有探针，该节点的已有探针数据会全部丢失，请问是否仍要继续？',
             editTip: '切换场景中的探针编辑模式',
         },
 

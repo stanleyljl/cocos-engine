@@ -30,7 +30,7 @@ module.exports = {
         },
         lightProbeGroup:{
             generateTip: 'Regenerate probes in the scene',
-            generateWarnTip: 'Do you confirm regenerate probes in the scene?',
+            generateWarnTip: 'Continuing to automatically generate a new probe will overwrite the existing probe, and all the data of the existing probe on this node will be lost. Do you want to continue?',
             editTip: 'Toggle the probe editing mode in the scene',
         },
 
