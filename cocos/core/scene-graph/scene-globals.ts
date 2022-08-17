@@ -38,6 +38,7 @@ import { legacyCC } from '../global-exports';
 import { Root } from '../root';
 import { warnID } from '../platform/debug';
 import { Material } from '../assets/material';
+import { LightProbeGroup } from '../../gi/light-probe';
 
 const _up = new Vec3(0, 1, 0);
 const _v3 = new Vec3();
@@ -1201,6 +1202,14 @@ export class LightProbeInfo {
         this._resource = resource;
         this._resource.initialize(this);
     }
+
+    public update (lightProbeGroup: LightProbeGroup) {
+        if (!this._data) {
+            this._data = new LightProbesData();
+        }
+
+        //this._data.build(lightProbeGroup.probes);
+    }
 }
 legacyCC.LightProbeInfo = LightProbeInfo;
 
@@ -1264,7 +1273,7 @@ export class SceneGlobals {
      */
     @editable
     @serializable
-    public lightProbe = new LightProbeInfo();
+    public lightProbeInfo = new LightProbeInfo();
 
     /**
      * @en Activate and initialize the global configurations of the scene, no need to invoke manually.
@@ -1278,7 +1287,7 @@ export class SceneGlobals {
         this.shadows.activate(sceneData.shadows);
         this.fog.activate(sceneData.fog);
         this.octree.activate(sceneData.octree);
-        this.lightProbe.activate(sceneData.lightProbe);
+        this.lightProbeInfo.activate(sceneData.lightProbes);
 
         const root = legacyCC.director.root as Root;
         root.onGlobalPipelineStateChanged();
