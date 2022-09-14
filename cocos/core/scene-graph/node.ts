@@ -32,7 +32,7 @@ import { NodeUIProperties } from './node-ui-properties';
 import { legacyCC } from '../global-exports';
 import { BaseNode, TRANSFORM_ON } from './base-node';
 import { approx, EPSILON, Mat3, Mat4, Quat, Vec3 } from '../math';
-import { NodeSpace, TransformBit } from './node-enum';
+import { MobilityMode, NodeSpace, TransformBit } from './node-enum';
 import { NodeEventType } from './node-event';
 import { CustomSerializable, editorExtrasTag, SerializationContext, SerializationOutput, serializeTag } from '../data';
 import { warnID } from '../platform/debug';
@@ -138,6 +138,9 @@ export class Node extends BaseNode implements CustomSerializable {
 
     @serializable
     protected _lscale = new Vec3(1, 1, 1);
+
+    @serializable
+    protected _mobility = MobilityMode.Static;
 
     @serializable
     protected _layer = Layers.Enum.DEFAULT; // the layer this node belongs to
@@ -342,6 +345,16 @@ export class Node extends BaseNode implements CustomSerializable {
      */
     get right (): Vec3 {
         return Vec3.transformQuat(new Vec3(), Vec3.RIGHT, this.worldRotation);
+    }
+
+    @editable
+    @type(MobilityMode)
+    set mobility (m) {
+        this._mobility = m;
+    }
+
+    get mobility () {
+        return this._mobility;
     }
 
     /**
