@@ -28,7 +28,8 @@ import { RenderScene } from '..';
 import { Device, deviceManager } from '../../gfx';
 import { AABB } from '../../geometry';
 import { Node, Layers } from '../../scene-graph';
-import { Camera } from './camera';
+import { Camera, CameraProjection } from './camera';
+import { assertIsTrue } from '../../data/utils/asserts';
 
 export class LOD {
     screenRelativeTransitionHeight = 1;
@@ -60,9 +61,9 @@ export class LODGroup {
         this._device = deviceManager.gfxDevice;
     }
 
-    set localReferencePoint (val: Vec3) {  this._localReferencePoint = val;  }
+    set localReferencePoint (val: Vec3) {  this._localReferencePoint.set(val); }
 
-    get localReferencePoint () { return this._localReferencePoint; }
+    get localReferencePoint () { return this._localReferencePoint.clone(); }
 
     get lodCount () { return this._LODs.length; }
 
@@ -74,7 +75,7 @@ export class LODGroup {
 
     set LODs (val: LOD[]) { this._LODs = val; }
 
-    get LODs () { return this.LODs; }
+    get LODs () { return this._LODs; }
 
     attachToScene (scene: RenderScene) {
         this.scene = scene;
@@ -126,12 +127,21 @@ export class LODGroupUtility {
     static getRelativeHeight (lodGroup: LODGroup, camera: Camera): number|null {
         if (!lodGroup.node) return null;
 
-        const distance =  Vec3.len(lodGroup.localReferencePoint.transformMat4(lodGroup.node.worldMatrix).subtract(camera.node.position));
+        let distance: number | undefined;
+        if (camera.projectionType === CameraProjection.PERSPECTIVE) {
+            distance =  Vec3.len(lodGroup.localReferencePoint.transformMat4(lodGroup.node.worldMatrix).subtract(camera.node.position));
+        }
+
         return this.distanceToRelativeHeight(camera, distance, this.getWorldSpaceSize(lodGroup));
     }
 
-    private static distanceToRelativeHeight (camera: Camera, distance: number, size: number): number {
-        return (size * camera.matProj.m11) / (distance * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
+    private static distanceToRelativeHeight (camera: Camera, distance: number | undefined, size: number): number {
+        if (camera.projectionType === CameraProjection.PERSPECTIVE) {
+            assertIsTrue(typeof distance === 'number', 'distance must be present for perspective projection');
+            return (size * camera.matProj.m05) / (distance * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
+        } else {
+            return size * camera.matProj.m05 * 0.5;
+        }
     }
 
     private static getWorldSpaceSize (lodGroup: LODGroup): number {

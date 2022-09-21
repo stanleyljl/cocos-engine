@@ -24,27 +24,34 @@
  */
 
 import { EDITOR } from 'internal:constants';
-import { ccclass, menu, serializable } from 'cc.decorator';
-import { Component, Renderer, Vec3, Vec4, Mat4 } from '..';
+import { ccclass, executeInEditMode, menu, serializable } from 'cc.decorator';
+import { Component, Renderer, Vec3, Vec4, Mat4, Node } from '..';
 import { scene } from '../renderer';
-import { Camera, Model } from '../renderer/scene';
+import { Camera, CameraProjection, Model } from '../renderer/scene';
 import { Layers } from '../scene-graph/layers';
 import { ModelRenderer } from './model-renderer';
 import { Mesh, MeshRenderer } from '../../3d';
 import { retry } from '../asset-manager/utilities';
 import { AABB } from '../geometry';
+import { assertIsTrue } from '../data/utils/asserts';
 
 export class LOD {
+    // The relative minimum transition height in screen space.
     @serializable
     protected _screenRelativeTransitionHeight = 1;
-    @serializable
+    // Mesh renderers components contained in this LOD level.
     protected _renderers: MeshRenderer[] = [];
+    // renderer internal LOD data block.
     protected _LOD: scene.LOD = new scene.LOD();
 
     constructor () {
         this._LOD.screenRelativeTransitionHeight = this._screenRelativeTransitionHeight;
     }
 
+    /**
+     * @en The relvative (minimum) transition height of this LOD level in screen space
+     * @zh 本层级（最小）相对屏幕区域的过渡高度
+     */
     get screenRelativeTransitionHeight () { return this._screenRelativeTransitionHeight; }
     set screenRelativeTransitionHeight (val) {
         this._screenRelativeTransitionHeight = val;
@@ -52,10 +59,11 @@ export class LOD {
     }
 
     /**
-     * Insert a mesh-renderer before specific index position.
+     * @en Insert a [[MeshRenderer]] before specific index position.
+     * @zh 在指定的数组索引处插入一个[[MeshRenderer]]
      * @param index 0 indexed position in renderer array, when -1 is specified, append to the tail of the list
      * @param renderer the mesh-renderer object
-     * @returns renderer
+     * @returns The renderer inserted
      */
     insertRenderer (index: number, renderer: MeshRenderer): MeshRenderer {
         this._renderers.splice(index, 0, renderer);
@@ -64,8 +72,10 @@ export class LOD {
     }
 
     /**
-     * Delete the mesh-renderer at specific index position.
+     * @en Delete the [[MeshRenderer]] at specific index position.
+     * @zh 删除指定索引处的[[MeshRenderer]]
      * @param index 0 indexed position in renderer array, when -1 is specified, the last element will be deleted
+     * @returns The renderer deleted
      */
     deleteRenderer (index: number): MeshRenderer {
         const renderer = this._renderers[index];
@@ -90,7 +100,11 @@ export class LOD {
 
 @ccclass('cc.LODGroup')
 @menu('Rendering/LOD Group')
+@executeInEditMode
 export class LODGroup extends Component {
+    /**
+     * @en Object reference point in local space, e.g. center of the bound volume for all LODs
+     */
     @serializable
     protected _localReferencePoint: Vec3 = new Vec3(0, 0, 0);
 
@@ -103,23 +117,21 @@ export class LODGroup extends Component {
     /**
      *@en The array of LODs
      */
-    @serializable
     protected _LODs: LOD[] = [];
 
     protected _lodGroup = new scene.LODGroup();
 
     constructor () {
         super();
-        this._lodGroup.localReferencePoint = this._localReferencePoint;
         this._lodGroup.size = this._size;
     }
 
     set localReferencePoint (val: Vec3) {
-        this._localReferencePoint = val;
+        this._localReferencePoint.set(val);
         this._lodGroup.localReferencePoint = val;
     }
 
-    get localReferencePoint () { return this._localReferencePoint; }
+    get localReferencePoint () { return this._localReferencePoint.clone(); }
 
     get lodCount () { return this._LODs.length; }
 
@@ -152,6 +164,71 @@ export class LODGroup extends Component {
     }
 
     get lodGroup () { return this._lodGroup; }
+
+    onLoad () {
+        this._createLODGroup();
+    }
+
+    // Redo, Undo, Prefab restore, etc.
+    onRestore () {
+        if (this.enabledInHierarchy) {
+            this._attachToScene();
+        }
+    }
+
+    onEnable () {
+        this._attachToScene();
+    }
+
+    onDisable () {
+        this._detachFromScene();
+    }
+
+    onDestroy () {
+
+    }
+
+    /**
+     * ==============================================
+     * Internal members
+     * ==============================================
+     */
+    protected _createLODGroup () {
+        this._lodGroup.node = this.node;
+
+        // Engine unit test case.
+        const renderers = LODGroupEditorUtility.getAvailableRenderers(this);
+
+        const step = 1.0 / (1 + renderers.length);
+        let levelCount = 1;
+        for (const renderer of renderers) {
+            const lod = new LOD();
+            lod.screenRelativeTransitionHeight = 1.0 - step * levelCount;
+            lod.insertRenderer(-1, renderer);
+            this.insertLOD(-1, lod);
+
+            const renderScene = renderer._getRenderScene();
+            if (renderScene && renderer.model) renderScene.removeModel(renderer.model);
+
+            ++levelCount;
+        }
+
+        LODGroupEditorUtility.recalculateBounds(this);
+    }
+
+    protected _attachToScene () {
+        if (!this.node.scene) { return; }
+
+        const renderScene = this._getRenderScene();
+        if (this._lodGroup.scene) {
+            this._detachFromScene();
+        }
+        renderScene.addLODGroup(this._lodGroup);
+    }
+
+    protected _detachFromScene () {
+        if (this._lodGroup.scene) { this._lodGroup.scene.removeLODGroup(this._lodGroup); }
+    }
 }
 
 export class LODGroupEditorUtility {
@@ -164,7 +241,7 @@ export class LODGroupEditorUtility {
     static getVisibleLOD (lodGroup: LODGroup, camera: Camera): number {
         const relativeHeight = this.getRelativeHeight(lodGroup, camera) || 0;
 
-        let lodIndex = lodGroup.lodCount - 1;
+        let lodIndex = -1;
         for (let i = 0; i < lodGroup.lodCount; ++i) {
             const lod = lodGroup.getLOD(i);
             if (relativeHeight >= lod.screenRelativeTransitionHeight) {
@@ -184,7 +261,10 @@ export class LODGroupEditorUtility {
     static getRelativeHeight (lodGroup: LODGroup, camera: Camera): number|null {
         if (!lodGroup.node) return null;
 
-        const distance =  Vec3.len(lodGroup.localReferencePoint.transformMat4(lodGroup.node.worldMatrix).subtract(camera.node.position));
+        let distance: number | undefined;
+        if (camera.projectionType === scene.CameraProjection.PERSPECTIVE) {
+            distance =  Vec3.len(lodGroup.localReferencePoint.transformMat4(lodGroup.node.worldMatrix).subtract(camera.node.position));
+        }
         return this.distanceToRelativeHeight(camera, distance, this.getWorldSpaceSize(lodGroup));
     }
 
@@ -204,7 +284,8 @@ export class LODGroupEditorUtility {
                 new Vec3(c.x + e.x, c.y - e.y, c.z + e.z),
             );
 
-            maxPos = minPos = pts[0].transformMat4(transform);
+            minPos = pts[0].transformMat4(transform);
+            maxPos = minPos.clone();
             for (let i = 1; i < 8; ++i) {
                 const pt = pts[i].transformMat4(transform);
                 minPos = Vec3.min(minPos, minPos, pt);
@@ -251,7 +332,7 @@ export class LODGroupEditorUtility {
 
             // Save the result
             lodGroup.localReferencePoint = c;
-            lodGroup.size = Math.max(e.x, e.y, e.z);
+            lodGroup.size = Math.max(e.x, e.y, e.z) * 2.0;
         }
     }
 
@@ -268,12 +349,36 @@ export class LODGroupEditorUtility {
         }
     }
 
-    private static distanceToRelativeHeight (camera: Camera, distance: number, size: number): number {
-        return (size * camera.matProj.m11) / (distance * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
+    static getAvailableRenderers (lodGroup: LODGroup): MeshRenderer[] {
+        function recuGetSubRenderers (node: Node, renderers: MeshRenderer[]) {
+            for (const subNode of node.children) {
+                const renderer = subNode.getComponent(MeshRenderer);
+                if (renderer) {
+                    renderers.push(renderer);
+                } else if (subNode.children.length) {
+                    recuGetSubRenderers(subNode, renderers);
+                }
+            }
+        }
+
+        const root = lodGroup.node;
+        const renderers = [];
+        recuGetSubRenderers(root, renderers);
+        return renderers;
+    }
+
+    private static distanceToRelativeHeight (camera: Camera, distance: number | undefined, size: number): number {
+        if (camera.projectionType === CameraProjection.PERSPECTIVE) {
+            assertIsTrue(typeof distance === 'number', 'distance must be present for perspective projection');
+            return (size * camera.matProj.m05) / (distance * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
+        } else {
+            return size * camera.matProj.m05 * 0.5;
+        }
     }
 
     private static relativeHeightToDistance (camera: Camera, relativeHeight: number, size: number): number {
-        return (size * camera.matProj.m11) / (relativeHeight * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
+        assertIsTrue(camera.projectionType === CameraProjection.PERSPECTIVE, 'Camera type must be perspective.');
+        return (size * camera.matProj.m05) / (relativeHeight * 2.0); // note: matProj.m11 is 1 / tan(fov / 2.0)
     }
 
     private static getWorldSpaceSize (lodGroup: LODGroup): number {
