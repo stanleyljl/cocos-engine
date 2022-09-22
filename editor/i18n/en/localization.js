@@ -915,9 +915,17 @@ module.exports = {
             label: "Marionette Animation System",
             description: "Enable the Marionette animation system",
         },
+        xr: {
+            label: "XR",
+            description: "Enable the XR function system",
+        },
         custom_pipeline: {
             label: "Custom Render Pipeline (Experimental)",
             description: "Enable custom render pipeline",
+        },
+        websocket_server: {
+            label: "WebSocket Server",
+            description: "Enable WebSocket Server for native.",
         },
     },
     renderable_2d: {

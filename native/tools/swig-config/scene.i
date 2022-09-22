@@ -354,6 +354,7 @@ using namespace cc;
 %attribute(cc::scene::Camera, cc::Node*, node, getNode, setNode);
 %attribute(cc::scene::Camera, cc::gfx::SurfaceTransform, surfaceTransform, getSurfaceTransform);
 %attribute(cc::scene::Camera, cc::pipeline::GeometryRenderer *, geometryRenderer, getGeometryRenderer);
+%attribute(cc::scene::Camera, uint32_t, systemWindowId, getSystemWindowId);
 
 %attribute(cc::scene::RenderScene, ccstd::string&, name, getName);
 %attribute(cc::scene::RenderScene, ccstd::vector<cc::IntrusivePtr<cc::scene::Camera>>&, cameras, getCameras);
@@ -540,7 +541,6 @@ using namespace cc;
 // Brief: Include header files in which classes and methods will be bound
 %include "core/scene-graph/NodeEnum.h"
 %include "core/scene-graph/Layers.h"
-%include "core/scene-graph/BaseNode.h"
 %include "core/scene-graph/Node.h"
 %include "core/scene-graph/Scene.h"
 %include "core/scene-graph/SceneGlobals.h"

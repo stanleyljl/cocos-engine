@@ -26,11 +26,15 @@
 #include "GFXDevice.h"
 #include "GFXObject.h"
 #include "base/memory/Memory.h"
+#include "platform/BasePlatform.h"
+#include "platform/interfaces/modules/ISystemWindow.h"
+#include "platform/interfaces/modules/ISystemWindowManager.h"
 
 namespace cc {
 namespace gfx {
 
 Device *Device::instance = nullptr;
+bool Device::isSupportDetachDeviceThread = true;
 
 Device *Device::getInstance() {
     return Device::instance;
@@ -39,8 +43,8 @@ Device *Device::getInstance() {
 Device::Device() {
     Device::instance = this;
     // Device instance is created and hold by TS. Native should hold it too
-    // to make sure it exists after JavaScript virtural machine is destroyed.
-    // Then will destory the Device instance in native.
+    // to make sure it exists after JavaScript virtual machine is destroyed.
+    // Then will destroy the Device instance in native.
     addRef();
     _features.fill(false);
     _formatFeatures.fill(FormatFeature::NONE);
@@ -104,9 +108,12 @@ void Device::destroySurface(void *windowHandle) {
 }
 
 void Device::createSurface(void *windowHandle) {
+    auto windowId = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(windowHandle));
     for (const auto &swapchain : _swapchains) {
-        if (!swapchain->getWindowHandle()) {
-            swapchain->createSurface(windowHandle);
+        if (swapchain->getWindowId() == windowId) {
+            auto *windowMgr = BasePlatform::getPlatform()->getInterface<ISystemWindowManager>();
+            auto *window = windowMgr->getWindow(windowId);
+            swapchain->createSurface(reinterpret_cast<void *>(window->getWindowHandle()));
             break;
         }
     }

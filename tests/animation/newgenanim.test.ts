@@ -1,11 +1,10 @@
 
-import { Component, lerp, Node, Vec2, Vec3, warnID } from '../../cocos/core';
-import { AnimationBlend1D, AnimationBlend2D, Condition, InvalidTransitionError, VariableNotDefinedError, ClipMotion, AnimationBlendDirect, VariableType } from '../../cocos/core/animation/marionette/asset-creation';
-import { AnimationGraph, StateMachine, Transition, isAnimationTransition, AnimationTransition, TransitionInterruptionSource } from '../../cocos/core/animation/marionette/animation-graph';
-import { createEval } from '../../cocos/core/animation/marionette/create-eval';
-import { VariableTypeMismatchedError } from '../../cocos/core/animation/marionette/errors';
-import { AnimationGraphEval, MotionStateStatus, ClipStatus } from '../../cocos/core/animation/marionette/graph-eval';
-import { createGraphFromDescription } from '../../cocos/core/animation/marionette/__tmp__/graph-from-description';
+import { Component, lerp, Node, Vec3, warnID } from '../../cocos/core';
+import { AnimationBlend1D, AnimationBlend2D, Condition, InvalidTransitionError, VariableNotDefinedError, ClipMotion, AnimationBlendDirect, VariableType } from '../../cocos/animation/marionette/asset-creation';
+import { AnimationGraph, StateMachine, Transition, isAnimationTransition, AnimationTransition, TransitionInterruptionSource } from '../../cocos/animation/marionette/animation-graph';
+import { VariableTypeMismatchedError } from '../../cocos/animation/marionette/errors';
+import { AnimationGraphEval, MotionStateStatus, ClipStatus } from '../../cocos/animation/marionette/graph-eval';
+import { createGraphFromDescription } from '../../cocos/animation/marionette/__tmp__/graph-from-description';
 import gAnyTransition from './graphs/any-transition';
 import gUnspecifiedCondition from './graphs/unspecified-condition';
 import glUnspecifiedConditionOnEntryNode from './graphs/unspecified-condition-for-non-entry-node';
@@ -15,17 +14,17 @@ import gVariableNotFoundInAnimationBlend from './graphs/variable-not-found-in-po
 import gAnimationBlendRequiresNumbers from './graphs/pose-blend-requires-numbers';
 import gInfinityLoop from './graphs/infinity-loop';
 import gZeroTimePiece from './graphs/zero-time-piece';
-import { blend1D } from '../../cocos/core/animation/marionette/blend-1d';
+import { blend1D } from '../../cocos/animation/marionette/blend-1d';
 import '../utils/matcher-deep-close-to';
-import { BinaryCondition, UnaryCondition, TriggerCondition } from '../../cocos/core/animation/marionette/condition';
-import { AnimationController } from '../../cocos/core/animation/marionette/animation-controller';
-import { StateMachineComponent } from '../../cocos/core/animation/marionette/state-machine-component';
-import { VectorTrack } from '../../cocos/core/animation/animation';
+import { BinaryCondition, UnaryCondition, TriggerCondition } from '../../cocos/animation/marionette/condition';
+import { AnimationController } from '../../cocos/animation/marionette/animation-controller';
+import { StateMachineComponent } from '../../cocos/animation/marionette/state-machine-component';
+import { VectorTrack } from '../../cocos/animation/animation';
 import 'jest-extended';
 import { assertIsTrue } from '../../cocos/core/data/utils/asserts';
-import { AnimationClip } from '../../cocos/core/animation/animation-clip';
-import { TriggerResetMode } from '../../cocos/core/animation/marionette/variable';
-import { MotionState } from '../../cocos/core/animation/marionette/motion-state';
+import { AnimationClip } from '../../cocos/animation/animation-clip';
+import { TriggerResetMode } from '../../cocos/animation/marionette/variable';
+import { MotionState } from '../../cocos/animation/marionette/motion-state';
 
 describe('NewGen Anim', () => {
     test('Defaults', () => {
@@ -357,7 +356,20 @@ describe('NewGen Anim', () => {
             // 1 transition
             stateMachine.adjustTransitionPriority(t01_0, 0);
 
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            const expectPriority = (transitions: Transition[]) => {
+                const outgoings = Array.from(stateMachine.getOutgoings(m0));
+
+                // Check the transition's order suggested by `stateMachine.getOutgoings()`.
+                expect(outgoings).toStrictEqual(transitions);
+
+                // Check the transition's order suggested by `stateMachine.transitions()`.
+                const transitionsInStateMachineWide = [...stateMachine.transitions()].filter((transition) => {
+                    return outgoings.includes(transition);
+                });
+                expect(transitionsInStateMachineWide).toStrictEqual(transitions);
+            };
+
+            expectPriority([
                 t01_0,
             ]);
 
@@ -368,7 +380,7 @@ describe('NewGen Anim', () => {
             const t03_1 = stateMachine.connect(m0, m3);
 
             // By default, later-added transitions have lower priorities.
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t01_1,
                 t02_0,
@@ -378,7 +390,7 @@ describe('NewGen Anim', () => {
 
             // Do nothing if diff is zero
             stateMachine.adjustTransitionPriority(t01_1, 0);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t01_1,
                 t02_0,
@@ -388,7 +400,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 1 -> 3
             stateMachine.adjustTransitionPriority(t01_1, 2);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t02_0,
                 t03_0,
@@ -398,7 +410,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 1 -> 3 again
             stateMachine.adjustTransitionPriority(t02_0, 2);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t03_0,
                 t01_1,
@@ -408,7 +420,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 3 -> 1
             stateMachine.adjustTransitionPriority(t02_0, -2);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t02_0,
                 t03_0,
@@ -418,7 +430,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 3 -> 0
             stateMachine.adjustTransitionPriority(t01_1, -3);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_1,
                 t01_0,
                 t02_0,
@@ -428,7 +440,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 1 -> 4
             stateMachine.adjustTransitionPriority(t01_0, 3);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_1,
                 t02_0,
                 t03_0,
@@ -438,7 +450,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 1 -> 7(overflow)
             stateMachine.adjustTransitionPriority(t02_0, 6);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_1,
                 t03_0,
                 t03_1,
@@ -448,7 +460,7 @@ describe('NewGen Anim', () => {
 
             // Adjust 3 -> -2(underflow)
             stateMachine.adjustTransitionPriority(t01_0, -6);
-            expect(Array.from(stateMachine.getOutgoings(m0))).toStrictEqual([
+            expectPriority([
                 t01_0,
                 t01_1,
                 t03_0,

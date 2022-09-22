@@ -27,18 +27,18 @@
 import { TEST, EDITOR } from 'internal:constants';
 import { MeshRenderer } from '../3d/framework/mesh-renderer';
 import { createMesh } from '../3d/misc';
-import { Material } from '../core/assets/material';
-import { Format, TextureType, TextureUsageBit, Texture, TextureInfo, Device, BufferTextureCopy, Swapchain, deviceManager } from '../core/gfx';
+import { Material } from '../asset/assets/material';
+import { Format, TextureType, TextureUsageBit, Texture, TextureInfo, Device, BufferTextureCopy, Swapchain, deviceManager } from '../gfx';
 import { Layers } from '../core/scene-graph';
 import { Node } from '../core/scene-graph/node';
 import { ICounterOption } from './counter';
 import { PerfCounter } from './perf-counter';
 import { legacyCC } from '../core/global-exports';
-import { Pass } from '../core/renderer';
+import { Pass } from '../render-scene';
 import { preTransforms } from '../core/math/mat4';
 import { Root } from '../core/root';
-import { PipelineRuntime } from '../core/pipeline/custom/pipeline';
-import { director, System } from '../core';
+import { PipelineRuntime } from '../rendering/custom/pipeline';
+import { director, System, sys } from '../core';
 import { Settings, settings } from '../core/settings';
 
 const _characters = '0123456789. ';
@@ -397,7 +397,10 @@ export class Profiler extends System {
             const clipSpaceSignY = this._device!.capabilities.clipSpaceSignY;
             if (surfaceTransform !== this.offsetData[3]) {
                 const preTransform = preTransforms[surfaceTransform];
-                const x = -0.9; const y = -0.9 * clipSpaceSignY;
+                let x = -0.9; let y = -0.9 * clipSpaceSignY;
+                if (sys.isXR) {
+                    x = -0.5; y = -0.5 * clipSpaceSignY;
+                }
                 this.offsetData[0] = x * preTransform[0] + y * preTransform[2];
                 this.offsetData[1] = x * preTransform[1] + y * preTransform[3];
                 this.offsetData[2] = this._eachNumWidth;

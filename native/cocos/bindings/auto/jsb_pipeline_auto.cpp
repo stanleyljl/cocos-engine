@@ -35,6 +35,17 @@
  THE SOFTWARE.
 ****************************************************************************/
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-variable"
+#elif defined(__GNUC__) || defined(__GNUG__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4101)
+#endif
+
 /* internal SWIG method */
 #ifndef SWIGINTERN
 # define SWIGINTERN static 
@@ -6774,6 +6785,31 @@ bool js_register_cc_pipeline_REFLECTIONSTORAGE(se::Object* obj) {
 }
 
 
+static bool js_cc_pipeline_localDescriptorSetLayoutResizeMaxJoints(se::State& s)
+{
+    // js_function
+    
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    uint32_t arg1 ;
+    
+    if(argc != 1) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+        return false;
+    }
+    
+    // %typemap(in) SWIGTYPE value in
+    ok &= sevalue_to_native(args[0], &arg1, s.thisObject());
+    SE_PRECONDITION2(ok, false, "localDescriptorSetLayoutResizeMaxJoints,1,SWIGTYPE_uint32_t"); 
+    
+    cc::pipeline::localDescriptorSetLayoutResizeMaxJoints(arg1);
+    
+    
+    return true;
+}
+SE_BIND_FUNC(js_cc_pipeline_localDescriptorSetLayoutResizeMaxJoints) 
+
 se::Class* __jsb_cc_pipeline_RenderPipelineInfo_class = nullptr;
 se::Object* __jsb_cc_pipeline_RenderPipelineInfo_proto = nullptr;
 SE_DECLARE_FINALIZE_FUNC(js_delete_cc_pipeline_RenderPipelineInfo) 
@@ -7943,6 +7979,57 @@ static bool js_cc_pipeline_RenderPipeline_createQuadInputAssembler(se::State& s)
 }
 SE_BIND_FUNC(js_cc_pipeline_RenderPipeline_createQuadInputAssembler) 
 
+static bool js_cc_pipeline_RenderPipeline_resetRenderQueue(se::State& s)
+{
+    // js_function
+    
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::pipeline::RenderPipeline *arg1 = (cc::pipeline::RenderPipeline *) NULL ;
+    bool arg2 ;
+    
+    if(argc != 1) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+        return false;
+    }
+    arg1 = SE_THIS_OBJECT<cc::pipeline::RenderPipeline>(s);
+    SE_PRECONDITION2(arg1, false, "%s: Invalid Native Object", __FUNCTION__); 
+    // %typemap(in) bool
+    ok &= sevalue_to_native(args[0], &arg2);
+    SE_PRECONDITION2(ok, false, "RenderPipeline_resetRenderQueue,2,SWIGTYPE_bool"); 
+    (arg1)->resetRenderQueue(arg2);
+    
+    
+    return true;
+}
+SE_BIND_FUNC(js_cc_pipeline_RenderPipeline_resetRenderQueue) 
+
+static bool js_cc_pipeline_RenderPipeline_isRenderQueueReset(se::State& s)
+{
+    // js_function
+    
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::pipeline::RenderPipeline *arg1 = (cc::pipeline::RenderPipeline *) NULL ;
+    bool result;
+    
+    if(argc != 0) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 0);
+        return false;
+    }
+    arg1 = SE_THIS_OBJECT<cc::pipeline::RenderPipeline>(s);
+    SE_PRECONDITION2(arg1, false, "%s: Invalid Native Object", __FUNCTION__); 
+    result = (bool)((cc::pipeline::RenderPipeline const *)arg1)->isRenderQueueReset();
+    // out 5
+    ok &= nativevalue_to_se(result, s.rval(), s.thisObject() /*ctx*/);
+    
+    
+    return true;
+}
+SE_BIND_FUNC(js_cc_pipeline_RenderPipeline_isRenderQueueReset) 
+
 static bool js_cc_pipeline_RenderPipeline_globalDSManager_get(se::State& s)
 {
     CC_UNUSED bool ok = true;
@@ -8254,6 +8341,8 @@ bool js_register_cc_pipeline_RenderPipeline(se::Object* obj) {
     cls->defineFunction("updateQuadVertexData", _SE(js_cc_pipeline_RenderPipeline_updateQuadVertexData)); 
     cls->defineFunction("ensureEnoughSize", _SE(js_cc_pipeline_RenderPipeline_ensureEnoughSize)); 
     cls->defineFunction("createQuadInputAssembler", _SE(js_cc_pipeline_RenderPipeline_createQuadInputAssembler)); 
+    cls->defineFunction("resetRenderQueue", _SE(js_cc_pipeline_RenderPipeline_resetRenderQueue)); 
+    cls->defineFunction("isRenderQueueReset", _SE(js_cc_pipeline_RenderPipeline_isRenderQueueReset)); 
     
     
     cls->defineStaticFunction("getInstance", _SE(js_cc_pipeline_RenderPipeline_getInstance_static)); 
@@ -21480,4 +21569,12 @@ bool register_all_pipeline(se::Object* obj) {
     return true;
 }
 
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__) || defined(__GNUG__)
+#pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 // clang-format on

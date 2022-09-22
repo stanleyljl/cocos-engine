@@ -23,19 +23,19 @@
 import { ccclass, visible, type, displayOrder, readOnly, slide, range, rangeStep,
     editable, serializable, rangeMin, tooltip, formerlySerializedAs, displayName } from 'cc.decorator';
 import { BAIDU } from 'internal:constants';
-import { TextureCube } from '../assets/texture-cube';
+import { TextureCube } from '../../asset/assets/texture-cube';
 import { CCFloat, CCInteger } from '../data/utils/attribute';
 import { Color, Quat, Vec3, Vec2, Vec4 } from '../math';
-import { Ambient } from '../renderer/scene/ambient';
-import { Shadows, ShadowType, ShadowSize } from '../renderer/scene/shadows';
-import { Skybox, EnvironmentLightingType } from '../renderer/scene/skybox';
-import { Octree } from '../renderer/scene/octree';
-import { Fog, FogType } from '../renderer/scene/fog';
+import { Ambient } from '../../render-scene/scene/ambient';
+import { Shadows, ShadowType, ShadowSize } from '../../render-scene/scene/shadows';
+import { Skybox, EnvironmentLightingType } from '../../render-scene/scene/skybox';
+import { Octree } from '../../render-scene/scene/octree';
+import { Fog, FogType } from '../../render-scene/scene/fog';
 import { Node } from './node';
 import { legacyCC } from '../global-exports';
 import { Root } from '../root';
 import { warnID } from '../platform/debug';
-import { Material } from '../assets/material';
+import { Material } from '../../asset/assets/material';
 
 const _up = new Vec3(0, 1, 0);
 const _v3 = new Vec3();
@@ -410,6 +410,23 @@ export class SkyboxInfo {
     }
 
     /**
+     * @en Rotate the skybox
+     * @zh 旋转天空盒
+     */
+    @type(CCFloat)
+    @range([0, 360])
+    @rangeStep(1)
+    @slide
+    @tooltip('i18n:skybox.rotationAngle')
+    set rotationAngle (val: number) {
+        this._rotationAngle = val;
+        if (this._resource) { this._resource.setRotationAngle(this._rotationAngle); }
+    }
+    get rotationAngle () {
+        return this._rotationAngle;
+    }
+
+    /**
      * @en The optional diffusion convolution map used in tandem with IBL
      * @zh 使用的漫反射卷积图
      */
@@ -523,6 +540,8 @@ export class SkyboxInfo {
     @serializable
     @type(TextureCube)
     protected _reflectionLDR: TextureCube | null = null;
+    @serializable
+    protected _rotationAngle = 0;
 
     protected _resource: Skybox | null = null;
 
@@ -539,6 +558,7 @@ export class SkyboxInfo {
         this._resource.setDiffuseMaps(this._diffuseMapHDR, this._diffuseMapLDR);
         this._resource.setSkyboxMaterial(this._editableMaterial);
         this._resource.setReflectionMaps(this._reflectionHDR, this._reflectionLDR);
+        this._resource.setRotationAngle(this._rotationAngle);
         this._resource.activate(); // update global DS first
     }
 }

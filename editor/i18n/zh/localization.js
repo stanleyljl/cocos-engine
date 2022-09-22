@@ -896,9 +896,17 @@ module.exports = {
             label: "Marionette 动画系统",
             description: "启用 Marionette 动画系统。",
         },
+        xr: {
+            label: "XR",
+            description: "启用 XR 功能系统。",
+        },
         custom_pipeline: {
             label: "自定义渲染管线（实验）",
             description: "启用自定义渲染管线。",
+        },
+        websocket_server: {
+            label: "WebSocket Server",
+            description: "对原生启用 WebSocket Server。",
         },
     },
     renderable_2d: {

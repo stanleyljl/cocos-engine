@@ -29,6 +29,7 @@
 #include "cocos/bindings/jswrapper/SeApi.h"
 #include "cocos/bindings/manual/jsb_global_init.h"
 #include "cocos/platform/interfaces/modules/ISystemWindow.h"
+#include "cocos/platform/interfaces/modules/ISystemWindowManager.h"
 
 namespace {
 se::Value tickVal;
@@ -37,6 +38,7 @@ ccstd::vector<se::Object *> jsTouchObjPool;
 se::Object *jsTouchObjArray = nullptr;
 se::Object *jsMouseEventObj = nullptr;
 se::Object *jsKeyboardEventObj = nullptr;
+se::Object *jsControllerEventArray = nullptr;
 se::Object *jsResizeEventObj = nullptr;
 se::Object *jsOrientationEventObj = nullptr;
 bool inited = false;
@@ -48,7 +50,7 @@ uint32_t EventDispatcher::hashListenerId = 1;
 
 bool EventDispatcher::initialized() {
     return inited && se::ScriptEngine::getInstance()->isValid();
-};
+}
 
 void EventDispatcher::init() {
     inited = true;
@@ -70,6 +72,12 @@ void EventDispatcher::destroy() {
         jsTouchObjArray->unroot();
         jsTouchObjArray->decRef();
         jsTouchObjArray = nullptr;
+    }
+
+    if (jsControllerEventArray != nullptr) {
+        jsControllerEventArray->unroot();
+        jsControllerEventArray->decRef();
+        jsControllerEventArray = nullptr;
     }
 
     if (jsMouseEventObj != nullptr) {
@@ -149,6 +157,7 @@ void EventDispatcher::dispatchTouchEvent(const TouchEvent &touchEvent) {
 
     se::ValueArray args;
     args.emplace_back(se::Value(jsTouchObjArray));
+    args.emplace_back(se::Value(touchEvent.windowId));
     EventDispatcher::doDispatchJsEvent(eventName, args);
     EventDispatcher::dispatchCustomEvent(eventName, 0);
 }
@@ -174,6 +183,8 @@ void EventDispatcher::dispatchMouseEvent(const MouseEvent &mouseEvent) {
         jsMouseEventObj->setProperty("x", xVal);
         jsMouseEventObj->setProperty("y", yVal);
     }
+
+    jsMouseEventObj->setProperty("windowId", se::Value(mouseEvent.windowId));
 
     const char *eventName = nullptr;
     const char *jsFunctionName = nullptr;
@@ -232,8 +243,60 @@ void EventDispatcher::dispatchKeyboardEvent(const KeyboardEvent &keyboardEvent) 
     jsKeyboardEventObj->setProperty("shiftKey", se::Value(keyboardEvent.shiftKeyActive));
     jsKeyboardEventObj->setProperty("repeat", se::Value(keyboardEvent.action == KeyboardEvent::Action::REPEAT));
     jsKeyboardEventObj->setProperty("keyCode", se::Value(keyboardEvent.key));
+    jsKeyboardEventObj->setProperty("windowId", se::Value(keyboardEvent.windowId));
+
     se::ValueArray args;
     args.emplace_back(se::Value(jsKeyboardEventObj));
+    EventDispatcher::doDispatchJsEvent(eventName, args);
+}
+
+void EventDispatcher::dispatchControllerEvent(const ControllerEvent &controllerEvent) {
+    se::AutoHandleScope scope;
+    if (!jsControllerEventArray) {
+        jsControllerEventArray = se::Object::createArrayObject(0);
+        jsControllerEventArray->root();
+    }
+
+    const char *eventName = "onControllerInput";
+    if (controllerEvent.type == ControllerEvent::Type::HANDLE) {
+        eventName = "onHandleInput";
+    }
+    uint32_t controllerIndex = 0;
+    jsControllerEventArray->setProperty("length", se::Value(static_cast<uint32_t>(controllerEvent.controllerInfos.size())));
+
+    for (const auto &controller : controllerEvent.controllerInfos) {
+        se::HandleObject jsController{se::Object::createPlainObject()};
+        jsController->setProperty("id", se::Value(controller->napdId));
+
+        se::HandleObject jsButtonInfoList{se::Object::createArrayObject(static_cast<uint32_t>(controller->buttonInfos.size()))};
+
+        uint32_t buttonIndex = 0;
+        for (const auto &buttonInfo : controller->buttonInfos) {
+            se::HandleObject jsButtonInfo{se::Object::createPlainObject()};
+            jsButtonInfo->setProperty("code", se::Value(static_cast<uint32_t>(buttonInfo.key)));
+            jsButtonInfo->setProperty("isPressed", se::Value(static_cast<uint32_t>(buttonInfo.isPress)));
+            jsButtonInfoList->setArrayElement(buttonIndex, se::Value(jsButtonInfo));
+            buttonIndex++;
+        }
+
+        se::HandleObject jsAxisInfoList{se::Object::createArrayObject(static_cast<uint32_t>(controller->axisInfos.size()))};
+
+        uint32_t axisIndex = 0;
+        for (const auto &axisInfo : controller->axisInfos) {
+            se::HandleObject jsAxisInfo{se::Object::createPlainObject()};
+            jsAxisInfo->setProperty("code", se::Value(static_cast<uint32_t>(axisInfo.axis)));
+            jsAxisInfo->setProperty("value", se::Value(axisInfo.value));
+            jsAxisInfoList->setArrayElement(axisIndex, se::Value(jsAxisInfo));
+            axisIndex++;
+        }
+        jsController->setProperty("axisInfoList", se::Value(jsAxisInfoList));
+        jsController->setProperty("buttonInfoList", se::Value(jsButtonInfoList));
+
+        jsControllerEventArray->setArrayElement(controllerIndex, se::Value(jsController));
+        controllerIndex++;
+    }
+    se::ValueArray args;
+    args.emplace_back(se::Value(jsControllerEventArray));
     EventDispatcher::doDispatchJsEvent(eventName, args);
 }
 
@@ -267,6 +330,23 @@ void EventDispatcher::dispatchResizeEvent(int width, int height) {
 
     jsResizeEventObj->setProperty("width", se::Value(width));
     jsResizeEventObj->setProperty("height", se::Value(height));
+
+    se::ValueArray args;
+    args.emplace_back(se::Value(jsResizeEventObj));
+    EventDispatcher::doDispatchJsEvent("onResize", args);
+    EventDispatcher::dispatchCustomEvent(EVENT_RESIZE, 0);
+}
+
+void EventDispatcher::dispatchResizeEvent(const WindowEvent &windowEvent) {
+    se::AutoHandleScope scope;
+    if (!jsResizeEventObj) {
+        jsResizeEventObj = se::Object::createPlainObject();
+        jsResizeEventObj->root();
+    }
+
+    jsResizeEventObj->setProperty("windowId", se::Value(windowEvent.windowId));
+    jsResizeEventObj->setProperty("width", se::Value(windowEvent.width));
+    jsResizeEventObj->setProperty("height", se::Value(windowEvent.height));
 
     se::ValueArray args;
     args.emplace_back(se::Value(jsResizeEventObj));
@@ -326,8 +406,17 @@ void EventDispatcher::dispatchCloseEvent() {
 void EventDispatcher::dispatchDestroyWindowEvent() {
 #if CC_PLATFORM == CC_PLATFORM_WINDOWS
     EventDispatcher::dispatchCustomEvent(EVENT_DESTROY_WINDOW, 1,
-                                         reinterpret_cast<void *>(CC_GET_PLATFORM_INTERFACE(ISystemWindow)->getWindowHandle()));
+                                         reinterpret_cast<void *>(CC_GET_MAIN_SYSTEM_WINDOW()->getWindowHandle()));
 #else
+    EventDispatcher::dispatchCustomEvent(EVENT_DESTROY_WINDOW, 0);
+#endif
+}
+
+void EventDispatcher::dispatchDestroyWindowEvent(cc::ISystemWindow *window) {
+#if CC_PLATFORM == CC_PLATFORM_WINDOWS
+    EventDispatcher::dispatchCustomEvent(EVENT_DESTROY_WINDOW, 1, reinterpret_cast<void *>(window->getWindowHandle()));
+#else
+    CC_UNUSED_PARAM(window);
     EventDispatcher::dispatchCustomEvent(EVENT_DESTROY_WINDOW, 0);
 #endif
 }
@@ -335,8 +424,18 @@ void EventDispatcher::dispatchDestroyWindowEvent() {
 void EventDispatcher::dispatchRecreateWindowEvent() {
 #if CC_PLATFORM == CC_PLATFORM_WINDOWS
     EventDispatcher::dispatchCustomEvent(EVENT_RECREATE_WINDOW, 1,
-                                         reinterpret_cast<void *>(CC_GET_PLATFORM_INTERFACE(ISystemWindow)->getWindowHandle()));
+                                         reinterpret_cast<void *>(CC_GET_MAIN_SYSTEM_WINDOW()->getWindowHandle()));
 #else
+    EventDispatcher::dispatchCustomEvent(EVENT_RECREATE_WINDOW, 0);
+#endif
+}
+
+void EventDispatcher::dispatchRecreateWindowEvent(cc::ISystemWindow *window) {
+#if CC_PLATFORM == CC_PLATFORM_WINDOWS
+    auto windowId = static_cast<uintptr_t>(window->getWindowId());
+    EventDispatcher::dispatchCustomEvent(EVENT_RECREATE_WINDOW, 1, reinterpret_cast<void *>(windowId));
+#else
+    CC_UNUSED_PARAM(window);
     EventDispatcher::dispatchCustomEvent(EVENT_RECREATE_WINDOW, 0);
 #endif
 }

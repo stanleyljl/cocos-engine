@@ -53,8 +53,6 @@
 %ignore cc::UIMeshBuffer::setIndexOffset;
 %ignore cc::UIMeshBuffer::getDirty;
 %ignore cc::UIMeshBuffer::setDirty;
-%ignore cc::UIMeshBuffer::getFloatsPerVertex;
-%ignore cc::UIMeshBuffer::setFloatsPerVertex;
 %ignore cc::UIMeshBuffer::getAttributes;
 
 %ignore cc::RenderDrawInfo::getBatcher;
@@ -168,7 +166,6 @@
 %import "core/data/Object.h"
 %import "core/assets/Asset.h"
 %import "core/assets/Material.h"
-%import "core/scene-graph/BaseNode.h"
 %import "core/scene-graph/Node.h"
 
 %import "2d/renderer/StencilManager.h"

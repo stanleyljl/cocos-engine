@@ -84,7 +84,7 @@ public:
     virtual pipeline::GlobalDSManager *getGlobalDSManager() const = 0;
     virtual gfx::DescriptorSetLayout *getDescriptorSetLayout() const = 0;
     virtual gfx::DescriptorSet *getDescriptorSet() const = 0;
-    virtual ccstd::vector<gfx::CommandBuffer*> getCommandBuffers() const = 0;
+    virtual const ccstd::vector<gfx::CommandBuffer*>& getCommandBuffers() const = 0;
     virtual pipeline::PipelineSceneData *getPipelineSceneData() const = 0;
     virtual const ccstd::string &getConstantMacros() const = 0;
     virtual scene::Model *getProfiler() const = 0;
@@ -108,6 +108,9 @@ public:
     virtual void setValue(const ccstd::string& name, bool value) = 0;
 
     virtual bool isOcclusionQueryEnabled() const = 0;
+
+    virtual void resetRenderQueue(bool reset) = 0;
+    virtual bool isRenderQueueReset() const = 0;
 };
 
 class Setter {
@@ -140,10 +143,10 @@ public:
     virtual void addSceneOfCamera(scene::Camera* camera, LightInfo light, SceneFlags sceneFlags, const ccstd::string& name) = 0;
     virtual void addSceneOfCamera(scene::Camera* camera, LightInfo light, SceneFlags sceneFlags) = 0;
     virtual void addScene(const ccstd::string& name, SceneFlags sceneFlags) = 0;
-    virtual void addFullscreenQuad(cc::Material *material, SceneFlags sceneFlags, const ccstd::string& name) = 0;
-    virtual void addFullscreenQuad(cc::Material *material, SceneFlags sceneFlags) = 0;
-    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, SceneFlags sceneFlags, const ccstd::string& name) = 0;
-    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, SceneFlags sceneFlags) = 0;
+    virtual void addFullscreenQuad(cc::Material *material, uint32_t passID, SceneFlags sceneFlags, const ccstd::string& name) = 0;
+    virtual void addFullscreenQuad(cc::Material *material, uint32_t passID, SceneFlags sceneFlags) = 0;
+    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, uint32_t passID, SceneFlags sceneFlags, const ccstd::string& name) = 0;
+    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, uint32_t passID, SceneFlags sceneFlags) = 0;
     virtual void clearRenderTarget(const ccstd::string &name, const gfx::Color &color) = 0;
     virtual void setViewport(const gfx::Viewport &viewport) = 0;
 };
@@ -156,10 +159,10 @@ public:
     virtual void addComputeView(const ccstd::string& name, const ComputeView& view) = 0;
     virtual RasterQueueBuilder *addQueue(QueueHint hint, const ccstd::string& name) = 0;
     virtual RasterQueueBuilder *addQueue(QueueHint hint) = 0;
-    virtual void addFullscreenQuad(cc::Material *material, SceneFlags sceneFlags, const ccstd::string& name) = 0;
-    virtual void addFullscreenQuad(cc::Material *material, SceneFlags sceneFlags) = 0;
-    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, SceneFlags sceneFlags, const ccstd::string& name) = 0;
-    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, SceneFlags sceneFlags) = 0;
+    virtual void addFullscreenQuad(cc::Material *material, uint32_t passID, SceneFlags sceneFlags, const ccstd::string& name) = 0;
+    virtual void addFullscreenQuad(cc::Material *material, uint32_t passID, SceneFlags sceneFlags) = 0;
+    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, uint32_t passID, SceneFlags sceneFlags, const ccstd::string& name) = 0;
+    virtual void addCameraQuad(scene::Camera* camera, cc::Material *material, uint32_t passID, SceneFlags sceneFlags) = 0;
     virtual void setViewport(const gfx::Viewport &viewport) = 0;
 };
 

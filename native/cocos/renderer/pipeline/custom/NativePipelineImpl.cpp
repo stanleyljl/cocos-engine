@@ -305,8 +305,8 @@ gfx::DescriptorSet *NativePipeline::getDescriptorSet() const {
     return globalDSManager->getGlobalDescriptorSet();
 }
 
-ccstd::vector<gfx::CommandBuffer *> NativePipeline::getCommandBuffers() const {
-    return ccstd::vector<gfx::CommandBuffer *>(1, device->getCommandBuffer());
+const ccstd::vector<gfx::CommandBuffer *> &NativePipeline::getCommandBuffers() const {
+    return _commandBuffers;
 }
 
 namespace {
@@ -348,6 +348,7 @@ bool NativePipeline::activate(gfx::Swapchain *swapchainIn) {
     // pipeline construct.
     generateConstantMacros(device, constantMacros, false);
 
+    _commandBuffers.resize(1, device->getCommandBuffer());
     return true;
 }
 
@@ -568,6 +569,14 @@ void NativePipeline::setValue(const ccstd::string &name, bool value) {
 
 bool NativePipeline::isOcclusionQueryEnabled() const {
     return false;
+}
+
+void NativePipeline::resetRenderQueue(bool reset) {
+    // noop
+}
+
+bool NativePipeline::isRenderQueueReset() const {
+    return true;
 }
 
 } // namespace render

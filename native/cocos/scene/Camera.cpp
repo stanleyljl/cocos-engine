@@ -33,6 +33,8 @@
 #if CC_USE_GEOMETRY_RENDERER
     #include "renderer/pipeline/GeometryRenderer.h"
 #endif
+#include "application/ApplicationManager.h"
+#include "platform/interfaces/modules/IXRInterface.h"
 
 namespace cc {
 namespace scene {
@@ -81,11 +83,14 @@ Camera::Camera(gfx::Device *device)
         assignMat4(correctionMatrices[static_cast<int>(gfx::SurfaceTransform::ROTATE_180)], -1, 0, 0, 0, 0, -ySign);
         assignMat4(correctionMatrices[static_cast<int>(gfx::SurfaceTransform::ROTATE_270)], 0, -1, 0, 0, ySign, 0);
     }
+    _xr = CC_GET_XR_INTERFACE();
 }
 
 Camera::~Camera() = default;
 
 bool Camera::initialize(const ICameraInfo &info) {
+    _trackingType = info.trackingType;
+    _cameraType = info.cameraType;
     _node = info.node;
     _width = 1.F;
     _height = 1.F;
@@ -174,6 +179,9 @@ void Camera::update(bool forceUpdate /*false*/) {
     // projection matrix
     auto *swapchain = _window->getSwapchain();
     const auto &orientation = swapchain ? swapchain->getSurfaceTransform() : gfx::SurfaceTransform::IDENTITY;
+    if (swapchain) {
+        _systemWindowId = swapchain->getWindowId();
+    }
 
     if (_isProjDirty || _curTransform != orientation) {
         _curTransform = orientation;
@@ -194,6 +202,17 @@ void Camera::update(bool forceUpdate /*false*/) {
         _isProjDirty = false;
     }
 
+    if (_xr) {
+        xr::XREye wndXREye = _xr->getXREyeByRenderWindow(_window);
+        if (wndXREye != xr::XREye::NONE && _proj == CameraProjection::PERSPECTIVE && _xr->getXRConfig(xr::XRConfigKey::SESSION_RUNNING).getBool()) {
+            // xr flow
+            const auto &projFloat = _xr->getXRViewProjectionData(static_cast<uint32_t>(wndXREye), _nearClip, _farClip);
+            std::memcpy(_matProj.m, projFloat.data(), sizeof(float) * 16);
+            _matProjInv = _matProj.getInversed();
+            viewProjDirty = true;
+        }
+    }
+
     // view-projection
     if (viewProjDirty) {
         Mat4::multiply(_matProj, _matView, &_matViewProj);
@@ -201,6 +220,7 @@ void Camera::update(bool forceUpdate /*false*/) {
         _frustum->update(_matViewProj, _matViewProjInv);
     }
 }
+
 void Camera::changeTargetWindow(RenderWindow *window) {
     if (_window) {
         _window->detachCamera(this);
@@ -217,6 +237,10 @@ void Camera::changeTargetWindow(RenderWindow *window) {
             resize(win->getHeight(), win->getWidth());
         } else {
             resize(win->getWidth(), win->getHeight());
+        }
+
+        if (swapchain) {
+            _systemWindowId = swapchain->getWindowId();
         }
     }
 }
