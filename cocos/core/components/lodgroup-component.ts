@@ -178,10 +178,36 @@ export class LODGroup extends Component {
 
     onEnable () {
         this._attachToScene();
+
+        if (EDITOR) {
+            // Detach all mesh renderers from scene
+            const scene = this._getRenderScene();
+            if (scene) {
+                for (const lod of this._LODs) {
+                    for (let j = 0; j < lod.rendererCount; ++j) {
+                        const renderer = lod.getRenderer(j);
+                        if (renderer && renderer.model && renderer.enabled) { scene.removeModel(renderer.model); }
+                    }
+                }
+            }
+        }
     }
 
     onDisable () {
         this._detachFromScene();
+
+        if (EDITOR) {
+            // Detach all mesh renderers from scene
+            const scene = this._getRenderScene();
+            if (scene) {
+                for (const lod of this._LODs) {
+                    for (let j = 0; j < lod.rendererCount; ++j) {
+                        const renderer = lod.getRenderer(j);
+                        if (renderer && renderer.model && renderer.enabled) { scene.addModel(renderer.model); }
+                    }
+                }
+            }
+        }
     }
 
     onDestroy () {
@@ -207,8 +233,8 @@ export class LODGroup extends Component {
             lod.insertRenderer(-1, renderer);
             this.insertLOD(-1, lod);
 
-            const renderScene = renderer._getRenderScene();
-            if (renderScene && renderer.model) renderScene.removeModel(renderer.model);
+            // const renderScene = renderer._getRenderScene();
+            // if (renderScene && renderer.model) renderScene.removeModel(renderer.model);
 
             ++levelCount;
         }
