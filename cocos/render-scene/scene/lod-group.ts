@@ -23,13 +23,13 @@
  THE SOFTWARE.
  */
 import { Model } from './model';
-import { Vec3, Mat4 } from '../../math';
+import { Vec3, Mat4 } from '../../core/math';
 import { RenderScene } from '..';
 import { Device, deviceManager } from '../../gfx';
-import { AABB } from '../../geometry';
-import { Node, Layers } from '../../scene-graph';
+import { AABB } from '../../core/geometry';
+import { Node, Layers } from '../../core/scene-graph';
 import { Camera, CameraProjection } from './camera';
-import { assertIsTrue } from '../../data/utils/asserts';
+import { assertIsTrue } from '../../core/data/utils/asserts';
 
 export class LOD {
     screenRelativeTransitionHeight = 1;

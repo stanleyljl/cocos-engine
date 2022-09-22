@@ -26,14 +26,13 @@
 import { EDITOR } from 'internal:constants';
 import { ccclass, executeInEditMode, menu, serializable } from 'cc.decorator';
 import { Component, Renderer, Vec3, Vec4, Mat4, Node } from '..';
-import { scene } from '../renderer';
-import { Camera, CameraProjection, Model } from '../renderer/scene';
+import { Camera, CameraProjection, Model } from '../../render-scene/scene';
 import { Layers } from '../scene-graph/layers';
 import { ModelRenderer } from './model-renderer';
 import { Mesh, MeshRenderer } from '../../3d';
-import { retry } from '../asset-manager/utilities';
 import { AABB } from '../geometry';
 import { assertIsTrue } from '../data/utils/asserts';
+import { scene } from '../../render-scene';
 
 export class LOD {
     // The relative minimum transition height in screen space.
