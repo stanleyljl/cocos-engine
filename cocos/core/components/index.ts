@@ -34,3 +34,4 @@ export { ModelRenderer } from './model-renderer';
 export { Renderer } from './renderer';
 /** deprecated */
 export * from './deprecated';
+export { LOD, LODGroup, LODGroupEditorUtility } from './lodgroup-component';
