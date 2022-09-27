@@ -100,6 +100,7 @@ public:
     void updateWorldBoundsForJSSkinningModel(const Vec3 &min, const Vec3 &max);
     void updateWorldBoundsForJSBakedSkinningModel(geometry::AABB *aabb);
     void updateLightingmap(Texture2D *texture, const Vec4 &uvParam);
+    void updateSHUBOs();
     void updateOctree();
     void updateWorldBoundUBOs();
     void updateLocalShadowBias();
@@ -113,6 +114,7 @@ public:
     inline void setEnabled(bool value) { _enabled = value; }
     inline void setInstMatWorldIdx(int32_t idx) { _instMatWorldIdx = idx; }
     inline void setLocalBuffer(gfx::Buffer *buffer) { _localBuffer = buffer; }
+    inline void setLocalSHBuffer(gfx::Buffer *buffer) { _localSHBuffer = buffer; }
     inline void setWorldBoundBuffer(gfx::Buffer *buffer) { _worldBoundBuffer = buffer; }
 
     inline void setNode(Node *node) { _node = node; }
@@ -144,13 +146,17 @@ public:
     inline bool isEnabled() const { return _enabled; }
     inline bool isInstancingEnabled() const { return _instMatWorldIdx >= 0; };
     inline int32_t getInstMatWorldIdx() const { return _instMatWorldIdx; }
+    inline int32_t getTetrahedronIndex() const { return _tetrahedronIndex; }
+    inline void setTetrahedronIndex(int32_t index) { _tetrahedronIndex = index; }
     inline const ccstd::vector<gfx::Attribute> &getInstanceAttributes() const { return _instanceAttributeBlock.attributes; }
     inline InstancedAttributeBlock &getInstancedAttributeBlock() { return _instanceAttributeBlock; }
     inline const uint8_t *getInstancedBuffer() const { return _instanceAttributeBlock.buffer.buffer()->getData(); }
     inline uint32_t getInstancedBufferSize() const { return _instanceAttributeBlock.buffer.length(); }
     inline gfx::Buffer *getLocalBuffer() const { return _localBuffer.get(); }
+    inline gfx::Buffer *getLocalSHBuffer() const { return _localSHBuffer.get(); }
     inline gfx::Buffer *getWorldBoundBuffer() const { return _worldBoundBuffer.get(); }
     inline Float32Array getLocalData() const { return _localData; }
+    inline Float32Array getLocalSHData() const { return _localSHData; }
     inline geometry::AABB *getModelBounds() const { return _modelBounds; }
     inline Node *getNode() const { return _node.get(); }
     inline bool isReceiveShadow() const { return _receiveShadow; }
@@ -192,6 +198,7 @@ protected:
 
     InstancedAttributeBlock _instanceAttributeBlock;
     Float32Array _localData;
+    Float32Array _localSHData;
     ccstd::vector<IntrusivePtr<SubModel>> _subModels;
 
     // For JS
@@ -208,6 +215,7 @@ protected:
     IntrusivePtr<Node> _transform;
     IntrusivePtr<Node> _node;
     IntrusivePtr<gfx::Buffer> _localBuffer;
+    IntrusivePtr<gfx::Buffer> _localSHBuffer;
     IntrusivePtr<gfx::Buffer> _worldBoundBuffer;
     IntrusivePtr<geometry::AABB> _worldBounds;
     IntrusivePtr<geometry::AABB> _modelBounds;
@@ -220,6 +228,7 @@ protected:
     uint32_t _priority{0};
     uint32_t _updateStamp{0};
     int32_t _instMatWorldIdx{-1};
+    int32_t _tetrahedronIndex{0};
 
     bool _enabled{false};
     bool _castShadow{false};
