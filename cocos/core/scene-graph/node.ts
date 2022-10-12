@@ -623,6 +623,7 @@ export class Node extends BaseNode implements CustomSerializable {
                 cur._dirtyFlags |= dirtyBit;
 
                 cur.hasChangedFlags = hasChangedFlags | dirtyBit;
+                cur.emit(NodeEventType.ANCESTOR_TRANSFORM_CHANGED, dirtyBit);
 
                 children = cur._children;
                 l = children.length;
