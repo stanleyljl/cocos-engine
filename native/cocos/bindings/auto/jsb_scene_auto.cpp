@@ -1725,6 +1725,34 @@ static bool js_scene_Node_set__parent(se::State& s) // NOLINT(readability-identi
 }
 SE_BIND_PROP_SET(js_scene_Node_set__parent)
 
+static bool js_scene_Node_get__mobility(se::State& s) // NOLINT(readability-identifier-naming)
+{
+    auto* cobj = SE_THIS_OBJECT<cc::Node>(s);
+    // SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+    if (nullptr == cobj) return true;
+
+    CC_UNUSED bool ok = true;
+    se::Value jsret;
+    ok &= nativevalue_to_se(cobj->_mobility, jsret, s.thisObject() /*ctx*/);
+    s.rval() = jsret;
+    SE_HOLD_RETURN_VALUE(cobj->_mobility, s.thisObject(), s.rval());
+    return true;
+}
+SE_BIND_PROP_GET(js_scene_Node_get__mobility)
+
+static bool js_scene_Node_set__mobility(se::State& s) // NOLINT(readability-identifier-naming)
+{
+    const auto& args = s.args();
+    auto* cobj = SE_THIS_OBJECT<cc::Node>(s);
+    SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+
+    CC_UNUSED bool ok = true;
+    ok &= sevalue_to_native(args[0], &cobj->_mobility, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing new value");
+    return true;
+}
+SE_BIND_PROP_SET(js_scene_Node_set__mobility)
+
 SE_DECLARE_FINALIZE_FUNC(js_cc_Node_finalize)
 
 static bool js_scene_Node_constructor(se::State& s) // NOLINT(readability-identifier-naming) constructor_overloaded.c
@@ -1769,6 +1797,7 @@ bool js_register_scene_Node(se::Object* obj) // NOLINT(readability-identifier-na
 #endif
     cls->defineProperty("_id", _SE(js_scene_Node_get__id), _SE(js_scene_Node_set__id));
     cls->defineProperty("_parentInternal", _SE(js_scene_Node_get__parent), _SE(js_scene_Node_set__parent));
+    cls->defineProperty("_mobility", _SE(js_scene_Node_get__mobility), _SE(js_scene_Node_set__mobility));
     cls->defineProperty("uuid", _SE(js_scene_Node_getUuid_asGetter), nullptr);
     cls->defineProperty("angle", _SE(js_scene_Node_getAngle_asGetter), _SE(js_scene_Node_setAngle_asSetter));
     cls->defineProperty("matrix", nullptr, _SE(js_scene_Node_setMatrix_asSetter));
