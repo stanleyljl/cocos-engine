@@ -627,6 +627,7 @@ void Node::invalidateChildren(TransformBit dirtyBit) {
         if (cur->isValid() && (cur->getDirtyFlag() & hasChangedFlags & curDirtyBit) != curDirtyBit) {
             cur->setDirtyFlag(cur->getDirtyFlag() | curDirtyBit);
             cur->setChangedFlags(hasChangedFlags | curDirtyBit);
+            cur->emit(NodeEventType::ANCESTOR_TRANSFORM_CHANGED, dirtyBit);
 
             for (Node *curChild : cur->getChildren()) {
                 setDirtyNode(++i, curChild);

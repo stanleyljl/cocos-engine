@@ -3628,6 +3628,26 @@ static bool js_pipeline_PipelineSceneData_getGeometryRendererShaders(se::State& 
 }
 SE_BIND_FUNC(js_pipeline_PipelineSceneData_getGeometryRendererShaders)
 
+static bool js_pipeline_PipelineSceneData_getLightProbes(se::State& s) // NOLINT(readability-identifier-naming)
+{
+    auto* cobj = SE_THIS_OBJECT<cc::pipeline::PipelineSceneData>(s);
+    // SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+    if (nullptr == cobj) return true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    CC_UNUSED bool ok = true;
+    if (argc == 0) {
+        cc::gi::LightProbes* result = cobj->getLightProbes();
+        ok &= nativevalue_to_se(result, s.rval(), nullptr /*ctx*/);
+        SE_PRECONDITION2(ok, false, "Error processing arguments");
+        SE_HOLD_RETURN_VALUE(result, s.thisObject(), s.rval());
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 0);
+    return false;
+}
+SE_BIND_FUNC_AS_PROP_GET(js_pipeline_PipelineSceneData_getLightProbes)
+
 static bool js_pipeline_PipelineSceneData_getOcclusionQueryInputAssembler(se::State& s) // NOLINT(readability-identifier-naming)
 {
     auto* cobj = SE_THIS_OBJECT<cc::pipeline::PipelineSceneData>(s);
@@ -3915,6 +3935,7 @@ bool js_register_pipeline_PipelineSceneData(se::Object* obj) // NOLINT(readabili
     cls->defineProperty("ambient", _SE(js_pipeline_PipelineSceneData_getAmbient_asGetter), nullptr);
     cls->defineProperty("skybox", _SE(js_pipeline_PipelineSceneData_getSkybox_asGetter), nullptr);
     cls->defineProperty("shadows", _SE(js_pipeline_PipelineSceneData_getShadows_asGetter), nullptr);
+    cls->defineProperty("lightProbes", _SE(js_pipeline_PipelineSceneData_getLightProbes_asGetter), nullptr);
     cls->defineFunction("activate", _SE(js_pipeline_PipelineSceneData_activate));
     cls->defineFunction("addRenderObject", _SE(js_pipeline_PipelineSceneData_addRenderObject));
     cls->defineFunction("addValidPunctualLight", _SE(js_pipeline_PipelineSceneData_addValidPunctualLight));

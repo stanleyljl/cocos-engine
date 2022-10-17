@@ -7,6 +7,7 @@
 #include "cocos/bindings/auto/jsb_gfx_auto.h"
 #include "cocos/bindings/auto/jsb_geometry_auto.h"
 #include "cocos/bindings/auto/jsb_assets_auto.h"
+#include "cocos/bindings/auto/jsb_gi_auto.h"
 #include "cocos/core/data/Object.h"
 #include "cocos/core/scene-graph/Node.h"
 #include "cocos/core/scene-graph/Scene.h"
@@ -170,11 +171,13 @@ bool js_register_cc_SceneGlobals(se::Object *obj); // NOLINT
 SE_DECLARE_FUNC(js_scene_SceneGlobals_activate);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_getAmbientInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_getFogInfo);
+SE_DECLARE_FUNC(js_scene_SceneGlobals_getLightProbeInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_getOctreeInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_getShadowsInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_getSkyboxInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_setAmbientInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_setFogInfo);
+SE_DECLARE_FUNC(js_scene_SceneGlobals_setLightProbeInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_setOctreeInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_setShadowsInfo);
 SE_DECLARE_FUNC(js_scene_SceneGlobals_setSkyboxInfo);
@@ -288,9 +291,13 @@ SE_DECLARE_FUNC(js_scene_Model_getInstancedAttributeIndex);
 SE_DECLARE_FUNC(js_scene_Model_getInstancedBuffer);
 SE_DECLARE_FUNC(js_scene_Model_getInstancedBufferSize);
 SE_DECLARE_FUNC(js_scene_Model_getLocalData);
+SE_DECLARE_FUNC(js_scene_Model_getLocalSHBuffer);
+SE_DECLARE_FUNC(js_scene_Model_getLocalSHData);
 SE_DECLARE_FUNC(js_scene_Model_getMacroPatches);
+SE_DECLARE_FUNC(js_scene_Model_getTetrahedronIndex);
 SE_DECLARE_FUNC(js_scene_Model_initLightingmap);
 SE_DECLARE_FUNC(js_scene_Model_initLocalDescriptors);
+SE_DECLARE_FUNC(js_scene_Model_initLocalSHDescriptors);
 SE_DECLARE_FUNC(js_scene_Model_initSubModel);
 SE_DECLARE_FUNC(js_scene_Model_initWorldBoundDescriptors);
 SE_DECLARE_FUNC(js_scene_Model_initialize);
@@ -303,12 +310,17 @@ SE_DECLARE_FUNC(js_scene_Model_setCalledFromJS);
 SE_DECLARE_FUNC(js_scene_Model_setInstMatWorldIdx);
 SE_DECLARE_FUNC(js_scene_Model_setInstancedAttribute);
 SE_DECLARE_FUNC(js_scene_Model_setInstancedAttributesViewData);
+SE_DECLARE_FUNC(js_scene_Model_setLocalSHBuffer);
 SE_DECLARE_FUNC(js_scene_Model_setSubModelMaterial);
 SE_DECLARE_FUNC(js_scene_Model_setSubModelMesh);
+SE_DECLARE_FUNC(js_scene_Model_setTetrahedronIndex);
+SE_DECLARE_FUNC(js_scene_Model_showTetrahedron);
 SE_DECLARE_FUNC(js_scene_Model_updateInstancedAttributes);
 SE_DECLARE_FUNC(js_scene_Model_updateLightingmap);
 SE_DECLARE_FUNC(js_scene_Model_updateLocalDescriptors);
+SE_DECLARE_FUNC(js_scene_Model_updateLocalSHDescriptors);
 SE_DECLARE_FUNC(js_scene_Model_updateLocalShadowBias);
+SE_DECLARE_FUNC(js_scene_Model_updateSHUBOs);
 SE_DECLARE_FUNC(js_scene_Model_updateTransform);
 SE_DECLARE_FUNC(js_scene_Model_updateUBOs);
 SE_DECLARE_FUNC(js_scene_Model_updateWorldBound);

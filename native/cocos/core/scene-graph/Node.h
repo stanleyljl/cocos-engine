@@ -504,6 +504,7 @@ public:
 
     inline void setMobility(MobilityMode m) {
         _mobility = m;
+        emit(NodeEventType::MOBILITY_CHANGED);
     }
 
     /**
