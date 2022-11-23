@@ -36,12 +36,27 @@
 #pragma once
 #include "bindings/jswrapper/SeApi.h"
 #include "bindings/manual/jsb_conversions.h"
+#include "gi/light-probe/AutoPlacement.h"
 #include "gi/light-probe/Delaunay.h"
 #include "gi/light-probe/LightProbe.h"
 
 
 
 bool register_all_gi(se::Object* obj);
+
+
+JSB_REGISTER_OBJECT_TYPE(cc::gi::PlacementInfo);
+extern se::Object *__jsb_cc_gi_PlacementInfo_proto; // NOLINT
+extern se::Class * __jsb_cc_gi_PlacementInfo_class; // NOLINT
+
+
+template<>
+bool sevalue_to_native(const se::Value &from, cc::gi::PlacementInfo * to, se::Object *ctx);
+
+
+JSB_REGISTER_OBJECT_TYPE(cc::gi::AutoPlacement);
+extern se::Object *__jsb_cc_gi_AutoPlacement_proto; // NOLINT
+extern se::Class * __jsb_cc_gi_AutoPlacement_class; // NOLINT
 
 
 JSB_REGISTER_OBJECT_TYPE(cc::gi::Vertex);

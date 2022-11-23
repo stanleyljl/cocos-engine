@@ -26,11 +26,13 @@
 
 #include "AutoPlacement.h"
 #include "base/Macros.h"
+#include "base/Log.h"
 
 namespace cc {
 namespace gi {
 
 ccstd::vector<Vec3> AutoPlacement::generate(const PlacementInfo &info) {
+    CC_LOG_ERROR("stanley c++ AutoPlacement");
     switch (info.method) {
         case PlaceMethod::UNIFORM:
             return doGenerateUniform(info);

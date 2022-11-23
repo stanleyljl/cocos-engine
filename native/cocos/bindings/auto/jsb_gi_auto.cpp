@@ -138,6 +138,403 @@ using namespace cc::gi;
   
 
 
+se::Class* __jsb_cc_gi_PlacementInfo_class = nullptr;
+se::Object* __jsb_cc_gi_PlacementInfo_proto = nullptr;
+SE_DECLARE_FINALIZE_FUNC(js_delete_cc_gi_PlacementInfo) 
+
+static bool js_cc_gi_PlacementInfo_method_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->method, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments"); 
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_method_set) 
+
+static bool js_cc_gi_PlacementInfo_method_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->method, s.rval(), s.thisObject() /*ctx*/);
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    SE_HOLD_RETURN_VALUE(arg1->method, s.thisObject(), s.rval());
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_method_get) 
+
+static bool js_cc_gi_PlacementInfo_nProbesX_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->nProbesX, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_nProbesX_set) 
+
+static bool js_cc_gi_PlacementInfo_nProbesX_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->nProbesX, s.rval(), s.thisObject()); 
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_nProbesX_get) 
+
+static bool js_cc_gi_PlacementInfo_nProbesY_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->nProbesY, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_nProbesY_set) 
+
+static bool js_cc_gi_PlacementInfo_nProbesY_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->nProbesY, s.rval(), s.thisObject()); 
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_nProbesY_get) 
+
+static bool js_cc_gi_PlacementInfo_nProbesZ_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->nProbesZ, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_nProbesZ_set) 
+
+static bool js_cc_gi_PlacementInfo_nProbesZ_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->nProbesZ, s.rval(), s.thisObject()); 
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_nProbesZ_get) 
+
+static bool js_cc_gi_PlacementInfo_minPos_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->minPos, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments"); 
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_minPos_set) 
+
+static bool js_cc_gi_PlacementInfo_minPos_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->minPos, s.rval(), s.thisObject() /*ctx*/);
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    SE_HOLD_RETURN_VALUE(arg1->minPos, s.thisObject(), s.rval());
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_minPos_get) 
+
+static bool js_cc_gi_PlacementInfo_maxPos_set(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= sevalue_to_native(args[0], &arg1->maxPos, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments"); 
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_SET(js_cc_gi_PlacementInfo_maxPos_set) 
+
+static bool js_cc_gi_PlacementInfo_maxPos_get(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    cc::gi::PlacementInfo *arg1 = (cc::gi::PlacementInfo *) NULL ;
+    
+    arg1 = SE_THIS_OBJECT<cc::gi::PlacementInfo>(s);
+    if (nullptr == arg1) return true;
+    
+    ok &= nativevalue_to_se(arg1->maxPos, s.rval(), s.thisObject() /*ctx*/);
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    SE_HOLD_RETURN_VALUE(arg1->maxPos, s.thisObject(), s.rval());
+    
+    
+    
+    return true;
+}
+SE_BIND_PROP_GET(js_cc_gi_PlacementInfo_maxPos_get) 
+
+static bool js_new_cc_gi_PlacementInfo(se::State& s) // NOLINT(readability-identifier-naming)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    
+    cc::gi::PlacementInfo *result;
+    result = (cc::gi::PlacementInfo *)new cc::gi::PlacementInfo();
+    
+    
+    auto *ptr = JSB_MAKE_PRIVATE_OBJECT_WITH_INSTANCE(result);
+    s.thisObject()->setPrivateObject(ptr);
+    return true;
+}
+SE_BIND_CTOR(js_new_cc_gi_PlacementInfo, __jsb_cc_gi_PlacementInfo_class, js_delete_cc_gi_PlacementInfo)
+
+static bool js_delete_cc_gi_PlacementInfo(se::State& s)
+{
+    return true;
+}
+SE_BIND_FINALIZE_FUNC(js_delete_cc_gi_PlacementInfo) 
+
+template<>
+bool sevalue_to_native(const se::Value &from, cc::gi::PlacementInfo * to, se::Object *ctx)
+{
+    assert(from.isObject());
+    se::Object *json = from.toObject();
+    auto* data = reinterpret_cast<cc::gi::PlacementInfo*>(json->getPrivateData());
+    if (data) {
+        *to = *data;
+        return true;
+    }
+    se::Value field;
+    bool ok = true;
+    
+    json->getProperty("method", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->method), ctx);
+    }
+    
+    
+    json->getProperty("nProbesX", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->nProbesX), ctx);
+    }
+    
+    
+    json->getProperty("nProbesY", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->nProbesY), ctx);
+    }
+    
+    
+    json->getProperty("nProbesZ", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->nProbesZ), ctx);
+    }
+    
+    
+    json->getProperty("minPos", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->minPos), ctx);
+    }
+    
+    
+    json->getProperty("maxPos", &field, true);
+    if (!field.isNullOrUndefined()) {
+        ok &= sevalue_to_native(field, &(to->maxPos), ctx);
+    }
+    
+    
+    return ok;
+}
+
+
+bool js_register_cc_gi_PlacementInfo(se::Object* obj) {
+    auto* cls = se::Class::create("PlacementInfo", obj, nullptr, _SE(js_new_cc_gi_PlacementInfo)); 
+    
+    cls->defineProperty("method", _SE(js_cc_gi_PlacementInfo_method_get), _SE(js_cc_gi_PlacementInfo_method_set)); 
+    cls->defineProperty("nProbesX", _SE(js_cc_gi_PlacementInfo_nProbesX_get), _SE(js_cc_gi_PlacementInfo_nProbesX_set)); 
+    cls->defineProperty("nProbesY", _SE(js_cc_gi_PlacementInfo_nProbesY_get), _SE(js_cc_gi_PlacementInfo_nProbesY_set)); 
+    cls->defineProperty("nProbesZ", _SE(js_cc_gi_PlacementInfo_nProbesZ_get), _SE(js_cc_gi_PlacementInfo_nProbesZ_set)); 
+    cls->defineProperty("minPos", _SE(js_cc_gi_PlacementInfo_minPos_get), _SE(js_cc_gi_PlacementInfo_minPos_set)); 
+    cls->defineProperty("maxPos", _SE(js_cc_gi_PlacementInfo_maxPos_get), _SE(js_cc_gi_PlacementInfo_maxPos_set)); 
+    
+    
+    
+    
+    
+    cls->defineFinalizeFunction(_SE(js_delete_cc_gi_PlacementInfo));
+    
+    
+    cls->install();
+    JSBClassType::registerClass<cc::gi::PlacementInfo>(cls);
+    
+    __jsb_cc_gi_PlacementInfo_proto = cls->getProto();
+    __jsb_cc_gi_PlacementInfo_class = cls;
+    se::ScriptEngine::getInstance()->clearException();
+    return true;
+}
+
+
+se::Class* __jsb_cc_gi_AutoPlacement_class = nullptr;
+se::Object* __jsb_cc_gi_AutoPlacement_proto = nullptr;
+SE_DECLARE_FINALIZE_FUNC(js_delete_cc_gi_AutoPlacement) 
+
+static bool js_cc_gi_AutoPlacement_generate_static(se::State& s)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    cc::gi::PlacementInfo *arg1 = 0 ;
+    cc::gi::PlacementInfo temp1 ;
+    ccstd::vector< Vec3 > result;
+    
+    if(argc != 1) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+        return false;
+    }
+    
+    ok &= sevalue_to_native(args[0], &temp1, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    arg1 = &temp1;
+    
+    result = cc::gi::AutoPlacement::generate((cc::gi::PlacementInfo const &)*arg1);
+    
+    ok &= nativevalue_to_se(result, s.rval(), s.thisObject() /*ctx*/);
+    SE_PRECONDITION2(ok, false, "Error processing arguments");
+    SE_HOLD_RETURN_VALUE(result, s.thisObject(), s.rval());
+    
+    
+    
+    return true;
+}
+SE_BIND_FUNC(js_cc_gi_AutoPlacement_generate_static) 
+
+static bool js_new_cc_gi_AutoPlacement(se::State& s) // NOLINT(readability-identifier-naming)
+{
+    CC_UNUSED bool ok = true;
+    const auto& args = s.args();
+    size_t argc = args.size();
+    
+    cc::gi::AutoPlacement *result;
+    result = (cc::gi::AutoPlacement *)new cc::gi::AutoPlacement();
+    
+    
+    auto *ptr = JSB_MAKE_PRIVATE_OBJECT_WITH_INSTANCE(result);
+    s.thisObject()->setPrivateObject(ptr);
+    return true;
+}
+SE_BIND_CTOR(js_new_cc_gi_AutoPlacement, __jsb_cc_gi_AutoPlacement_class, js_delete_cc_gi_AutoPlacement)
+
+static bool js_delete_cc_gi_AutoPlacement(se::State& s)
+{
+    return true;
+}
+SE_BIND_FINALIZE_FUNC(js_delete_cc_gi_AutoPlacement) 
+
+bool js_register_cc_gi_AutoPlacement(se::Object* obj) {
+    auto* cls = se::Class::create("AutoPlacement", obj, nullptr, _SE(js_new_cc_gi_AutoPlacement)); 
+    
+    
+    
+    
+    cls->defineStaticFunction("generate", _SE(js_cc_gi_AutoPlacement_generate_static)); 
+    
+    
+    cls->defineFinalizeFunction(_SE(js_delete_cc_gi_AutoPlacement));
+    
+    
+    cls->install();
+    JSBClassType::registerClass<cc::gi::AutoPlacement>(cls);
+    
+    __jsb_cc_gi_AutoPlacement_proto = cls->getProto();
+    __jsb_cc_gi_AutoPlacement_class = cls;
+    se::ScriptEngine::getInstance()->clearException();
+    return true;
+}
+
+
 se::Class* __jsb_cc_gi_Vertex_class = nullptr;
 se::Object* __jsb_cc_gi_Vertex_proto = nullptr;
 SE_DECLARE_FINALIZE_FUNC(js_delete_cc_gi_Vertex) 
@@ -3281,6 +3678,8 @@ bool register_all_gi(se::Object* obj) {
     }
     se::Object* ns = nsVal.toObject();
     /* Register classes */
+    js_register_cc_gi_PlacementInfo(ns); 
+    js_register_cc_gi_AutoPlacement(ns); 
     js_register_cc_gi_Vertex(ns); 
     js_register_cc_gi_CircumSphere(ns); 
     js_register_cc_gi_Tetrahedron(ns); 
