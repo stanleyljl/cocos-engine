@@ -207,6 +207,7 @@ export class LightProbeGroup extends Component {
             return;
         }
 
+        console.log('stanley generateLightProbes');
         this._probes = AutoPlacement.generate({
             method: this._method,
             nProbesX: this._nProbesX,

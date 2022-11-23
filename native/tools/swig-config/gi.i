@@ -9,6 +9,7 @@
 #pragma once
 #include "bindings/jswrapper/SeApi.h"
 #include "bindings/manual/jsb_conversions.h"
+#include "gi/light-probe/AutoPlacement.h"
 #include "gi/light-probe/Delaunay.h"
 #include "gi/light-probe/LightProbe.h"
 %}
@@ -114,5 +115,6 @@ using namespace cc::gi;
 
 // ----- Include Section ------
 // Brief: Include header files in which classes and methods will be bound
+%include "gi/light-probe/AutoPlacement.h"
 %include "gi/light-probe/Delaunay.h"
 %include "gi/light-probe/LightProbe.h"

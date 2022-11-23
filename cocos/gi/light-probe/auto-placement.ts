@@ -41,6 +41,7 @@ export interface PlacementInfo {
 
 export class AutoPlacement {
     public static generate (info: PlacementInfo) {
+        console.log('stanley ts AutoPlacement');
         switch (info.method) {
         case PlaceMethod.UNIFORM:
             return this.doGenerateUniform(info);
