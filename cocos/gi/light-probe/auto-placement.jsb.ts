@@ -22,9 +22,33 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 */
-import { _decorator } from "../../core";
+import { Enum, _decorator } from "../../core";
 
 const { ccclass, serializable } = _decorator;
+
+/**
+ * @zh
+ * 自动放置类型
+ * @en
+ * The auto placement method
+ */
+ export const PlaceMethod = Enum({
+  /**
+   * @zh
+   * 均匀放置
+   * @en
+   * place uniformly
+   */
+  UNIFORM: 0,
+
+  /**
+   * @zh
+   * 自适应放置
+   * @en
+   * place adaptively
+   */
+  ADAPTIVE: 1,
+});
 
 export const PlacementInfo = jsb.PlacementInfo;
 ccclass('cc.PlacementInfo')(PlacementInfo);

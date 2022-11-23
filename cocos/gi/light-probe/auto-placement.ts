@@ -25,8 +25,27 @@
 
 import { Vec3, Enum } from '../../core';
 
+/**
+ * @zh
+ * 自动放置类型
+ * @en
+ * The auto placement method
+ */
 export const PlaceMethod = Enum({
+    /**
+     * @zh
+     * 均匀放置
+     * @en
+     * place uniformly
+     */
     UNIFORM: 0,
+
+    /**
+     * @zh
+     * 自适应放置
+     * @en
+     * place adaptively
+     */
     ADAPTIVE: 1,
 });
 
