@@ -173,9 +173,8 @@ enum class Feature : uint32_t {
     MULTIPLE_RENDER_TARGETS,
     BLEND_MINMAX,
     COMPUTE_SHADER,
-    // @deprecated
-    INPUT_ATTACHMENT_BENEFIT,
 
+    INPUT_ATTACHMENT_BENEFIT, // @deprecated
     SUBPASS_COLOR_INPUT,
     SUBPASS_DEPTH_STENCIL_INPUT,
     RASTERIZATION_ORDER_NOCOHERENT,
@@ -480,6 +479,7 @@ enum class TextureFlagBit : uint32_t {
     EXTERNAL_NORMAL = 0x8, // External normal texture
     MUTABLE_STORAGE = 0x10, //  Texture is mutable or not, default is immutable(only for webgl2)
     LAZILY_ALLOCATED = 0x20, // Try lazily allocated mode.
+    MUTABLE_VIEW_FORMAT = 0x40, // texture view as different format
 };
 using TextureFlags = TextureFlagBit;
 CC_ENUM_BITWISE_OPERATORS(TextureFlagBit);
@@ -1114,6 +1114,8 @@ struct ALIGNAS(8) TextureViewInfo {
     uint32_t levelCount{1};
     uint32_t baseLayer{0};
     uint32_t layerCount{1};
+    uint32_t basePlane{0};
+    uint32_t planeCount{1};
 #if CC_CPU_ARCH == CC_CPU_ARCH_32
     uint32_t _padding{0};
 #endif
