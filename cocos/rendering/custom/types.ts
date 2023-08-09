@@ -410,6 +410,9 @@ export class CopyPair {
         targetMostDetailedMip = 0,
         targetFirstSlice = 0,
         targetPlaneSlice = 0,
+        sourceOffset = 0,
+        targetOffset = 0,
+        bufferSize = 0,
     ) {
         this.source = source;
         this.target = target;
@@ -421,6 +424,9 @@ export class CopyPair {
         this.targetMostDetailedMip = targetMostDetailedMip;
         this.targetFirstSlice = targetFirstSlice;
         this.targetPlaneSlice = targetPlaneSlice;
+        this.sourceOffset = sourceOffset;
+        this.targetOffset = targetOffset;
+        this.bufferSize = bufferSize;
     }
     source: string;
     target: string;
@@ -432,9 +438,9 @@ export class CopyPair {
     targetMostDetailedMip: number;
     targetFirstSlice: number;
     targetPlaneSlice: number;
-    sourceOffset = 0;
-    targetOffset = 0;
-    bufferSize = 0;
+    sourceOffset: number;
+    targetOffset: number;
+    bufferSize: number;
 }
 
 export class UploadPair {

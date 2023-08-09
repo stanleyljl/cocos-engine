@@ -884,22 +884,6 @@ struct RenderGraphUploadVisitor : boost::dfs_visitor<> {
         ctx.perInstanceDescriptorSets[vertID] = set;
     }
 
-    const SceneResource* getFirstSceneResource(RenderGraph::vertex_descriptor vertID) const {
-        const auto& g = ctx.g;
-        CC_EXPECTS(holds<QueueTag>(vertID, g));
-        for (const auto e : makeRange(children(vertID, g))) {
-            const auto sceneID = target(e, g);
-            if (holds<SceneTag>(sceneID, g)) {
-                const auto& sceneData = get(SceneTag{}, sceneID, g);
-                auto iter = ctx.context.renderSceneResources.find(sceneData.scene);
-                if (iter != ctx.context.renderSceneResources.end()) {
-                    return &iter->second;
-                }
-            }
-        }
-        return nullptr;
-    }
-
     void discover_vertex(
         RenderGraph::vertex_descriptor vertID,
         const boost::filtered_graph<
@@ -962,9 +946,6 @@ struct RenderGraphUploadVisitor : boost::dfs_visitor<> {
             // build pass resources
             const auto& resourceIndex = ctx.fgd.buildDescriptorIndex(computeViews, ctx.scratch);
 
-            // find scene resource
-            const auto* const sceneResource = getFirstSceneResource(vertID);
-
             // populate set
             auto& set = iter->second;
             const auto& user = get(RenderGraph::DataTag{}, ctx.g, vertID);
@@ -974,7 +955,7 @@ struct RenderGraphUploadVisitor : boost::dfs_visitor<> {
                 ctx.resourceGraph,
                 ctx.device, ctx.cmdBuff,
                 *ctx.context.defaultResource, ctx.lg,
-                resourceIndex, set, user, node, nullptr, sceneResource);
+                resourceIndex, set, user, node, nullptr, nullptr);
             CC_ENSURES(perPhaseSet);
 
             ctx.renderGraphDescriptorSet[vertID] = perPhaseSet;
@@ -1388,6 +1369,7 @@ struct RenderGraphVisitor : boost::dfs_visitor<> {
         const bool bDrawBlend = any(sceneData.flags & SceneFlags::TRANSPARENT_OBJECT);
         const bool bDrawOpaqueOrMask = any(sceneData.flags & (SceneFlags::OPAQUE_OBJECT | SceneFlags::CUTOUT_OBJECT));
         const bool bDrawShadowCaster = any(sceneData.flags & SceneFlags::SHADOW_CASTER);
+        const bool bDrawGPUDriven = any(sceneData.flags & SceneFlags::GPU_DRIVEN);
 
         if (bDrawShadowCaster || bDrawOpaqueOrMask) {
             queue.opaqueQueue.recordCommandBuffer(
@@ -1396,7 +1378,9 @@ struct RenderGraphVisitor : boost::dfs_visitor<> {
                 queue.opaqueInstancingQueue.recordCommandBuffer(
                     ctx.currentPass, ctx.cmdBuff);
             }
-            RenderBatchingQueue::recordCommandBuffer(ctx.device, camera, ctx.currentPass, ctx.cmdBuff, queue.sceneFlags);
+        }
+        if (bDrawGPUDriven) {
+            queue.opaqueBatchingQueue.recordCommandBuffer(ctx.resourceGraph, ctx.device, camera, ctx.currentPass, ctx.cmdBuff, queue.sceneFlags, sceneData.cullingID);
         }
         if (bDrawBlend) {
             queue.transparentQueue.recordCommandBuffer(
@@ -1405,8 +1389,6 @@ struct RenderGraphVisitor : boost::dfs_visitor<> {
                 queue.transparentInstancingQueue.recordCommandBuffer(
                     ctx.currentPass, ctx.cmdBuff);
             }
-            // Stanley TODO
-            //queue.transparentBatchingQueue.recordCommandBuffer(ctx.device, camera, ctx.currentPass, ctx.cmdBuff, queue.sceneFlags);
         }
         if (any(sceneData.flags & SceneFlags::UI)) {
             submitUICommands(ctx.currentPass,
@@ -1865,7 +1847,6 @@ struct RenderGraphContextCleaner {
       prevFenceValue(context.nextFenceValue) {
         ++context.nextFenceValue;
         context.clearPreviousResources(prevFenceValue);
-        context.renderSceneResources.clear();
         context.sceneCulling.clear();
     }
     RenderGraphContextCleaner(const RenderGraphContextCleaner&) = delete;
@@ -1991,26 +1972,6 @@ void NativePipeline::executeRenderGraph(const RenderGraph& rg) {
             const auto& queue = sceneCulling.renderQueues[queueID];
             extendResourceLifetime(queue, group);
         }
-    }
-
-    // gpu driven
-    for (const auto& [scene, queries] : ppl.nativeContext.sceneCulling.sceneQueries) {
-        auto* gpuScene = scene->getGPUScene();
-
-        gfx::Buffer* defaultBuffer = nullptr;
-        const auto* pipeline = Root::getInstance()->getPipeline();
-        if (pipeline && pipeline->getPipelineSceneData()) {
-            defaultBuffer = pipeline->getPipelineSceneData()->getDefaultBuffer();
-        }
-
-        auto& sceneResource = ppl.nativeContext.renderSceneResources[scene];
-        const auto& objectBufferID = lg.attributeIndex.find("cc_objectBuffer")->second;
-        sceneResource.resourceIndex.emplace(objectBufferID, ResourceType::STORAGE_BUFFER);
-        sceneResource.storageBuffers.emplace(objectBufferID, gpuScene ? gpuScene->getObjectBuffer() : defaultBuffer);
-
-        const auto& instanceBufferID = lg.attributeIndex.find("cc_instanceBuffer")->second;
-        sceneResource.resourceIndex.emplace(instanceBufferID, ResourceType::STORAGE_BUFFER);
-        sceneResource.storageBuffers.emplace(instanceBufferID, gpuScene ? gpuScene->getInstanceBuffer() : defaultBuffer);
     }
 
     // Execute all valid passes

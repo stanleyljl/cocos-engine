@@ -435,6 +435,7 @@ void SceneCulling::buildRenderQueues(
 }
 
 void SceneCulling::clear() noexcept {
+    sceneIDs.clear();
     sceneQueries.clear();
     for (auto& c : culledResults) {
         c.clear();
@@ -445,7 +446,6 @@ void SceneCulling::clear() noexcept {
     sceneQueryIndex.clear();
     numCullingQueries = 0;
     numRenderQueues = 0;
-    gpuCullingPassID = 0xFFFFFFFF;
 }
 
 } // namespace render
