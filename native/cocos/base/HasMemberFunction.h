@@ -93,7 +93,5 @@ namespace cc {
 
 CC_DEFINE_HAS_MEMBER_FUNC(setScriptObject)
 CC_DEFINE_HAS_MEMBER_FUNC(getScriptObject)
-CC_DEFINE_HAS_MEMBER_FUNC(onGarbageCollect)
-
 
 } // namespace cc

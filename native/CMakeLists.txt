@@ -480,7 +480,6 @@ cocos_source_files(
     cocos/base/std/hash/extensions.hpp
     cocos/base/std/hash/hash_fwd.hpp
     cocos/base/std/hash/hash.h
-    cocos/base/VirtualInheritBase.h
 )
 
 ############ application
@@ -2134,7 +2133,6 @@ cocos_source_files(MODULE ccgeometry
 cocos_source_files(
     cocos/bindings/utils/BindingUtils.cpp
     cocos/bindings/utils/BindingUtils.h
-    cocos/bindings/utils/jsb_garbagecollect_callback.h
 )
 
 ######## dop
