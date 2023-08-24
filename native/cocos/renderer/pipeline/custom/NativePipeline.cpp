@@ -976,9 +976,9 @@ void setupGpuDrivenResources(
         auto resID = findVertex(name, resg);
         if (resID == ResourceGraph::null_vertex()) {
             ppl.addResource(std::string(name), ResourceDimension::TEXTURE2D, gfx::Format::R32F, width, height, 1, 1,
-                            mipLevels, gfx::SampleCount::X1, ResourceFlags::SAMPLED | ResourceFlags::STORAGE, ResourceResidency::MANAGED);
+                            mipLevels, gfx::SampleCount::X1, ResourceFlags::SAMPLED | ResourceFlags::STORAGE, ResourceResidency::PERSISTENT);
         } else {
-            CC_EXPECTS(holds<ManagedTextureTag>(resID, resg));
+            CC_EXPECTS(holds<PersistentTextureTag>(resID, resg));
             ppl.updateResource(std::string(name), gfx::Format::R32F, width, height, 1, 1, mipLevels, gfx::SampleCount::X1);
         }
     }

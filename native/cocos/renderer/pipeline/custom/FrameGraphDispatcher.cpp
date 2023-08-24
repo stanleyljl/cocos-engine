@@ -1880,6 +1880,13 @@ void buildBarriers(FrameGraphDispatcher &fgDispatcher) {
         return gfxBarrier;
     };
 
+    struct AccessWeight{
+        ccstd::pmr::string name;
+        gfx::AccessFlags access{gfx::AccessFlags::NONE};
+        ResourceAccessGraph::vertex_descriptor vertID{0};
+    };
+    ccstd::unordered_map<ResourceGraph::vertex_descriptor, ccstd::unordered_map<gfx::ResourceRange, AccessWeight, gfx::Hasher<gfx::ResourceRange>>> rangeLastAccess;
+
     // found pass id in this map ? barriers you should commit when run into this pass
     // : or no extra barrier needed.
     for (auto &accessPair : rag.resourceAccess) {
@@ -2014,6 +2021,15 @@ void buildBarriers(FrameGraphDispatcher &fgDispatcher) {
         const auto &traits = get(ResourceGraph::TraitsTag{}, resourceGraph, realResourceID);
         auto &states = get(ResourceGraph::StatesTag{}, resourceGraph, realResourceID);
         if (traits.hasSideEffects()) {
+            if (out_degree(realResourceID, resourceGraph) > 1) {
+                auto sRange = iter->second.range;
+                if (rag.movedSourceStatus.find(resName) != rag.movedSourceStatus.end()) {
+                    sRange = rag.movedSourceStatus.at(resName).range;
+                }
+                if (rangeLastAccess[realResourceID][sRange].vertID < (accessRecord.rbegin()->first)) {
+                    rangeLastAccess[realResourceID][sRange] = AccessWeight{resName, iter->second.accessFlag, accessRecord.rbegin()->first};
+                }
+            }
             states.states = iter->second.accessFlag;
             if (traits.residency == ResourceResidency::BACKBUFFER) {
                 auto lastAccessPassID = get(ResourceAccessGraph::PassIDTag{}, rag, iter->first);
@@ -2031,6 +2047,34 @@ void buildBarriers(FrameGraphDispatcher &fgDispatcher) {
             }
         }
     }
+
+    for (const auto &[resID, rangeWeight] : rangeLastAccess) {
+        ccstd::unordered_map<gfx::AccessFlags, uint32_t> rangeMap;
+        for (const auto& [range, weight] : rangeWeight) {
+            rangeMap[weight.access] += 1;
+        }
+        auto iter = std::max_element(rangeMap.begin(), rangeMap.end(), [](const auto &lhs, const auto &rhs) {
+            return lhs.second < rhs.second;
+        });
+        auto mostCommonAccesss = iter->first;
+
+        for (const auto &[range, weight] : rangeWeight) {
+            if (weight.access != mostCommonAccesss) {
+                auto &barrierNode = get(ResourceAccessGraph::BarrierTag{}, rag, weight.vertID);
+                auto& barrier =  barrierNode.rearBarriers.emplace_back();
+                barrier.resourceID = resID;
+                barrier.beginVert = weight.vertID;
+                barrier.endVert = weight.vertID;
+                barrier.type = gfx::BarrierType::FULL;
+                barrier.beginStatus = {weight.access, range};
+                barrier.endStatus = {mostCommonAccesss, range};
+                barrier.barrier = getGFXBarrier(barrier);
+            }
+        }
+        auto &states = get(ResourceGraph::StatesTag{}, resourceGraph, resID);
+        states.states = mostCommonAccesss;
+    }
+
 
     {
         for (auto &fgRenderpassInfo : rag.rpInfo) {
