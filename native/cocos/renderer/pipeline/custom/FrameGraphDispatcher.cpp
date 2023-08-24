@@ -545,9 +545,6 @@ auto dependencyCheck(ResourceAccessGraph &rag, ResourceAccessGraph::vertex_descr
     auto resourceID = rag.resourceIndex.at(name);
     const auto &states = get(ResourceGraph::StatesTag{}, resourceGraph, resourceID);
     const auto &desc = get(ResourceGraph::DescTag{}, resourceGraph, resourceID);
-    if (strcmp(name.c_str(), "CCDrawIndirectBuffer0") == 0) {
-        printf("111");
-    }
 
     const auto& range = originRange;
      if (rag.movedTargetStatus.find(name) != rag.movedTargetStatus.end()) {
