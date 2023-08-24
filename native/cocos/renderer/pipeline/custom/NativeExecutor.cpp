@@ -71,7 +71,7 @@ struct RenderGraphVisitorContext {
     LayoutGraphData& lg;
     const RenderGraph& g;
     ResourceGraph& resourceGraph;
-    const FrameGraphDispatcher& fgd;
+    FrameGraphDispatcher& fgd;
     const ccstd::pmr::vector<bool>& validPasses;
     gfx::Device* device = nullptr;
     gfx::CommandBuffer* cmdBuff = nullptr;
