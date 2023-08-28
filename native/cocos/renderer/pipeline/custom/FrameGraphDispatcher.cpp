@@ -1597,10 +1597,15 @@ void startMovePass(const Graphs &graphs, uint32_t passID, const MovePass &pass) 
             auto &srcAccess = resourceAccessGraph.resourceAccess.at(pair.source);
             auto targetAccessIter = resourceAccessGraph.resourceAccess.find(pair.target);
 
+            srcAccess.erase(0);
             if (targetAccessIter != resourceAccessGraph.resourceAccess.end() && !targetAccessIter->second.empty()) {
                 auto lastAccessIter = targetAccessIter->second.rbegin();
                 srcAccess.emplace(lastAccessIter->first, AccessStatus{lastAccessIter->second.accessFlag, srcResourceRange});
+            } else {
+                const auto &lastStates = get(ResourceGraph::StatesTag{}, resourceGraph, targetResID);
+                srcAccess.emplace(0, AccessStatus{lastStates.states, srcResourceRange});
             }
+
 
             resourceAccessGraph.resourceIndex[pair.target] = targetResID;
 
@@ -1964,7 +1969,7 @@ void buildBarriers(FrameGraphDispatcher &fgDispatcher) {
                     for (const auto &[src, ignored] : rag.movedTarget.at(sName)) {
                         const auto srcStart = rag.resourceAccess.at(src).begin()->first;
                         const auto srcEnd = rag.resourceAccess.at(src).rbegin()->first;
-                        interAccessed |= !((srcStart > endVert) || (srcEnd < startVert));
+                        interAccessed |= !((srcStart >= endVert) || (srcEnd <= startVert));
                         interAccessed |= interAccessCheck(src, startVert, endVert);
                         if (interAccessed) {
                             return true;
