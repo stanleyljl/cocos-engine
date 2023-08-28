@@ -990,7 +990,7 @@ bool setupGpuDrivenResources(
         auto resID = findVertex(name, resg);
         if (resID == ResourceGraph::null_vertex()) {
             ppl.addResource(std::string(name), ResourceDimension::TEXTURE2D, gfx::Format::R32F, width, height, 1, 1,
-                            mipLevels, gfx::SampleCount::X1, ResourceFlags::SAMPLED | ResourceFlags::STORAGE, ResourceResidency::PERSISTENT);
+                            mipLevels, gfx::SampleCount::X1, ResourceFlags::COLOR_ATTACHMENT | ResourceFlags::SAMPLED | ResourceFlags::STORAGE, ResourceResidency::PERSISTENT);
             firstMeet = true;
         } else {
             CC_EXPECTS(holds<PersistentTextureTag>(resID, resg));
@@ -1058,6 +1058,18 @@ void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
     const std::string drawInstanceBuffer = "CCDrawInstanceBuffer" + std::to_string(cullingID);
     const std::string visibilityBuffer = "CCVisibilityBuffer" + std::to_string(cullingID);
 
+    // first pass hzb clear
+    {
+        if (firstPass) {
+            const auto width = utils::previousPOT(camera->getWidth());
+            const auto height = utils::previousPOT(camera->getHeight());
+            std::unique_ptr<RenderPassBuilder> clearPass(addRenderPass(width, height, "default"));
+            clearPass->addRenderTarget(hzbName + std::to_string(cullingID), gfx::LoadOp::CLEAR, gfx::StoreOp::STORE, gfx::Color{1.0, 0.0, 0.0, 0.0});
+            std::unique_ptr<RenderQueueBuilder> clearQueue(clearPass->addQueue());
+            clearQueue->addScene(camera, SceneFlags::OPAQUE);
+        }
+    }
+
     // init indirect buffers
     {
         CopyPass copyPass{renderGraph.get_allocator()};
@@ -1089,7 +1101,7 @@ void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
         gpuCullPass->addStorageBuffer(drawIndirectBuffer, AccessType::READ_WRITE, "CCDrawIndirectBuffer");
         gpuCullPass->addStorageBuffer(drawInstanceBuffer, AccessType::WRITE, "CCDrawInstanceBuffer");
         gpuCullPass->addStorageBuffer(visibilityBuffer, AccessType::READ_WRITE, "CCVisibilityBuffer");
-        if (!hzbName.empty() && !firstPass) {
+        if (!hzbName.empty()) {
             auto *sampler = device->getSampler({gfx::Filter::POINT, gfx::Filter::POINT, gfx::Filter::NONE,
                                                 gfx::Address::CLAMP, gfx::Address::CLAMP, gfx::Address::CLAMP});
 

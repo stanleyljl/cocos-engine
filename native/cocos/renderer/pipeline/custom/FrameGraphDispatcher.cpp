@@ -733,7 +733,11 @@ auto getTextureStatus(std::string_view name, AccessType access, gfx::ShaderStage
     }
 
     if (access != AccessType::READ) {
-        texUsage |= (mapTextureFlags(desc.flags) & (gfx::TextureUsage::COLOR_ATTACHMENT | gfx::TextureUsage::DEPTH_STENCIL_ATTACHMENT | gfx::TextureUsage::STORAGE));
+        if (rasterized) {
+            texUsage |= (mapTextureFlags(desc.flags) & (gfx::TextureUsage::COLOR_ATTACHMENT | gfx::TextureUsage::DEPTH_STENCIL_ATTACHMENT));
+        } else {
+            texUsage |= (mapTextureFlags(desc.flags) & (gfx::TextureUsage::STORAGE));
+        }
     }
     accesFlag = gfx::getAccessFlags(texUsage, toGfxAccess(access), vis);
 
