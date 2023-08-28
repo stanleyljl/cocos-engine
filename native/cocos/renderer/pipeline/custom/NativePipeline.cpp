@@ -831,7 +831,7 @@ constexpr uint32_t getMipLevels(uint32_t width, uint32_t height) noexcept {
     return result;
 }
 
-void setupGpuDrivenResources(
+bool setupGpuDrivenResources(
     NativePipeline &ppl, const scene::Camera *camera, scene::GPUScene *gpuScene,
     uint32_t sceneID, uint32_t cullingID, ResourceGraph &resg, const std::string &hzbName) {
     ccstd::pmr::string name(resg.get_allocator());
@@ -966,6 +966,7 @@ void setupGpuDrivenResources(
         }
     }
 
+    bool firstMeet = false;
     if (!hzbName.empty()) {
         name = hzbName;
         name.append(std::to_string(cullingID));
@@ -977,11 +978,13 @@ void setupGpuDrivenResources(
         if (resID == ResourceGraph::null_vertex()) {
             ppl.addResource(std::string(name), ResourceDimension::TEXTURE2D, gfx::Format::R32F, width, height, 1, 1,
                             mipLevels, gfx::SampleCount::X1, ResourceFlags::SAMPLED | ResourceFlags::STORAGE, ResourceResidency::PERSISTENT);
+            firstMeet = true;
         } else {
             CC_EXPECTS(holds<PersistentTextureTag>(resID, resg));
             ppl.updateResource(std::string(name), gfx::Format::R32F, width, height, 1, 1, mipLevels, gfx::SampleCount::X1);
         }
     }
+    return firstMeet;
 }
 
 } // namespace
@@ -1007,7 +1010,7 @@ bool projectSpherePerspective(Vec3 c, float r, float znear, Mat4 proj) {
     return true;
 }
 
-void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID, 
+void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
     const scene::Camera *camera, const std::string &hzbName, const scene::Light *light, bool bMainPass) {
     auto *scene = camera->getScene();
     if (!scene) {
@@ -1028,7 +1031,7 @@ void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
     }
 
     const uint32_t sceneID = iter->second;
-    setupGpuDrivenResources(*this, camera, gpuScene, sceneID, cullingID, resourceGraph, hzbName);
+    bool firstPass = setupGpuDrivenResources(*this, camera, gpuScene, sceneID, cullingID, resourceGraph, hzbName);
 
     if (light) {
         // build light culling pass
@@ -1073,7 +1076,7 @@ void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
         gpuCullPass->addStorageBuffer(drawIndirectBuffer, AccessType::READ_WRITE, "CCDrawIndirectBuffer");
         gpuCullPass->addStorageBuffer(drawInstanceBuffer, AccessType::WRITE, "CCDrawInstanceBuffer");
         gpuCullPass->addStorageBuffer(visibilityBuffer, AccessType::READ_WRITE, "CCVisibilityBuffer");
-        if (!hzbName.empty()) {
+        if (!hzbName.empty() && !firstPass) {
             auto *sampler = device->getSampler({gfx::Filter::POINT, gfx::Filter::POINT, gfx::Filter::NONE,
                                                 gfx::Address::CLAMP, gfx::Address::CLAMP, gfx::Address::CLAMP});
 
