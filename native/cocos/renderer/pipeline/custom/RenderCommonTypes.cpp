@@ -137,14 +137,17 @@ MovePair::MovePair(const allocator_type& alloc) noexcept
 : source(alloc),
   target(alloc) {}
 
-MovePair::MovePair(ccstd::pmr::string sourceIn, ccstd::pmr::string targetIn, uint32_t mipLevelsIn, uint32_t numSlicesIn, uint32_t targetMostDetailedMipIn, uint32_t targetFirstSliceIn, uint32_t targetPlaneSliceIn, const allocator_type& alloc) noexcept // NOLINT
+MovePair::MovePair(ccstd::pmr::string sourceIn, ccstd::pmr::string targetIn, uint32_t mipLevelsIn, uint32_t numSlicesIn, uint32_t targetMostDetailedMipIn, uint32_t targetFirstSliceIn, uint32_t targetPlaneSliceIn,
+    gfx::AccessFlagBit possibleUsageIn,
+    const allocator_type& alloc) noexcept // NOLINT
 : source(std::move(sourceIn), alloc),
   target(std::move(targetIn), alloc),
   mipLevels(mipLevelsIn),
   numSlices(numSlicesIn),
   targetMostDetailedMip(targetMostDetailedMipIn),
   targetFirstSlice(targetFirstSliceIn),
-  targetPlaneSlice(targetPlaneSliceIn) {}
+  targetPlaneSlice(targetPlaneSliceIn),
+  possibleUsage(possibleUsageIn){}
 
 MovePair::MovePair(MovePair&& rhs, const allocator_type& alloc)
 : source(std::move(rhs.source), alloc),
@@ -153,7 +156,8 @@ MovePair::MovePair(MovePair&& rhs, const allocator_type& alloc)
   numSlices(rhs.numSlices),
   targetMostDetailedMip(rhs.targetMostDetailedMip),
   targetFirstSlice(rhs.targetFirstSlice),
-  targetPlaneSlice(rhs.targetPlaneSlice) {}
+  targetPlaneSlice(rhs.targetPlaneSlice),
+  possibleUsage(rhs.possibleUsage){}
 
 MovePair::MovePair(MovePair const& rhs, const allocator_type& alloc)
 : source(rhs.source, alloc),
@@ -162,7 +166,8 @@ MovePair::MovePair(MovePair const& rhs, const allocator_type& alloc)
   numSlices(rhs.numSlices),
   targetMostDetailedMip(rhs.targetMostDetailedMip),
   targetFirstSlice(rhs.targetFirstSlice),
-  targetPlaneSlice(rhs.targetPlaneSlice) {}
+  targetPlaneSlice(rhs.targetPlaneSlice),
+    possibleUsage(rhs.possibleUsage){}
 
 } // namespace render
 
