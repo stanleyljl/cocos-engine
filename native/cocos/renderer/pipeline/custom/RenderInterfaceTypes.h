@@ -1236,6 +1236,8 @@ public:
     ComputeSubpassBuilder *addComputeSubpass() {
         return addComputeSubpass("");
     }
+
+    virtual void useResource(const ccstd::string& name, ResourceFlags usage) = 0;
 };
 
 class MultisampleRenderPassBuilder : public BasicMultisampleRenderPassBuilder {

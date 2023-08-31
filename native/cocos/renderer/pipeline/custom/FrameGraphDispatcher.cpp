@@ -953,6 +953,42 @@ auto checkExternalAccess(const Graphs &graphs,
     }
 }
 
+gfx::AccessFlags mapAccess(ResourceFlags flags){
+    gfx::AccessFlags ret{gfx::AccessFlags::NONE};
+    if (flags == ResourceFlags::INDIRECT) {
+        ret = gfx::AccessFlags::INDIRECT_BUFFER;
+    } else if (flags == ResourceFlags::VERTEX) {
+        ret = gfx::AccessFlags::VERTEX_BUFFER;
+    } else if (flags == ResourceFlags::INDEX) {
+        ret = gfx::AccessFlags::INDEX_BUFFER;
+    }
+    return ret;
+}
+
+auto checkManuallyTrackResources(const Graphs &graphs,
+                                 ResourceAccessGraph::vertex_descriptor ragVertID,
+                                 ResourceAccessNode &node,
+                                 const PmrTransparentMap<ccstd::pmr::string, ResourceFlags>& resources) {
+    const auto &[renderGraph, layoutGraphData, resourceGraph, resourceAccessGraph, relationGraph] = graphs;
+
+    bool dependent = false;
+    for (const auto &[name, usage] : resources) {
+        auto manuallyAccess = mapAccess(usage);
+        if (manuallyAccess != gfx::AccessFlags::NONE) {
+            const auto &range = getResourceRange(vertex(name, resourceGraph), resourceGraph);
+            ViewStatus view{name, AccessType::READ_WRITE /*no use*/, gfx::ShaderStageFlagBit::NONE, manuallyAccess, range};
+            addAccessStatus(resourceAccessGraph, resourceGraph, node, view);
+            const auto &[lastVertId, nearestAccess] = dependencyCheck(resourceAccessGraph, ragVertID, resourceGraph, view);
+            tryAddEdge(lastVertId, ragVertID, resourceAccessGraph);
+            tryAddEdge(lastVertId, ragVertID, relationGraph);
+            dependent |= (lastVertId != EXPECT_START_ID);
+        } else {
+            FGD_WARNING("Trying to manually add an undefined access at pass %d on resource %s, ignnored. Have you set the resource flags?\n", get(ResourceAccessGraph::PassIDTag{}, resourceAccessGraph, ragVertID), name.c_str());
+        }
+    }
+    return dependent;
+}
+
 auto checkRasterViews(const Graphs &graphs,
                       ResourceAccessGraph::vertex_descriptor ragVertID,
                       ResourceAccessNode &node,
@@ -1169,6 +1205,7 @@ void startRenderPass(const Graphs &graphs, uint32_t passID, const RasterPass &pa
         auto &accessNode = get(ResourceAccessGraph::PassNodeTag{}, resourceAccessGraph, vertID);
         std::ignore = checkRasterViews(graphs, rlgVertID, accessNode, pass.rasterViews, colorMap);
         std::ignore = checkComputeViews(graphs, rlgVertID, accessNode, pass.computeViews);
+        std::ignore = checkManuallyTrackResources(graphs, rlgVertID, accessNode, pass.resources);
         fillRenderPassInfo(colorMap, fgRenderPassInfo, resourceGraph);
     } else {
         const auto &subpasses = pass.subpassGraph.subpasses;
@@ -1513,7 +1550,9 @@ bool moveValidation(const MovePass& pass, ResourceAccessGraph& rag, const Resour
             !fromResTraits.hasSideEffects(),
             rag.movedSourceStatus.find(toResName) == rag.movedSourceStatus.end(),
             rag.movedSourceStatus.find(fromResName) == rag.movedSourceStatus.end(),
-            fromResTraits.residency != ResourceResidency::MEMORYLESS && toResTraits.residency != ResourceResidency::MEMORYLESS,
+            fromResTraits.residency != ResourceResidency::MEMORYLESS && toResTraits.residency != ResourceResidency::MEMORYLESS &&
+            fromResTraits.residency != ResourceResidency::BACKBUFFER && fromResTraits.residency != ResourceResidency::PERSISTENT &&
+            fromResTraits.residency != ResourceResidency::EXTERNAL,
             fromResDesc.dimension == toResDesc.dimension,
             fromResDesc.width == safeShift(toResDesc.width, movePair.targetMostDetailedMip),
             fromResDesc.height == safeShift(toResDesc.height, movePair.targetMostDetailedMip),
@@ -1667,17 +1706,17 @@ void startScene(const Graphs &graphs, RenderGraph::vertex_descriptor sceneID, co
     const auto *const camera = sceneData.camera;
     CC_EXPECTS(camera);
 
-    if (any(sceneData.flags & SceneFlags::GPU_DRIVEN)) {
-        //auto prtID = sceneID;
-        //while (parent(prtID, renderGraph) != RenderGraph::null_vertex()) {
-        //    prtID = parent(prtID, renderGraph);
-        //}
-        ccstd::pmr::string name("CCDrawIndirectBuffer", resourceAccessGraph.get_allocator());
-        name.append(std::to_string(sceneData.cullingID));
-        // auto resID = findVertex(name, resourceGraph);
-        // const auto &indirectBuffer = get(ManagedBufferTag{}, resID, resg).buffer.get();
-        resourceAccessGraph.externalAccess[sceneID] = std::make_pair(name, gfx::AccessFlags::INDIRECT_BUFFER);
-    }
+    //if (any(sceneData.flags & SceneFlags::GPU_DRIVEN)) {
+    //    //auto prtID = sceneID;
+    //    //while (parent(prtID, renderGraph) != RenderGraph::null_vertex()) {
+    //    //    prtID = parent(prtID, renderGraph);
+    //    //}
+    //    ccstd::pmr::string name("CCDrawIndirectBuffer", resourceAccessGraph.get_allocator());
+    //    name.append(std::to_string(sceneData.cullingID));
+    //    // auto resID = findVertex(name, resourceGraph);
+    //    // const auto &indirectBuffer = get(ManagedBufferTag{}, resID, resg).buffer.get();
+    //    resourceAccessGraph.externalAccess[sceneID] = std::make_pair(name, gfx::AccessFlags::INDIRECT_BUFFER);
+    //}
 }
 
 struct DependencyVisitor : boost::dfs_visitor<> {
@@ -1712,8 +1751,6 @@ struct DependencyVisitor : boost::dfs_visitor<> {
             [&](const auto & /*pass*/) {
                 // do nothing
             });
-        const auto curRagVert = graphs.resourceAccessGraph.passIndex.size() - 2;
-        checkExternalAccess(graphs, curRagVert);
     }
 
     void finish_vertex(RenderGraph::vertex_descriptor passID,
