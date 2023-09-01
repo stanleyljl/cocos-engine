@@ -627,7 +627,6 @@ public:
     void addRenderTarget(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, const gfx::Color &color) override;
     void addDepthStencil(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, float depth, uint8_t stencil, gfx::ClearFlagBit clearFlags) override;
     void addTexture(const ccstd::string &name, const ccstd::string &slotName, gfx::Sampler *sampler, uint32_t plane) override;
-    void useResource(const ccstd::string &name, ResourceFlags flags) override;
     RenderQueueBuilder *addQueue(QueueHint hint, const ccstd::string &phaseName) override;
     void setViewport(const gfx::Viewport &viewport) override;
     void setVersion(const ccstd::string &name, uint64_t version) override;
@@ -731,7 +730,6 @@ public:
     void addRenderTarget(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, const gfx::Color &color) override;
     void addDepthStencil(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, float depth, uint8_t stencil, gfx::ClearFlagBit clearFlags) override;
     void addTexture(const ccstd::string &name, const ccstd::string &slotName, gfx::Sampler *sampler, uint32_t plane) override;
-    void useResource(const ccstd::string &name, ResourceFlags flags) override;
     RenderQueueBuilder *addQueue(QueueHint hint, const ccstd::string &phaseName) override;
     void setViewport(const gfx::Viewport &viewport) override;
     void setVersion(const ccstd::string &name, uint64_t version) override;

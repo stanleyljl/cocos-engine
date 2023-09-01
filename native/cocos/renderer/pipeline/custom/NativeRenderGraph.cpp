@@ -253,11 +253,6 @@ void NativeRenderPassBuilder::setCustomShaderStages(
     }
 }
 
-void NativeRenderPassBuilder::useResource(const ccstd::string& name, ResourceFlags usage) {
-    auto &pass = get(RasterPassTag{}, nodeID, *renderGraph);
-    pass.resources.emplace(name, usage);
-}
-
 bool NativeRenderPassBuilder::getShowStatistics() const {
     const auto &pass = get(RasterPassTag{}, nodeID, *renderGraph);
     return pass.showStatistics;
@@ -1095,11 +1090,6 @@ void NativeMultisampleRenderPassBuilder::addTexture(
             data.samplers[iter->second.value] = sampler;
         }
     }
-}
-
-void NativeMultisampleRenderPassBuilder::useResource(const ccstd::string &name, ResourceFlags usage) {
-    auto &pass = get(RasterPassTag{}, nodeID, *renderGraph);
-    pass.resources.emplace(name, usage);
 }
 
 void NativeMultisampleRenderPassBuilder::addStorageBuffer(
