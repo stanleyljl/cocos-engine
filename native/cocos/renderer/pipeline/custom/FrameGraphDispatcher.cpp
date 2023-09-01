@@ -1597,7 +1597,7 @@ constexpr gfx::AccessFlags allStageReadAccess(const ResourceDesc& desc) {
     gfx::AccessFlags ret{gfx::AccessFlags::NONE};
     if ((flags & ResourceFlags::STORAGE) != ResourceFlags::NONE) {
         ret = gfx::AccessFlags::COMPUTE_SHADER_READ_OTHER | gfx::AccessFlags::FRAGMENT_SHADER_READ_OTHER | gfx::AccessFlags::VERTEX_SHADER_READ_OTHER;
-    } else if (isBuffer) {
+    } else if (isBuffer) { // NOLINT(misc-redundant-expression)
         ret = gfx::AccessFlags::COMPUTE_SHADER_READ_UNIFORM_BUFFER | gfx::AccessFlags::COMPUTE_SHADER_READ_UNIFORM_BUFFER | gfx::AccessFlags::VERTEX_SHADER_READ_UNIFORM_BUFFER;
     } else {
         ret = gfx::AccessFlags::COMPUTE_SHADER_READ_TEXTURE | gfx::AccessFlags::FRAGMENT_SHADER_READ_TEXTURE | gfx::AccessFlags::VERTEX_SHADER_READ_TEXTURE;
@@ -1672,7 +1672,7 @@ void startMovePass(const Graphs &graphs, uint32_t passID, const MovePass &pass) 
     }
 }
 
-void startScene(const Graphs &graphs, RenderGraph::vertex_descriptor sceneID, const SceneData &sceneData) { // NOLINT(readability-convert-member-functions-to-static)
+void startScene(const Graphs &graphs, RenderGraph::vertex_descriptor /*sceneID*/, const SceneData &sceneData) { // NOLINT(readability-convert-member-functions-to-static)
     const auto &[renderGraph, layoutGraphData, resourceGraph, resourceAccessGraph, relationGraph] = graphs;
     const auto *const camera = sceneData.camera;
     CC_EXPECTS(camera);
@@ -2096,7 +2096,7 @@ void buildBarriers(FrameGraphDispatcher &fgDispatcher) {
                 beginBarrier.barrier = getGFXBarrier(beginBarrier);
             }
         }
-        
+
         // - final access check: what if moved but no later access in this frame, while subresource access of parent resource varies?
         // - : if there is a hint, submit a transition from last layout/access to suggested, otherwise trasition to all-stage-read access.
         if (rag.movedSourceStatus.find(resName) != rag.movedSourceStatus.end() && rag.movedSourceStatus.at(resName).finalAccess) {

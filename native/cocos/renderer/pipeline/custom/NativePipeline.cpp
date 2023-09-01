@@ -1003,7 +1003,7 @@ bool setupGpuDrivenResources(
 } // namespace
 
 void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
-    const scene::Camera *camera, const std::string &layoutPath, 
+    const scene::Camera *camera, const std::string &layoutPath,
     const std::string &hzbName, const scene::Light *light, bool bMainPass) {
     auto *scene = camera->getScene();
     if (!scene) {
@@ -1101,7 +1101,7 @@ void NativePipeline::addBuiltinGpuCullingPass(uint32_t cullingID,
             planes.push_back(plane->n.z);
             planes.push_back(plane->d);
         }
-        ArrayBuffer planesBuffer(reinterpret_cast<uint8_t*>(&planes[0]), sizeof(float) * planes.size());
+        ArrayBuffer planesBuffer(reinterpret_cast<uint8_t*>(&planes[0]), sizeof(float) * static_cast<uint32_t>(planes.size()));
         gpuCullPass->setMat4("cc_view", camera->getMatView());
         gpuCullPass->setMat4("cc_proj", camera->getMatProj());
         gpuCullPass->setArrayBuffer("cc_planes", &planesBuffer);
