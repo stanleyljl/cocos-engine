@@ -65,7 +65,7 @@
 #define ENABLE_FGD_WARNNING 1
 
 #ifdef ENABLE_FGD_WARNNING
-    #define FGD_WARNING(...) printf(##__VA_ARGS__)
+    #define FGD_WARNING(...) printf(__VA_ARGS__)
 #else
     #define FGD_WARNING(...)
 #endif
