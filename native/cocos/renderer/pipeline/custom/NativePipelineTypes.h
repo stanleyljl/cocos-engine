@@ -627,6 +627,7 @@ public:
     void addRenderTarget(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, const gfx::Color &color) override;
     void addDepthStencil(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, float depth, uint8_t stencil, gfx::ClearFlagBit clearFlags) override;
     void addTexture(const ccstd::string &name, const ccstd::string &slotName, gfx::Sampler *sampler, uint32_t plane) override;
+    void useResource(const ccstd::string &name, ResourceFlags flags) override;
     RenderQueueBuilder *addQueue(QueueHint hint, const ccstd::string &phaseName) override;
     void setViewport(const gfx::Viewport &viewport) override;
     void setVersion(const ccstd::string &name, uint64_t version) override;
@@ -641,7 +642,6 @@ public:
     ComputeSubpassBuilder *addComputeSubpass(const ccstd::string &subpassName) override;
     void setCustomShaderStages(const ccstd::string &name, gfx::ShaderStageFlagBit stageFlags) override;
 
-    void useResource(const ccstd::string& name, ResourceFlags usage) override;
 };
 
 class NativeMultisampleRenderPassBuilder final : public MultisampleRenderPassBuilder, public NativeSetter {
@@ -731,6 +731,7 @@ public:
     void addRenderTarget(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, const gfx::Color &color) override;
     void addDepthStencil(const ccstd::string &name, gfx::LoadOp loadOp, gfx::StoreOp storeOp, float depth, uint8_t stencil, gfx::ClearFlagBit clearFlags) override;
     void addTexture(const ccstd::string &name, const ccstd::string &slotName, gfx::Sampler *sampler, uint32_t plane) override;
+    void useResource(const ccstd::string &name, ResourceFlags flags) override;
     RenderQueueBuilder *addQueue(QueueHint hint, const ccstd::string &phaseName) override;
     void setViewport(const gfx::Viewport &viewport) override;
     void setVersion(const ccstd::string &name, uint64_t version) override;

@@ -591,6 +591,7 @@ public:
      * @param plane @en the image plane ID to sample (color|depth|stencil|video) @zh 需要采样的贴图平面(颜色|深度|模板|视频)
      */
     virtual void addTexture(const ccstd::string &name, const ccstd::string &slotName, gfx::Sampler *sampler, uint32_t plane) = 0;
+    virtual void useResource(const ccstd::string &name, ResourceFlags flags) = 0;
     /**
      * @en Add render queue.
      * Every render queue has a hint type, such as NONE, OPAQUE, MASK or BLEND.
@@ -1236,8 +1237,6 @@ public:
     ComputeSubpassBuilder *addComputeSubpass() {
         return addComputeSubpass("");
     }
-
-    virtual void useResource(const ccstd::string& name, ResourceFlags usage) = 0;
 };
 
 class MultisampleRenderPassBuilder : public BasicMultisampleRenderPassBuilder {

@@ -408,7 +408,7 @@ struct MovePair {
     }
 
     MovePair(const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept; // NOLINT
-    MovePair(ccstd::pmr::string sourceIn, ccstd::pmr::string targetIn, uint32_t mipLevelsIn, uint32_t numSlicesIn, uint32_t targetMostDetailedMipIn, uint32_t targetFirstSliceIn, uint32_t targetPlaneSliceIn, gfx::AccessFlags possibleUsageIn, const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept;
+    MovePair(ccstd::pmr::string sourceIn, ccstd::pmr::string targetIn, uint32_t mipLevelsIn, uint32_t numSlicesIn, uint32_t targetMostDetailedMipIn, uint32_t targetFirstSliceIn, uint32_t targetPlaneSliceIn, const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept;
     MovePair(MovePair&& rhs, const allocator_type& alloc);
     MovePair(MovePair const& rhs, const allocator_type& alloc);
 
@@ -424,8 +424,7 @@ struct MovePair {
     uint32_t targetMostDetailedMip{0};
     uint32_t targetFirstSlice{0};
     uint32_t targetPlaneSlice{0};
-
-    gfx::AccessFlags possibleUsage{gfx::AccessFlags::NONE};
+    gfx::AccessFlagBit possibleUsage{gfx::AccessFlagBit::NONE};
 };
 
 struct PipelineStatistics {

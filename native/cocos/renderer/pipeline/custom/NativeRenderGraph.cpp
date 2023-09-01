@@ -800,7 +800,7 @@ void NativeRenderQueueBuilder::addGpuDrivenResource(const scene::Camera *camera,
                 view.accessType = AccessType::READ;
                 view.shaderStageFlags = gfx::ShaderStageFlagBit::VERTEX | gfx::ShaderStageFlagBit::FRAGMENT;
             }
-            ccstd::pmr::string indirectBuffer("CCIndirectBuffer");
+            ccstd::pmr::string indirectBuffer("CCDrawIndirectBuffer");
             indirectBuffer.append(std::to_string(cullingID));
             rasterPass.resources.emplace(indirectBuffer, ResourceFlags::INDIRECT);
         }
@@ -1095,6 +1095,11 @@ void NativeMultisampleRenderPassBuilder::addTexture(
             data.samplers[iter->second.value] = sampler;
         }
     }
+}
+
+void NativeMultisampleRenderPassBuilder::useResource(const ccstd::string &name, ResourceFlags usage) {
+    auto &pass = get(RasterPassTag{}, nodeID, *renderGraph);
+    pass.resources.emplace(name, usage);
 }
 
 void NativeMultisampleRenderPassBuilder::addStorageBuffer(
