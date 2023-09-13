@@ -310,6 +310,9 @@ export class MeshRenderer extends ModelRenderer {
     protected _mesh: Mesh | null = null;
 
     @serializable
+    protected _gpuDrivenEnabled: boolean = true;
+
+    @serializable
     protected _shadowCastingMode = ModelShadowCastingMode.OFF;
 
     @serializable
@@ -453,7 +456,7 @@ export class MeshRenderer extends ModelRenderer {
      * 注意，设置时，所有形变目标的权重都将归零。
      */
     @type(Mesh)
-    @displayOrder(1)
+    @displayOrder(0)
     get mesh (): Mesh | null {
         return this._mesh;
     }
@@ -474,6 +477,21 @@ export class MeshRenderer extends ModelRenderer {
         this._updateUseLightProbe();
         this._updateUseReflectionProbe();
         this._updateReceiveDirLight();
+    }
+
+    /**
+     * @en Whether to enable GPU Driven.
+     * @zh 是否开启 GPU Driven 。
+     */
+    @editable
+    @displayOrder(1)
+    get gpuDrivenEnabled (): boolean {
+        return this._gpuDrivenEnabled;
+    }
+
+    set gpuDrivenEnabled (val) {
+        this._gpuDrivenEnabled = val;
+        this._updateGPUDrivenEnabled();
     }
 
     /**
@@ -564,6 +582,7 @@ export class MeshRenderer extends ModelRenderer {
         this._updateUseReflectionProbe();
         this._updateReceiveDirLight();
         this._updateStandardSkin();
+        this._updateGPUDrivenEnabled();
     }
 
     // Redo, Undo, Prefab restore, etc.
@@ -581,6 +600,7 @@ export class MeshRenderer extends ModelRenderer {
         this._updateUseReflectionProbe();
         this._updateReceiveDirLight();
         this._updateStandardSkin();
+        this._updateGPUDrivenEnabled();
     }
 
     public onEnable (): void {
@@ -607,6 +627,7 @@ export class MeshRenderer extends ModelRenderer {
         this._onUpdateReflectionProbeDataMap();
         this._onUpdateLocalReflectionProbeData();
         this._updateStandardSkin();
+        this._updateGPUDrivenEnabled();
         this._attachToScene();
     }
 
@@ -912,6 +933,7 @@ export class MeshRenderer extends ModelRenderer {
             this._updateReceiveDirLight();
             this._onUpdateReflectionProbeDataMap();
             this._onUpdateLocalReflectionProbeData();
+            this._updateGPUDrivenEnabled();
         }
     }
 
@@ -970,9 +992,7 @@ export class MeshRenderer extends ModelRenderer {
             this._detachFromScene();
         }
 
-        if (this.supportGPUScene()) {
-            if (this.mesh) renderScene.addGPUMesh(this.mesh);
-
+        if (this.supportGPUDriven() && this.mesh!.isInGPUScene()) {
             renderScene.addGPUModel(this._model);
         } else {
             renderScene.addModel(this._model);
@@ -984,7 +1004,7 @@ export class MeshRenderer extends ModelRenderer {
      */
     public _detachFromScene (): void {
         if (this._model && this._model.scene) {
-            if (this.supportGPUScene()) {
+            if (this.supportGPUDriven() && this.mesh!.isInGPUScene()) {
                 this._model.scene.removeGPUModel(this._model);
             } else {
                 this._model.scene.removeModel(this._model);
@@ -995,9 +1015,13 @@ export class MeshRenderer extends ModelRenderer {
     /**
      * @engineInternal
      */
-    public supportGPUScene (): boolean {
+    public supportGPUDriven (): boolean {
         const sceneData = cclegacy.director.root.pipeline.pipelineSceneData;
         if (!sceneData || !sceneData.isGPUDrivenEnabled()) {
+            return false;
+        }
+
+        if (!this._gpuDrivenEnabled) {
             return false;
         }
 
@@ -1161,6 +1185,11 @@ export class MeshRenderer extends ModelRenderer {
         } else {
             this._model.receiveShadow = true;
         }
+    }
+
+    protected _updateGPUDrivenEnabled (): void {
+        if (!this._model) { return; }
+        this._model.gpuDrivenEnabled = this._gpuDrivenEnabled;
     }
 
     protected onMobilityChanged (): void {

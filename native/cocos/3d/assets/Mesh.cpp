@@ -295,9 +295,32 @@ void Mesh::initialize() {
     }
 
     _initialized = true;
-    _supportGPUScene = (!_struct.supportGPUScene.has_value() || _struct.supportGPUScene.value()) && isGPUMeshFormat();
+    _supportGPUScene = (_struct.supportGPUScene.has_value() ? _struct.supportGPUScene.value() : true) && isGPUMeshFormat();
 
-    if (_struct.dynamic.has_value()) {
+    const auto *pipeline = Root::getInstance()->getPipeline();
+    const auto *sceneData = pipeline ? pipeline->getPipelineSceneData() : nullptr;
+    const auto gpuDrivenEnabled = sceneData && sceneData->isGPUDrivenEnabled();
+    if (gpuDrivenEnabled && _supportGPUScene) {
+        for (auto i = 0U; i < _struct.primitives.size(); i++) {
+            const auto &primitive = _struct.primitives[i];
+            gfx::BufferList subVBs = {};
+            gfx::AttributeList attributes;
+
+            for (const auto idx : primitive.vertexBundelIndices) {
+                const auto &vertexBundle = _struct.vertexBundles[idx];
+                for (const auto &attr : vertexBundle.attributes) {
+                    attributes.emplace_back(attr);
+                }
+            }
+
+            // Update buffers later in GPUMeshPool
+            auto *subMesh = ccnew RenderingSubMesh(subVBs, attributes, primitive.primitiveMode, nullptr);
+            subMesh->setMesh(this);
+            subMesh->setSubMeshIdx(static_cast<uint32_t>(i));
+
+            _renderingSubMeshes.emplace_back(subMesh);
+        }
+    } else if (_struct.dynamic.has_value()) {
         auto *device = gfx::Device::getInstance();
         gfx::BufferList vertexBuffers;
 
@@ -444,7 +467,7 @@ void Mesh::initialize() {
 
         _isMeshDataUploaded = true;
 #if !CC_EDITOR
-        if (!_allowDataAccess && !supportGPUScene()) {
+        if (!_allowDataAccess) {
             releaseData();
         }
 #endif
