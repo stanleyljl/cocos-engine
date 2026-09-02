@@ -28,6 +28,7 @@ export * from './exports/sorting';
 export * from './exports/sorting-2d';
 export * from './exports/spine';
 export * from './exports/terrain';
+export * from './exports/landscape';
 export * from './exports/tiled-map';
 export * from './exports/tween';
 export * from './exports/ui-skew';

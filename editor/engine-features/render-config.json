@@ -356,6 +356,15 @@
                 "3d"
             ]
         },
+        "landscape": {
+            "default": true,
+            "label": "Landscape",
+            "description": "Next-gen large-world terrain.",
+            "category": "3d",
+            "dependencies": [
+                "3d"
+            ]
+        },
         "light-probe": {
             "default": true,
             "label": "i18n:ENGINE.features.light_probe.label",

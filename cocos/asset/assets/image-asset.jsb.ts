@@ -125,7 +125,10 @@ imageAssetProto._setRawAsset = function (filename: string, inLibrary = true) {
 imageAssetProto.reset = function (data: any) {
     this._nativeData = data;
 
-    if (data.format !== undefined && !this.isFormatFixed()) {
+    // A PNG imported by the editor is fixed to RGBA8888 (the importer has no
+    // R16UI concept), which would override the real decoded format. Let a
+    // decoded single-channel R16UI (16-bit heightmap) win over the fixed format.
+    if (data.format !== undefined && (!this.isFormatFixed() || data.format === PixelFormat.R16UI)) {
         this.format = (data as any).format;
     }
     this._syncDataToNative();

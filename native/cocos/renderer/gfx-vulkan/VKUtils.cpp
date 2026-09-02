@@ -394,8 +394,8 @@ const VkCullModeFlags VK_CULL_MODES[] = {
 
 const VkPolygonMode VK_POLYGON_MODES[] = {
     VK_POLYGON_MODE_FILL,
-    VK_POLYGON_MODE_LINE,
     VK_POLYGON_MODE_POINT,
+    VK_POLYGON_MODE_LINE,
 };
 
 const VkCompareOp VK_CMP_FUNCS[] = {

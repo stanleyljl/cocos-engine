@@ -187,6 +187,10 @@
             "modules": ["terrain"],
             "dependentAssets": ["1d08ef62-a503-4ce2-8b9a-46c90873f7d3"]
         },
+        "landscape": {
+            "modules": ["landscape"],
+            "dependentAssets": ["180d0750-fdd6-4767-8f5e-9495a56f86e5", "20f8ef92-217a-44f4-8f81-ba10f3924f9b"]
+        },
         "webview": {
             "modules": ["webview"]
         },

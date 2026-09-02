@@ -1622,6 +1622,27 @@ endif()
 # )
 
 
+##### landscape
+cocos_source_files(
+                 cocos/landscape/LandscapeConfig.h
+                 cocos/landscape/GridMesh.h
+                 cocos/landscape/GridMesh.cpp
+                 cocos/landscape/TilePagePool.h
+                 cocos/landscape/TilePagePool.cpp
+                 cocos/landscape/MaterialLibrary.h
+                 cocos/landscape/MaterialLibrary.cpp
+                 cocos/landscape/VirtualTexture.h
+                 cocos/landscape/VirtualTexture.cpp
+                 cocos/landscape/Quadtree.h
+                 cocos/landscape/Quadtree.cpp
+                 cocos/landscape/LandscapeRenderer.h
+                 cocos/landscape/LandscapeRenderer.cpp
+                 cocos/landscape/Landscape.h
+                 cocos/landscape/Landscape.cpp
+                 cocos/landscape/LandscapeAsset.h
+                 cocos/landscape/LandscapeAsset.cpp
+)
+
 ##### scene
 cocos_source_files(
                  cocos/scene/Ambient.h
@@ -2299,6 +2320,8 @@ cocos_source_files(
                             ${SWIG_OUTPUT}/jsb_pipeline_auto.h
     NO_WERROR   NO_UBUILD   ${SWIG_OUTPUT}/jsb_scene_auto.cpp
                             ${SWIG_OUTPUT}/jsb_scene_auto.h
+    NO_WERROR   NO_UBUILD   ${SWIG_OUTPUT}/jsb_landscape_auto.cpp
+                            ${SWIG_OUTPUT}/jsb_landscape_auto.h
     NO_WERROR   NO_UBUILD   ${SWIG_OUTPUT}/jsb_gi_auto.cpp
                             ${SWIG_OUTPUT}/jsb_gi_auto.h
     NO_WERROR   NO_UBUILD   ${SWIG_OUTPUT}/jsb_assets_auto.cpp

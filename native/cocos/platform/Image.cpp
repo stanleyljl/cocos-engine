@@ -658,8 +658,10 @@ bool Image::initWithPngData(const unsigned char *data, uint32_t dataLen) {
         if (png_get_valid(pngPtr, infoPtr, PNG_INFO_tRNS)) {
             png_set_tRNS_to_alpha(pngPtr);
         }
-        // reduce images with 16-bit samples to 8 bits
-        if (bitDepth == 16) {
+        // Preserve 16-bit grayscale height tiles as R16UI (single-channel,
+        // two bytes). Other 16-bit formats keep the legacy 8-bit conversion.
+        const bool preserveGray16 = (colorType == PNG_COLOR_TYPE_GRAY && bitDepth == 16);
+        if (bitDepth == 16 && !preserveGray16) {
             png_set_strip_16(pngPtr);
         }
 
@@ -673,7 +675,7 @@ bool Image::initWithPngData(const unsigned char *data, uint32_t dataLen) {
 
         switch (colorType) {
             case PNG_COLOR_TYPE_GRAY:
-                _renderFormat = gfx::Format::L8;
+                _renderFormat = preserveGray16 ? gfx::Format::R16UI : gfx::Format::L8;
                 break;
             case PNG_COLOR_TYPE_GRAY_ALPHA:
                 _renderFormat = gfx::Format::LA8;
@@ -706,6 +708,16 @@ bool Image::initWithPngData(const unsigned char *data, uint32_t dataLen) {
         }
         png_read_image(pngPtr, rowPointers);
         png_read_end(pngPtr, nullptr);
+
+        if (preserveGray16) {
+            // libpng returns 16-bit samples in PNG big-endian order; the gfx
+            // R16UI upload expects host (little-endian) uint16.
+            for (uint32_t offset = 0; offset + 1 < _dataLen; offset += 2) {
+                const auto first = _data[offset];
+                _data[offset] = _data[offset + 1];
+                _data[offset + 1] = first;
+            }
+        }
 
         if (rowPointers != nullptr) {
             free(rowPointers);

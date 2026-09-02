@@ -111,6 +111,11 @@ export enum PixelFormat {
      */
     I8 = Format.L8,
     /**
+     * @en 16-bit unsigned single-channel format used by landscape heightmaps.
+     * @zh 地形高度图使用的 16 位无符号单通道格式。
+     */
+    R16UI = Format.R16UI,
+    /**
      * @en
      * 16-bit pixel format used as masks
      * @zh

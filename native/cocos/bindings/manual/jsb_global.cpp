@@ -542,12 +542,11 @@ struct ImageInfo *createImageInfo(Image *img) {
     imgInfo->compressed = img->isCompressed();
     imgInfo->mipmapLevelDataSize = img->getMipmapLevelDataSize();
 
-    // Convert to RGBA888 because standard web api will return only RGBA888.
-    // If not, then it may have issue in glTexSubImage. For example, engine
-    // will create a big texture, and update its content with small pictures.
-    // The big texture is RGBA888, then the small picture should be the same
-    // format, or it will cause 0x502 error on OpenGL ES 2.
-    if (!imgInfo->compressed && imgInfo->format != cc::gfx::Format::RGBA8) {
+    // Preserve R16UI heightmaps as two-byte single-channel data. All other
+    // uncompressed formats retain the legacy RGBA conversion used by JSB.
+    // Without this exception the generic conversion path frees the R16 data
+    // because it has no 16-bit conversion branch.
+    if (!imgInfo->compressed && imgInfo->format != cc::gfx::Format::RGBA8 && imgInfo->format != cc::gfx::Format::R16UI) {
         imgInfo->length = img->getWidth() * img->getHeight() * 4;
         uint8_t *dst = nullptr;
         uint32_t length = imgInfo->length;

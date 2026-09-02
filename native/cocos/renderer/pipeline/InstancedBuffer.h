@@ -58,7 +58,7 @@ using DynamicOffsetList = ccstd::vector<uint32_t>;
 class InstancedBuffer : public RefCounted {
 public:
     static constexpr uint32_t INITIAL_CAPACITY = 32;
-    static constexpr uint32_t MAX_CAPACITY = 1024;
+    static constexpr uint32_t MAX_CAPACITY = 10240;
 
     explicit InstancedBuffer(const scene::Pass *pass);
     ~InstancedBuffer() override;
