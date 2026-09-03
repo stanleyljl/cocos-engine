@@ -45,7 +45,7 @@ CCProgram landscape-vs %{
   #endif
 
   out vec3 v_worldPos;
-  out vec3 v_normal;
+  out vec2 v_terrainXZ;
 #if __VERSION__ >= 300
   flat out float v_lod;
 #else
@@ -106,17 +106,9 @@ CCProgram landscape-vs %{
     }
 
     float h = sampleHeight(worldXZ);
-    float spacingX = terrainWorld.x / 2048.0;
-    float spacingZ = terrainWorld.y / 2048.0;
-    float hLeft = sampleHeight(worldXZ - vec2(spacingX, 0.0));
-    float hRight = sampleHeight(worldXZ + vec2(spacingX, 0.0));
-    float hBottom = sampleHeight(worldXZ - vec2(0.0, spacingZ));
-    float hTop = sampleHeight(worldXZ + vec2(0.0, spacingZ));
-    vec3 nLocal = normalize(vec3((hLeft - hRight) / (2.0 * spacingX), 1.0, (hBottom - hTop) / (2.0 * spacingZ)));
-
     vec4 worldPos = matWorld * vec4(worldXZ.x, h, worldXZ.y, 1.0);
     v_worldPos = worldPos.xyz;
-    v_normal = normalize((matWorld * vec4(nLocal, 0.0)).xyz);
+    v_terrainXZ = worldXZ;
 
     return cc_matProj * (cc_matView * worldPos);
   }
@@ -134,60 +126,72 @@ CCProgram landscape-fs %{
     vec4 terrainWorld;
     vec4 lodMorph[8];   // must match the vertex Constants block layout
   };
+#if __VERSION__ >= 300
+  uniform sampler2D heightmap;
+#endif
 
   in vec3 v_worldPos;
-  in vec3 v_normal;
+  in vec2 v_terrainXZ;
 #if __VERSION__ >= 300
   flat in float v_lod;
 #else
   in float v_lod;
 #endif
 
-  // One flat color per LOD level. A function (not an array) so it is legal in
-  // GLSL ES 1.00 too, where dynamic array indexing is not allowed; the glsl1
-  // variant is a compile-only stub (the runtime targets GLES3+/Vulkan/WebGL2).
-  // Matches the CDLOD demo (cdlod.cpp pal[6]) for L0..L5, + two hues for L6/L7.
+  // Exactly the six debug colors used by cdlod_opengl/cdlod.cpp.
   vec3 lodPalette (int lod) {
     if (lod == 0) return vec3(1.00, 0.15, 0.15); // L0 red
     if (lod == 1) return vec3(0.15, 0.90, 0.20); // L1 green
     if (lod == 2) return vec3(0.20, 0.45, 1.00); // L2 blue
     if (lod == 3) return vec3(1.00, 0.90, 0.10); // L3 yellow
     if (lod == 4) return vec3(1.00, 0.15, 0.90); // L4 magenta
-    if (lod == 5) return vec3(0.10, 0.90, 0.95); // L5 cyan
-    if (lod == 6) return vec3(0.65, 0.35, 0.85); // L6 purple
-    return vec3(0.95, 0.55, 0.20);              // L7 orange
+    return vec3(0.10, 0.90, 0.95);              // L5 cyan
   }
 
+#if __VERSION__ >= 300
+  float sampleHeight (vec2 localXZ) {
+    vec2 uv = (localXZ + vec2(0.5 * terrainWorld.x, 0.5 * terrainWorld.y)) * terrainWorld.zw;
+    return texture(heightmap, uv).r * terrainParams.x + terrainParams.y;
+  }
+#endif
+
   vec4 frag () {
-    vec3 albedo = lodPalette(int(mod(v_lod, 8.0)));
-
-    // Simple Lambert with the scene main light + ambient.
-    vec3 N = normalize(v_normal);
-    vec3 L = normalize(-cc_mainLitDir.xyz);
-    float NdotL = max(dot(N, L), 0.0);
-    vec3 ambient = cc_ambientSky.xyz * cc_ambientSky.w;
-    vec3 diffuse = cc_mainLitColor.xyz * cc_mainLitColor.w * NdotL;
-
-    vec3 color = albedo * (ambient + diffuse);
-
   #if __VERSION__ >= 300
-    // lodColor (terrainParams.z): show a pure flat color per LOD level so the
-    // selection bands read clearly. No lighting multiply -- the heightmap normals
-    // would otherwise create ridge/valley shading ("patterns") that obscure the
-    // LOD boundary. With USE_VT on this replaces the composed texture entirely.
+    // Keep the cdlod_opengl fragment calculation unchanged: fixed light,
+    // height-based terrain base color, then the optional LOD overlay.
+    float spacingX = terrainWorld.x / 2048.0;
+    float spacingZ = terrainWorld.y / 2048.0;
+    float hLeft = sampleHeight(v_terrainXZ - vec2(spacingX, 0.0));
+    float hRight = sampleHeight(v_terrainXZ + vec2(spacingX, 0.0));
+    float hBottom = sampleHeight(v_terrainXZ - vec2(0.0, spacingZ));
+    float hTop = sampleHeight(v_terrainXZ + vec2(0.0, spacingZ));
+    vec3 n = normalize(vec3(hLeft - hRight, 2.0 * spacingX, hBottom - hTop));
+    float diff = max(dot(n, normalize(vec3(-0.5, 1.0, -0.35))), 0.0) * 0.85 + 0.15;
+
+    float hN = (v_worldPos.y - terrainParams.y) / terrainParams.x;
+    vec3 base = mix(vec3(0.30, 0.45, 0.22), vec3(0.42, 0.38, 0.34), smoothstep(0.35, 0.55, hN));
+    base = mix(base, vec3(0.92, 0.94, 0.98), smoothstep(0.70, 0.85, hN));
+
+    // Matches cdlod.cpp: overlay 80% of the six-color palette, then apply
+    // the same lighting factor.
     if (terrainParams.z > 0.5) {
-      color = lodPalette(int(mod(v_lod, 8.0)));
+      base = mix(base, lodPalette(int(mod(v_lod, 6.0))), 0.80);
     }
-    // showRanges (terrainParams.w): draw each level's CDLOD morph/range rings
-    // using the same full 3D camera distance as CPU selection and vertex morph.
+    vec3 color = base * diff;
+
+    // Match cdlod.cpp's palette and ring order. The end ring is darkened only
+    // for contrast: the demo's raw palette color is too close to the 80%
+    // lodColor overlay after terrain lighting is applied.
     if (terrainParams.w > 0.5) {
       float d = distance(morphCameraPos.xyz, v_worldPos);
       float w = fwidth(d) * 1.5;
-      for (int i = 0; i < 8; ++i) {
+      for (int i = 0; i < 6; ++i) {
         if (abs(d - lodMorph[i].x) < w) color = mix(lodPalette(i), vec3(0.95), 0.62);
-        if (abs(d - lodMorph[i].y) < w) color = lodPalette(i);
+        if (abs(d - lodMorph[i].y) < w) color = lodPalette(i) * 0.45;
       }
     }
+  #else
+    vec3 color = vec3(0.30, 0.45, 0.22);
   #endif
 
     return CCFragOutput(vec4(color, 1.0));

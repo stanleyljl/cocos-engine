@@ -80,6 +80,11 @@ void Landscape::initializeRenderer() {
     renderer->setProceduralHeightmap(quadtree->proceduralHeightmap(),
                                      quadtree->proceduralHeightmapSize());
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
+    CC_LOG_INFO("[Landscape] LOD ranges:");
+    for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
+        CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
+                    level, quadtree->lodMorphStart()[level], quadtree->lodMorphEnd()[level]);
+    }
     renderer->setDebugFlags(_lodColor, _showRanges);
     renderer->setWireframe(_wireframe);
 
@@ -91,6 +96,8 @@ void Landscape::onDisable() {
     _renderer = nullptr;
     _quadtree = nullptr;
     _selected.clear();
+    _lastLodNodeCounts.fill(0U);
+    _hasLastLodStats = false;
     _scene = nullptr;
     _node = nullptr;
 }
@@ -136,6 +143,36 @@ void Landscape::update() {
                 });
             }
         }
+    }
+    ccstd::array<uint32_t, config::DEMO_LOD_COUNT> lodNodeCounts{};
+    for (const auto &node : _selected) {
+        if (node.level < config::DEMO_LOD_COUNT) {
+            ++lodNodeCounts[node.level];
+        }
+    }
+
+    bool lodStatsChanged = !_hasLastLodStats;
+    for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
+        lodStatsChanged = lodStatsChanged ||
+                          lodNodeCounts[level] != _lastLodNodeCounts[level];
+    }
+    if (lodStatsChanged) {
+        constexpr uint32_t trianglesPerNode =
+            static_cast<uint32_t>(config::GRIDS_PER_NODE) * 16U * 16U * 2U;
+        uint32_t totalNodeCount = 0U;
+        uint32_t totalTriangleCount = 0U;
+        CC_LOG_INFO("[Landscape] LOD stats:");
+        for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
+            const uint32_t triangles = lodNodeCounts[level] * trianglesPerNode;
+            totalNodeCount += lodNodeCounts[level];
+            totalTriangleCount += triangles;
+            CC_LOG_INFO("[Landscape]   LOD%u: nodes=%u triangles=%u",
+                        level, lodNodeCounts[level], triangles);
+        }
+        CC_LOG_INFO("[Landscape]   total: nodes=%u triangles=%u",
+                    totalNodeCount, totalTriangleCount);
+        _lastLodNodeCounts = lodNodeCounts;
+        _hasLastLodStats = true;
     }
     _renderer->sync(_selected);
 }
@@ -214,14 +251,16 @@ void Landscape::drawDebugBounds() {
             (node.maxY - node.minY) * 0.5F,
             size * 0.5F,
         };
-        geometry->addBoundingBox(box, colors[node.level % 8U], true, true, false, true, world);
+        // Debug bounds must remain visible even where the terrain occludes or
+        // shares an edge with the box. Sector seams below remain depth-tested.
+        geometry->addBoundingBox(box, colors[node.level % 8U], true, false, false, true, world);
     }
 #endif
 }
 
 void Landscape::drawDebugSectors() {
 #if CC_USE_GEOMETRY_RENDERER
-    if (_scene == nullptr || _node == nullptr) {
+    if (_scene == nullptr || _node == nullptr || _quadtree == nullptr) {
         return;
     }
     auto *camera = pickMainCamera();
@@ -235,23 +274,33 @@ void Landscape::drawDebugSectors() {
     }
     static const gfx::Color color{1.0F, 0.15F, 0.90F, 1.0F};
     const Mat4 &world = _node->getWorldMatrix();
-    const float minY = config::TERRAIN_MIN_Y;
-    const float maxY = config::TERRAIN_MAX_Y;
     const float halfWorld = config::WORLD_SIZE * 0.5F;
-    for (uint32_t z = 0; z < config::DEMO_SECTORS; ++z) {
-        for (uint32_t x = 0; x < config::DEMO_SECTORS; ++x) {
-            const float x0 = static_cast<float>(x) * config::SECTOR_SIZE - halfWorld;
-            const float z0 = static_cast<float>(z) * config::SECTOR_SIZE - halfWorld;
-            geometry::AABB box{
-                x0 + config::SECTOR_SIZE * 0.5F,
-                (minY + maxY) * 0.5F,
-                z0 + config::SECTOR_SIZE * 0.5F,
-                config::SECTOR_SIZE * 0.5F,
-                (maxY - minY) * 0.5F,
-                config::SECTOR_SIZE * 0.5F,
+    const uint32_t segments = 256U;
+    const float lift = 3.0F;
+    auto emitSeamLine = [&](float x0, float z0, float x1, float z1) {
+        Vec3 previous{x0, _quadtree->proceduralHeightAt(x0, z0) + lift, z0};
+        for (uint32_t i = 1U; i <= segments; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(segments);
+            Vec3 current{
+                x0 + (x1 - x0) * t,
+                0.0F,
+                z0 + (z1 - z0) * t,
             };
-            geometry->addBoundingBox(box, color, true, true, false, true, world);
+            current.y = _quadtree->proceduralHeightAt(current.x, current.z) + lift;
+
+            Vec3 worldPrevious;
+            Vec3 worldCurrent;
+            Vec3::transformMat4(previous, world, &worldPrevious);
+            Vec3::transformMat4(current, world, &worldCurrent);
+            geometry->addLine(worldPrevious, worldCurrent, color, true);
+            previous = current;
         }
+    };
+
+    for (uint32_t i = 0U; i <= config::DEMO_SECTORS; ++i) {
+        const float p = static_cast<float>(i) * config::SECTOR_SIZE - halfWorld;
+        emitSeamLine(p, -halfWorld, p, halfWorld);
+        emitSeamLine(-halfWorld, p, halfWorld, p);
     }
 #endif
 }

@@ -28,6 +28,7 @@
 
 #include "base/Ptr.h"
 #include "base/RefCounted.h"
+#include "base/std/container/array.h"
 #include "base/std/container/string.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
@@ -81,6 +82,8 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     ccstd::vector<QuadNode> _selected;
+    ccstd::array<uint32_t, config::DEMO_LOD_COUNT> _lastLodNodeCounts{};
+    bool _hasLastLodStats{false};
 };
 
 } // namespace landscape

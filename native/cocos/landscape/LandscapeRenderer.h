@@ -83,6 +83,7 @@ private:
     IntrusivePtr<RenderingSubMesh> createGridMesh(gfx::Device *device) const;
     IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
+    void updateMorphCameraProperty();
     void updateInstanceData(scene::Model *model, const QuadNode &node);
     void updateModel(scene::Model *model, const QuadNode &node);
 

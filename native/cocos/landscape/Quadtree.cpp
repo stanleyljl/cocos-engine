@@ -103,6 +103,9 @@ void Quadtree::setConfig(float sectorSize, uint32_t maxLevel, float minY, float 
         _maxY = config::TERRAIN_MAX_Y;
     }
     computeRanges();
+    if (!_heightmap.empty()) {
+        buildHeightRanges();
+    }
 }
 
 void Quadtree::setProceduralWorld(uint32_t sectorsX, uint32_t sectorsZ) {
@@ -117,6 +120,124 @@ void Quadtree::setProceduralWorld(uint32_t sectorsX, uint32_t sectorsZ) {
             const float elevation = fbm(u * 6.0F * static_cast<float>(_sectorsX),
                                         v * 6.0F * static_cast<float>(_sectorsZ));
             _heightmap[static_cast<size_t>(z) * size + x] = std::pow(elevation, 1.7F);
+        }
+    }
+    buildHeightRanges();
+}
+
+float Quadtree::proceduralHeightAt(float x, float z) const {
+    if (_heightmap.empty()) {
+        return _minY;
+    }
+
+    const uint32_t mapSize = config::DEMO_HM_SIZE;
+    const float worldWidth = _sectorSize * static_cast<float>(_sectorsX);
+    const float worldDepth = _sectorSize * static_cast<float>(_sectorsZ);
+    const float u = (x + worldWidth * 0.5F) / worldWidth;
+    const float v = (z + worldDepth * 0.5F) / worldDepth;
+    const auto clampIndex = [mapSize](float value) {
+        const int index = static_cast<int>(value * static_cast<float>(mapSize));
+        return static_cast<uint32_t>(std::max(0, std::min(index, static_cast<int>(mapSize - 1U))));
+    };
+    const uint32_t tx = clampIndex(u);
+    const uint32_t tz = clampIndex(v);
+    return _minY + _heightmap[static_cast<size_t>(tz) * mapSize + tx] * (_maxY - _minY);
+}
+
+size_t Quadtree::nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                                uint32_t ix, uint32_t iz) const {
+    const uint32_t nodesPerSide = 1U << (_maxLevel - level);
+    const size_t sectorIndex = static_cast<size_t>(sectorZ) * _sectorsX + sectorX;
+    return sectorIndex * _nodesPerSector + _levelOffsets[level] +
+           static_cast<size_t>(iz) * nodesPerSide + ix;
+}
+
+void Quadtree::sampleHeightRange(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                                 uint32_t ix, uint32_t iz, float &minY, float &maxY) const {
+    minY = _minY;
+    maxY = _maxY;
+    if (_heightmap.empty()) {
+        return;
+    }
+
+    const uint32_t mapSize = config::DEMO_HM_SIZE;
+    const uint32_t nodesPerSector = 1U << (_maxLevel - level);
+    const uint32_t globalX = sectorX * nodesPerSector + ix;
+    const uint32_t globalZ = sectorZ * nodesPerSector + iz;
+    const float worldWidth = _sectorSize * static_cast<float>(_sectorsX);
+    const float worldDepth = _sectorSize * static_cast<float>(_sectorsZ);
+    // globalX/globalZ are indices of nodes at this level, not sector indices.
+    // Convert them using the actual world size of one node. Without this
+    // factor, most leaves clamp to the last heightmap texel and produce
+    // incorrect AABBs for both frustum culling and distance-based LOD.
+    const float nodeWorldSize = _sectorSize / static_cast<float>(nodesPerSector);
+    const float nodeX0 = static_cast<float>(globalX) * nodeWorldSize;
+    const float nodeZ0 = static_cast<float>(globalZ) * nodeWorldSize;
+    const float nodeX1 = nodeX0 + nodeWorldSize;
+    const float nodeZ1 = nodeZ0 + nodeWorldSize;
+    const uint32_t x0 = static_cast<uint32_t>(std::max(0.0F, std::floor(nodeX0 / worldWidth * mapSize)));
+    const uint32_t z0 = static_cast<uint32_t>(std::max(0.0F, std::floor(nodeZ0 / worldDepth * mapSize)));
+    const uint32_t x1 = std::min(mapSize - 1U, static_cast<uint32_t>(std::ceil(nodeX1 / worldWidth * mapSize)));
+    const uint32_t z1 = std::min(mapSize - 1U, static_cast<uint32_t>(std::ceil(nodeZ1 / worldDepth * mapSize)));
+
+    float lo = std::numeric_limits<float>::max();
+    float hi = std::numeric_limits<float>::lowest();
+    for (uint32_t z = z0; z <= z1; ++z) {
+        for (uint32_t x = x0; x <= x1; ++x) {
+            const float value = _heightmap[static_cast<size_t>(z) * mapSize + x];
+            lo = std::min(lo, value);
+            hi = std::max(hi, value);
+        }
+    }
+    minY = _minY + lo * (_maxY - _minY);
+    maxY = _minY + hi * (_maxY - _minY);
+}
+
+void Quadtree::buildHeightRanges() {
+    _levelOffsets.assign(static_cast<size_t>(_maxLevel) + 1U, 0U);
+    _nodesPerSector = 0U;
+    for (uint32_t level = 0; level <= _maxLevel; ++level) {
+        _levelOffsets[level] = _nodesPerSector;
+        const uint32_t nodesPerSide = 1U << (_maxLevel - level);
+        _nodesPerSector += static_cast<size_t>(nodesPerSide) * nodesPerSide;
+    }
+
+    const size_t sectorCount = static_cast<size_t>(_sectorsX) * _sectorsZ;
+    _heightRanges.assign(sectorCount * _nodesPerSector, HeightRange{_minY, _maxY});
+    if (_heightmap.empty()) {
+        return;
+    }
+
+    // Leaf ranges scan the source heightmap once. Parent ranges are then
+    // merged from their four children, matching the source CDLOD tree while
+    // keeping all range work out of the per-frame selection path.
+    const uint32_t leafSide = 1U << _maxLevel;
+    for (uint32_t sectorZ = 0; sectorZ < _sectorsZ; ++sectorZ) {
+        for (uint32_t sectorX = 0; sectorX < _sectorsX; ++sectorX) {
+            for (uint32_t iz = 0; iz < leafSide; ++iz) {
+                for (uint32_t ix = 0; ix < leafSide; ++ix) {
+                    float minY = _minY;
+                    float maxY = _maxY;
+                    sampleHeightRange(sectorX, sectorZ, 0U, ix, iz, minY, maxY);
+                    _heightRanges[nodeRangeIndex(sectorX, sectorZ, 0U, ix, iz)] = HeightRange{minY, maxY};
+                }
+            }
+
+            for (uint32_t level = 1U; level <= _maxLevel; ++level) {
+                const uint32_t nodesPerSide = 1U << (_maxLevel - level);
+                for (uint32_t iz = 0; iz < nodesPerSide; ++iz) {
+                    for (uint32_t ix = 0; ix < nodesPerSide; ++ix) {
+                        const HeightRange &child00 = _heightRanges[nodeRangeIndex(sectorX, sectorZ, level - 1U, ix * 2U, iz * 2U)];
+                        const HeightRange &child10 = _heightRanges[nodeRangeIndex(sectorX, sectorZ, level - 1U, ix * 2U + 1U, iz * 2U)];
+                        const HeightRange &child01 = _heightRanges[nodeRangeIndex(sectorX, sectorZ, level - 1U, ix * 2U, iz * 2U + 1U)];
+                        const HeightRange &child11 = _heightRanges[nodeRangeIndex(sectorX, sectorZ, level - 1U, ix * 2U + 1U, iz * 2U + 1U)];
+                        _heightRanges[nodeRangeIndex(sectorX, sectorZ, level, ix, iz)] = HeightRange{
+                            std::min(std::min(child00.minY, child10.minY), std::min(child01.minY, child11.minY)),
+                            std::max(std::max(child00.maxY, child10.maxY), std::max(child01.maxY, child11.maxY)),
+                        };
+                    }
+                }
+            }
         }
     }
 }
@@ -146,32 +267,18 @@ void Quadtree::computeRanges() {
 void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const {
     minY = _minY;
     maxY = _maxY;
-    if (_heightmap.empty()) {
+    if (_heightRanges.empty() || _sectorX >= _sectorsX || _sectorZ >= _sectorsZ ||
+        level > _maxLevel) {
         return;
     }
 
-    const uint32_t mapSize = config::DEMO_HM_SIZE;
-    const uint32_t nodesPerSector = 1U << (_maxLevel - level);
-    const uint32_t globalX = _sectorX * nodesPerSector + ix;
-    const uint32_t globalZ = _sectorZ * nodesPerSector + iz;
-    const float worldWidth = _sectorSize * static_cast<float>(_sectorsX);
-    const float worldDepth = _sectorSize * static_cast<float>(_sectorsZ);
-    const uint32_t x0 = static_cast<uint32_t>(std::max(0.0F, std::floor(static_cast<float>(globalX) * _sectorSize / worldWidth * mapSize)));
-    const uint32_t z0 = static_cast<uint32_t>(std::max(0.0F, std::floor(static_cast<float>(globalZ) * _sectorSize / worldDepth * mapSize)));
-    const uint32_t x1 = std::min(mapSize - 1U, static_cast<uint32_t>(std::ceil(static_cast<float>(globalX + 1U) * _sectorSize / worldWidth * mapSize)));
-    const uint32_t z1 = std::min(mapSize - 1U, static_cast<uint32_t>(std::ceil(static_cast<float>(globalZ + 1U) * _sectorSize / worldDepth * mapSize)));
-
-    float lo = std::numeric_limits<float>::max();
-    float hi = std::numeric_limits<float>::lowest();
-    for (uint32_t z = z0; z <= z1; ++z) {
-        for (uint32_t x = x0; x <= x1; ++x) {
-            const float value = _heightmap[static_cast<size_t>(z) * mapSize + x];
-            lo = std::min(lo, value);
-            hi = std::max(hi, value);
-        }
+    const uint32_t nodesPerSide = 1U << (_maxLevel - level);
+    if (ix >= nodesPerSide || iz >= nodesPerSide) {
+        return;
     }
-    minY = _minY + lo * (_maxY - _minY);
-    maxY = _minY + hi * (_maxY - _minY);
+    const HeightRange &range = _heightRanges[nodeRangeIndex(_sectorX, _sectorZ, level, ix, iz)];
+    minY = range.minY;
+    maxY = range.maxY;
 }
 
 const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum,

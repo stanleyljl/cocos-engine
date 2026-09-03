@@ -285,12 +285,6 @@ void LandscapeRenderer::updateMaterialProperties() {
         _worldWidth > 0.0F ? 1.0F / _worldWidth : 0.0F,
         _worldDepth > 0.0F ? 1.0F / _worldDepth : 0.0F,
     };
-    const Vec4 cameraPosition{
-        _morphCameraPosition.x,
-        _morphCameraPosition.y,
-        _morphCameraPosition.z,
-        0.0F,
-    };
     ccstd::vector<Vec4> lodMorph(config::MAX_LOD_LEVELS);
     for (uint32_t i = 0; i < config::MAX_LOD_LEVELS; ++i) {
         const float start = i < _morphStart.size() ? _morphStart[i] : 0.0F;
@@ -301,11 +295,27 @@ void LandscapeRenderer::updateMaterialProperties() {
     for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("terrainWorld", terrainWorld);
-        material->setPropertyVec4("morphCameraPos", cameraPosition);
         material->setPropertyVec4Array("lodMorph", lodMorph);
         if (_heightmap != nullptr) {
             material->setPropertyGFXTexture("heightmap", _heightmap);
         }
+    }
+    updateMorphCameraProperty();
+}
+
+void LandscapeRenderer::updateMorphCameraProperty() {
+    if (_materialSolid == nullptr || _materialWire == nullptr) {
+        return;
+    }
+
+    const Vec4 cameraPosition{
+        _morphCameraPosition.x,
+        _morphCameraPosition.y,
+        _morphCameraPosition.z,
+        0.0F,
+    };
+    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+        material->setPropertyVec4("morphCameraPos", cameraPosition);
     }
 }
 
@@ -371,7 +381,15 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
             _active.emplace(key, model);
             updateModel(model, node);
         } else {
-            updateModel(iter->second, node);
+            const auto state = _modelNodes.find(iter->second.get());
+            if (state == _modelNodes.end() ||
+                state->second.level != node.level ||
+                state->second.ix != node.ix ||
+                state->second.iz != node.iz ||
+                state->second.minY != node.minY ||
+                state->second.maxY != node.maxY) {
+                updateModel(iter->second, node);
+            }
         }
     }
 
@@ -405,8 +423,13 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
 }
 
 void LandscapeRenderer::setMorphCameraPosition(const Vec3 &position) {
+    if (_morphCameraPosition.x == position.x &&
+        _morphCameraPosition.y == position.y &&
+        _morphCameraPosition.z == position.z) {
+        return;
+    }
     _morphCameraPosition = position;
-    updateMaterialProperties();
+    updateMorphCameraProperty();
 }
 
 RenderTexture *LandscapeRenderer::debugAtlas() const {

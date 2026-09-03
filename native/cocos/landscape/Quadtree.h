@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "base/Ptr.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
@@ -52,11 +54,22 @@ public:
     const ccstd::vector<float> &lodMorphEnd() const { return _lodMorphEnd; }
     const ccstd::vector<float> &proceduralHeightmap() const { return _heightmap; }
     uint32_t proceduralHeightmapSize() const { return config::DEMO_HM_SIZE; }
+    float proceduralHeightAt(float x, float z) const;
 
 private:
+    struct HeightRange {
+        float minY{config::TERRAIN_MIN_Y};
+        float maxY{config::TERRAIN_MAX_Y};
+    };
+
     void computeRanges();
+    void buildHeightRanges();
     void traverse(uint32_t level, uint32_t ix, uint32_t iz);
     void nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
+    void sampleHeightRange(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                           uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
+    size_t nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                          uint32_t ix, uint32_t iz) const;
 
     float _sectorSize{config::SECTOR_SIZE};
     uint32_t _maxLevel{config::MAX_LEVEL};
@@ -73,6 +86,9 @@ private:
     IntrusivePtr<geometry::AABB> _box;
     ccstd::vector<QuadNode> _selected;
     ccstd::vector<float> _heightmap;
+    ccstd::vector<size_t> _levelOffsets;
+    ccstd::vector<HeightRange> _heightRanges;
+    size_t _nodesPerSector{0};
     ccstd::vector<float> _lodRange;
     ccstd::vector<float> _lodMorphStart;
     ccstd::vector<float> _lodMorphEnd;
