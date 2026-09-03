@@ -33,11 +33,6 @@ class LandscapeAsset : public RefCounted {
 public:
     LandscapeAsset();
     ~LandscapeAsset() override;
-
-    inline int getVersion() const { return _version; }
-
-private:
-    int _version{1};
 };
 
 } // namespace landscape

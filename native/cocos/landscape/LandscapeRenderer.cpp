@@ -33,6 +33,7 @@
 #include "core/assets/RenderingSubMesh.h"
 #include "core/scene-graph/Node.h"
 #include "core/TypedArray.h"
+#include "landscape/GridMesh.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
@@ -72,74 +73,6 @@ LandscapeRenderer::~LandscapeRenderer() {
     destroy();
 }
 
-IntrusivePtr<RenderingSubMesh> LandscapeRenderer::createGridMesh(gfx::Device *device) const {
-    if (device == nullptr) {
-        return nullptr;
-    }
-
-    // Keep this mesh local to the active CDLOD path. GridMesh is intentionally
-    // dormant and must not be pulled into the renderer.
-    const int side = config::VERTS_PER_GRID_SIDE;
-    const float step = 1.0F / static_cast<float>(side - 1);
-    ccstd::vector<float> vertices;
-    vertices.reserve(static_cast<size_t>(side) * side * 3U);
-    for (int z = 0; z < side; ++z) {
-        for (int x = 0; x < side; ++x) {
-            vertices.emplace_back(static_cast<float>(x) * step);
-            vertices.emplace_back(0.0F);
-            vertices.emplace_back(static_cast<float>(z) * step);
-        }
-    }
-
-    ccstd::vector<uint16_t> indices;
-    indices.reserve(static_cast<size_t>(side - 1) * (side - 1) * 6U);
-    for (int z = 0; z < side - 1; ++z) {
-        for (int x = 0; x < side - 1; ++x) {
-            const auto a = static_cast<uint16_t>(z * side + x);
-            const auto b = static_cast<uint16_t>(a + 1U);
-            const auto c = static_cast<uint16_t>((z + 1) * side + x);
-            const auto d = static_cast<uint16_t>(c + 1U);
-            indices.emplace_back(a);
-            indices.emplace_back(c);
-            indices.emplace_back(b);
-            indices.emplace_back(b);
-            indices.emplace_back(c);
-            indices.emplace_back(d);
-        }
-    }
-
-    auto *vertexBuffer = device->createBuffer({
-        gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
-        gfx::MemoryUsageBit::DEVICE,
-        static_cast<uint32_t>(vertices.size() * sizeof(float)),
-        static_cast<uint32_t>(3U * sizeof(float)),
-    });
-    auto *indexBuffer = device->createBuffer({
-        gfx::BufferUsageBit::INDEX | gfx::BufferUsageBit::TRANSFER_DST,
-        gfx::MemoryUsageBit::DEVICE,
-        static_cast<uint32_t>(indices.size() * sizeof(uint16_t)),
-        static_cast<uint32_t>(sizeof(uint16_t)),
-    });
-    if (vertexBuffer == nullptr || indexBuffer == nullptr) {
-        CC_SAFE_RELEASE(vertexBuffer);
-        CC_SAFE_RELEASE(indexBuffer);
-        return nullptr;
-    }
-
-    vertexBuffer->update(vertices.data(), static_cast<uint32_t>(vertices.size() * sizeof(float)));
-    indexBuffer->update(indices.data(), static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
-
-    gfx::BufferList vertexBuffers;
-    vertexBuffers.emplace_back(vertexBuffer);
-    ccstd::vector<gfx::Attribute> attributes{
-        gfx::Attribute{gfx::ATTR_NAME_POSITION, gfx::Format::RGB32F},
-    };
-    auto *mesh = ccnew RenderingSubMesh(vertexBuffers, attributes,
-                                        gfx::PrimitiveMode::TRIANGLE_LIST, indexBuffer);
-    mesh->setSubMeshIdx(0);
-    return mesh;
-}
-
 bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     auto *root = Root::getInstance();
     auto *device = root != nullptr ? root->getDevice() : nullptr;
@@ -150,7 +83,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     destroy();
     _node = node;
     _scene = scene;
-    _mesh = createGridMesh(device);
+    _mesh = GridMesh::create(device);
     _materialSolid = createLandscapeMaterial(false);
     _materialWire = createLandscapeMaterial(true);
     if (_mesh == nullptr || _materialSolid == nullptr || _materialWire == nullptr) {
@@ -309,9 +242,9 @@ void LandscapeRenderer::updateMorphCameraProperty() {
     }
 
     const Vec4 cameraPosition{
-        _morphCameraPosition.x,
-        _morphCameraPosition.y,
-        _morphCameraPosition.z,
+        _viewPosition.x,
+        _viewPosition.y,
+        _viewPosition.z,
         0.0F,
     };
     for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
@@ -422,13 +355,13 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
     }
 }
 
-void LandscapeRenderer::setMorphCameraPosition(const Vec3 &position) {
-    if (_morphCameraPosition.x == position.x &&
-        _morphCameraPosition.y == position.y &&
-        _morphCameraPosition.z == position.z) {
+void LandscapeRenderer::setViewPos(const Vec3 &position) {
+    if (_viewPosition.x == position.x &&
+        _viewPosition.y == position.y &&
+        _viewPosition.z == position.z) {
         return;
     }
-    _morphCameraPosition = position;
+    _viewPosition = position;
     updateMorphCameraProperty();
 }
 

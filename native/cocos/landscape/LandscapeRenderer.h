@@ -39,7 +39,6 @@ class Material;
 class RenderingSubMesh;
 
 namespace gfx {
-class Device;
 class Texture;
 } // namespace gfx
 
@@ -76,11 +75,10 @@ public:
     void setDebugFlags(bool lodColor, bool showRanges);
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
-    void setMorphCameraPosition(const Vec3 &position);
+    void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
 
 private:
-    IntrusivePtr<RenderingSubMesh> createGridMesh(gfx::Device *device) const;
     IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
     void updateMorphCameraProperty();
@@ -106,7 +104,7 @@ private:
     float _worldDepth{config::WORLD_SIZE};
     float _heightScale{config::HEIGHT_SCALE};
     float _heightBias{config::HEIGHT_BIAS};
-    Vec3 _morphCameraPosition;
+    Vec3 _viewPosition;
     ccstd::vector<float> _morphStart;
     ccstd::vector<float> _morphEnd;
     bool _lodColor{false};

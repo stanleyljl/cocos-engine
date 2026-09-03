@@ -246,13 +246,4 @@ export class Landscape extends Component {
     public getDebugAtlas (): any {
         return this._native ? this._native.getDebugAtlas() : null;
     }
-
-    /**
-     * @en Returns the native version, or 0 when there is no native object.
-     * @zh 返回原生版本号；无原生对象时返回 0。
-     * @engineInternal
-     */
-    public getNativeVersion (): number {
-        return this._native ? this._native.getVersion() as number : 0;
-    }
 }

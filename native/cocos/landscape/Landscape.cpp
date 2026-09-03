@@ -117,7 +117,7 @@ void Landscape::update() {
     if (camera == nullptr) {
         return;
     }
-    _renderer->setMorphCameraPosition(camera->getPosition());
+    _renderer->setViewPos(camera->getPosition());
 
     _selected.clear();
     const Vec3 base = _node->getWorldPosition();

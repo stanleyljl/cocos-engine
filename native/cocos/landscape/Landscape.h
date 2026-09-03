@@ -64,7 +64,6 @@ public:
     void drawDebugBounds();
     void drawDebugSectors();
 
-    inline int getVersion() const { return _version; }
     inline bool isInitialized() const { return _renderer != nullptr; }
     RenderTexture *getDebugAtlas() const;
 
@@ -72,7 +71,6 @@ private:
     void initializeRenderer();
     scene::Camera *pickMainCamera() const;
 
-    int _version{1};
     bool _wireframe{false};
     bool _lodColor{false};
     bool _showRanges{false};
