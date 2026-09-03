@@ -29,20 +29,23 @@
 #include "base/Ptr.h"
 #include "base/RefCounted.h"
 #include "base/std/container/string.h"
+#include "base/std/container/vector.h"
+#include "landscape/LandscapeConfig.h"
 
 namespace cc {
 
 class Node;
 class RenderTexture;
 namespace scene {
+class Camera;
 class RenderScene;
 } // namespace scene
 
 namespace landscape {
 
 class LandscapeRenderer;
+class Quadtree;
 
-// Public lifecycle facade for the minimal flat landscape renderer.
 class Landscape : public RefCounted {
 public:
     Landscape();
@@ -57,7 +60,6 @@ public:
     void setShowRanges(bool enabled);
     void setDataDir(const ccstd::string &dir);
 
-    // Retained as no-op compatibility hooks for the existing demo controls.
     void drawDebugBounds();
     void drawDebugSectors();
 
@@ -67,6 +69,7 @@ public:
 
 private:
     void initializeRenderer();
+    scene::Camera *pickMainCamera() const;
 
     int _version{1};
     bool _wireframe{false};
@@ -75,7 +78,9 @@ private:
     ccstd::string _dataDir;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
+    std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
+    ccstd::vector<QuadNode> _selected;
 };
 
 } // namespace landscape
