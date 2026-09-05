@@ -12,6 +12,7 @@ CCEffect %{
         terrainParams: { value: [3000.0, 0.0, 0.0, 0.0] }
         morphCameraPos: { value: [0.0, 0.0, 0.0, 0.0] }
         terrainWorld: { value: [12288.0, 12288.0, 0.0000813802, 0.0000813802] }
+        heightParams: { value: [1.0, 129.0, 0.0, 0.0] }
         heightmap: { value: white }
         lodMorph: { value: [0.0, 0.0, 0.0, 0.0] }
 }%
@@ -29,23 +30,32 @@ CCProgram landscape-vs %{
     vec4 morphCameraPos;
     // x/y = world dimensions; z/w = reciprocal dimensions.
     vec4 terrainWorld;
+    vec4 heightParams; // x = height sample spacing (m), y = tile resolution.
     // CDLOD per-level morph thresholds, indexed by node LOD (L0 = finest):
     // .x = morphStart distance, .y = morphEnd (= range[lod]). Uploaded from
     // LandscapeRenderer::setLodRanges; matches Quadtree's CPU selection ranges.
     vec4 lodMorph[8];
   };
   #if __VERSION__ >= 300
-    uniform sampler2D heightmap;
+    // RG8 stores the source uint16 height as high-byte/low-byte channels.
+    uniform sampler2DArray heightmap;
   #endif
 
   #if USE_INSTANCING
     // Per-grid instance data: xy = grid world origin (world-XZ, landscape-local),
     // z = grid world size, w = LOD.
     in vec4 a_gridInst;
+    // xy = source tile origin in global terrain UV, z = tile UV size, w = array layer.
+    in vec4 a_heightInst;
   #endif
 
   out vec3 v_worldPos;
   out vec2 v_terrainXZ;
+#if __VERSION__ >= 300
+  flat out vec4 v_heightInst;
+#else
+  out vec4 v_heightInst;
+#endif
 #if __VERSION__ >= 300
   flat out float v_lod;
 #else
@@ -55,7 +65,22 @@ CCProgram landscape-vs %{
   float sampleHeight (vec2 localXZ) {
     vec2 uv = (localXZ + vec2(0.5 * terrainWorld.x, 0.5 * terrainWorld.y)) * terrainWorld.zw;
   #if __VERSION__ >= 300
-    return texture(heightmap, uv).r * terrainParams.x + terrainParams.y;
+    #if USE_INSTANCING
+    vec2 tileUv = (uv - a_heightInst.xy) / max(a_heightInst.z, 1e-6);
+    float tileResolution = max(heightParams.y, 2.0);
+    // Height tiles store samples on both node endpoints. Map those endpoints
+    // to texel centers before hardware linear filtering.
+    tileUv = tileUv * ((tileResolution - 1.0) / tileResolution) +
+             0.5 / tileResolution;
+    vec2 encoded = texture(heightmap,
+                           vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), a_heightInst.w)).rg;
+    // RG8 returns byte / 255 for each channel. Reconstructing
+    // (high * 256 + low) / 65535 therefore simplifies to / 257.
+    float normalized = dot(encoded, vec2(256.0, 1.0)) / 257.0;
+    return normalized * terrainParams.x + terrainParams.y;
+    #else
+    return terrainParams.y;
+    #endif
   #else
     return terrainParams.y;
   #endif
@@ -109,6 +134,11 @@ CCProgram landscape-vs %{
     vec4 worldPos = matWorld * vec4(worldXZ.x, h, worldXZ.y, 1.0);
     v_worldPos = worldPos.xyz;
     v_terrainXZ = worldXZ;
+  #if USE_INSTANCING
+    v_heightInst = a_heightInst;
+  #else
+    v_heightInst = vec4(0.0, 0.0, 1.0, 0.0);
+  #endif
 
     return cc_matProj * (cc_matView * worldPos);
   }
@@ -124,10 +154,11 @@ CCProgram landscape-fs %{
     vec4 terrainParams; // x=height scale (m), y=height bias (m), z=lodColor, w=showRanges
     vec4 morphCameraPos;
     vec4 terrainWorld;
+    vec4 heightParams; // x = height sample spacing (m), y = tile resolution.
     vec4 lodMorph[8];   // must match the vertex Constants block layout
   };
 #if __VERSION__ >= 300
-  uniform sampler2D heightmap;
+  uniform sampler2DArray heightmap;
 #endif
 
   in vec3 v_worldPos;
@@ -136,6 +167,11 @@ CCProgram landscape-fs %{
   flat in float v_lod;
 #else
   in float v_lod;
+#endif
+#if __VERSION__ >= 300
+  flat in vec4 v_heightInst;
+#else
+  in vec4 v_heightInst;
 #endif
 
   // Exactly the six debug colors used by cdlod_opengl/cdlod.cpp.
@@ -151,7 +187,14 @@ CCProgram landscape-fs %{
 #if __VERSION__ >= 300
   float sampleHeight (vec2 localXZ) {
     vec2 uv = (localXZ + vec2(0.5 * terrainWorld.x, 0.5 * terrainWorld.y)) * terrainWorld.zw;
-    return texture(heightmap, uv).r * terrainParams.x + terrainParams.y;
+    vec2 tileUv = (uv - v_heightInst.xy) / max(v_heightInst.z, 1e-6);
+    float tileResolution = max(heightParams.y, 2.0);
+    tileUv = tileUv * ((tileResolution - 1.0) / tileResolution) +
+             0.5 / tileResolution;
+    vec2 encoded = texture(heightmap,
+                           vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), v_heightInst.w)).rg;
+    float normalized = dot(encoded, vec2(256.0, 1.0)) / 257.0;
+    return normalized * terrainParams.x + terrainParams.y;
   }
 #endif
 
@@ -159,8 +202,8 @@ CCProgram landscape-fs %{
   #if __VERSION__ >= 300
     // Keep the cdlod_opengl fragment calculation unchanged: fixed light,
     // height-based terrain base color, then the optional LOD overlay.
-    float spacingX = terrainWorld.x / 2048.0;
-    float spacingZ = terrainWorld.y / 2048.0;
+    float spacingX = heightParams.x;
+    float spacingZ = heightParams.x;
     float hLeft = sampleHeight(v_terrainXZ - vec2(spacingX, 0.0));
     float hRight = sampleHeight(v_terrainXZ + vec2(spacingX, 0.0));
     float hBottom = sampleHeight(v_terrainXZ - vec2(0.0, spacingZ));

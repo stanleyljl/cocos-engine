@@ -44,6 +44,7 @@ class RenderScene;
 
 namespace landscape {
 
+class LandscapeAsset;
 class LandscapeRenderer;
 class Quadtree;
 
@@ -57,6 +58,7 @@ public:
     void update();
 
     void setWireframe(bool wireframe);
+    void setFreezeLod(bool frozen);
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
     void setDataDir(const ccstd::string &dir);
@@ -72,16 +74,17 @@ private:
     scene::Camera *pickMainCamera() const;
 
     bool _wireframe{false};
+    bool _freezeLod{false};
     bool _lodColor{false};
     bool _showRanges{false};
     ccstd::string _dataDir;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
+    IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     ccstd::vector<QuadNode> _selected;
-    ccstd::array<uint32_t, config::DEMO_LOD_COUNT> _lastLodNodeCounts{};
-    bool _hasLastLodStats{false};
+    ccstd::vector<uint32_t> _lastLodNodeCounts;
 };
 
 } // namespace landscape

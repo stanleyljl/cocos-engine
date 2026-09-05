@@ -18,8 +18,7 @@ After PNG decoding, each pixel is one `R16UI` unsigned 16-bit sample. The
 encoded value is:
 
 ```text
-bit 0       hole flag
-bits 1..15  quantized height in [0, 32767]
+full 16 bits quantized height in [0, 65535]
 ```
 
 LOD numbering follows CDLOD: `L0` is the finest (smallest) node level and
@@ -30,10 +29,10 @@ The node coordinates are global within each level. A sector coordinate is
 derived by shifting the node coordinate right by `maxLevel-level`.
 
 Each level entry in the manifest also carries `heightRange.{min,max}`: per-node
-quantized height bounds (`height15`, row-major `iz*nx+ix`, global per-level
+quantized height bounds (`uint16`, row-major `iz*nx+ix`, global per-level
 coords), merged bottom-up so a node encloses its whole subtree. The runtime
 turns these into a tight per-node AABB (`heightMeters = heightBias +
-(v/32767)*heightScale`) for frustum culling / LOD selection, instead of the
+(v/65535)*heightScale`) for frustum culling / LOD selection, instead of the
 whole `[minY,maxY]` band. `heightmap-tiles.js` emits this automatically.
 
 Generate a deterministic one-Sector fixture:
@@ -61,10 +60,6 @@ node scripts/landscape/heightmap-tiles.js `
   --height-scale 2000 `
   --height-bias 0
 ```
-
-Use `--holes holes.png` to set bit 0 from a matching grayscale mask. The
-source and mask are sampled at their original one-meter coordinates; shared
-tile borders are written from the same source samples and therefore match.
 
 ## Patching an older dataset with per-node height bounds
 

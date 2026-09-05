@@ -28,10 +28,7 @@
 #include <utility>
 
 #include "base/Log.h"
-#include "base/Macros.h"
-#include "base/ThreadPool.h"
-#include "platform/FileUtils.h"
-#include "platform/Image.h"
+#include "landscape/LandscapeAsset.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDef.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -44,6 +41,10 @@ TilePagePool::TilePagePool() = default;
 
 TilePagePool::~TilePagePool() {
     destroy();
+}
+
+void TilePagePool::setAsset(LandscapeAsset *asset) {
+    _asset = asset;
 }
 
 bool TilePagePool::init(gfx::Device *device, gfx::Format format, uint32_t tileRes, uint32_t layerCount) {
@@ -83,8 +84,11 @@ bool TilePagePool::init(gfx::Device *device, gfx::Format format, uint32_t tileRe
     }
 
     gfx::SamplerInfo si;
-    si.minFilter = gfx::Filter::POINT;
-    si.magFilter = gfx::Filter::POINT;
+    // RG8 unpacking is a linear combination of both normalized channels, so
+    // hardware filtering the packed channels is equivalent to filtering the
+    // reconstructed 16-bit height.
+    si.minFilter = gfx::Filter::LINEAR;
+    si.magFilter = gfx::Filter::LINEAR;
     si.mipFilter = gfx::Filter::NONE;
     si.addressU = gfx::Address::CLAMP;
     si.addressV = gfx::Address::CLAMP;
@@ -101,10 +105,7 @@ bool TilePagePool::init(gfx::Device *device, gfx::Format format, uint32_t tileRe
     _resident.clear();
     _lru.clear();
     _lruIter.clear();
-    _pending.clear();
     _inUse.clear();
-    _stage.clear();
-    _async = std::make_shared<AsyncState>();
     _warnedFull = false;
     return true;
 }
@@ -147,9 +148,11 @@ int TilePagePool::query(uint64_t key, const ccstd::string &tilePath) {
         touchLRU(key);
         return static_cast<int>(it->second);
     }
-    // Not resident yet: kick off an async load. Return -1 so the caller can fall
-    // back to a resident ancestor tile (see LandscapeRenderer::resolvePage).
-    requestLoad(key, tilePath);
+    // Not resident yet: ask the asset to decode it asynchronously. Return -1
+    // so the caller can fall back to a resident ancestor tile.
+    if (_asset != nullptr) {
+        _asset->requestTile(key, tilePath, _format, _tileRes);
+    }
     return -1;
 }
 
@@ -168,80 +171,20 @@ int TilePagePool::peekResident(uint64_t key) {
     return static_cast<int>(it->second);
 }
 
-void TilePagePool::requestLoad(uint64_t key, const ccstd::string &tilePath) {
-    if (_pending.find(key) != _pending.end()) {
-        return; // already in flight (dedup)
-    }
-    _pending.insert(key);
-
-    auto async = _async; // shared_ptr copy keeps the queue alive past pool teardown
-    const uint32_t tileRes = _tileRes;
-    const gfx::Format format = _format;
-    const uint32_t bytesPerTexel = _bytesPerTexel;
-    LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, tilePath, tileRes, format, bytesPerTexel](int /*threadId*/) {
-            auto reportFailure = [async, key]() {
-                std::lock_guard<std::mutex> lock(async->mutex);
-                async->failed.push_back(key);
-            };
-            if (async->cancelled.load()) {
-                return;
-            }
-            const Data data = FileUtils::getInstance()->getDataFromFile(tilePath);
-            if (data.isNull()) {
-                CC_LOG_WARNING("[Landscape] failed to load tile: %s", tilePath.c_str());
-                reportFailure();
-                return;
-            }
-            IntrusivePtr<Image> image = ccnew Image();
-            if (!image->initWithImageData(data.getBytes(), data.getSize())) {
-                reportFailure();
-                return;
-            }
-            if (image->getRenderFormat() != format ||
-                static_cast<uint32_t>(image->getWidth()) != tileRes ||
-                static_cast<uint32_t>(image->getHeight()) != tileRes) {
-                reportFailure();
-                return;
-            }
-            ReadyTile rt;
-            rt.key = key;
-            const uint8_t *src = image->getData();
-            rt.data.assign(src, src + static_cast<size_t>(tileRes) * tileRes * bytesPerTexel);
-            {
-                std::lock_guard<std::mutex> lock(async->mutex);
-                async->ready.push_back(std::move(rt));
-            }
-        },
-        LegacyThreadPool::TaskType::IO);
-}
-
 void TilePagePool::update(uint32_t maxUploads) {
     if (_array == nullptr) {
         return;
     }
-    // Move any worker-decoded tiles into the main-thread upload stage.
-    {
-        std::lock_guard<std::mutex> lock(_async->mutex);
-        if (!_async->failed.empty()) {
-            for (const uint64_t key : _async->failed) {
-                _pending.erase(key);
-            }
-            _async->failed.clear();
-        }
-        if (!_async->ready.empty()) {
-            for (auto &rt : _async->ready) {
-                _stage.push_back(std::move(rt));
-            }
-            _async->ready.clear();
+    // The asset owns worker threads and decoded data. Consume at most the
+    // upload budget here, without doing any file or PNG work on this class.
+    uint32_t done = 0;
+    if (_asset != nullptr) {
+        uint64_t failedKey = 0;
+        while (_asset->takeFailedTile(failedKey)) {
         }
     }
-    // Upload up to the per-frame budget; the rest waits for the next frame.
-    uint32_t done = 0;
-    while (done < maxUploads && !_stage.empty()) {
-        ReadyTile rt = std::move(_stage.front());
-        _stage.pop_front();
-        _pending.erase(rt.key);
+    LandscapeAsset::TileData rt;
+    while (_asset != nullptr && done < maxUploads && _asset->takeReadyTile(rt)) {
         if (_resident.find(rt.key) != _resident.end()) {
             continue; // already uploaded via an earlier duplicate
         }
@@ -295,20 +238,12 @@ int TilePagePool::acquireLayer() {
 }
 
 void TilePagePool::destroy() {
-    if (_async) {
-        // In-flight IO tasks hold their own shared_ptr to _async; flag them to
-        // bail early, then drop our reference. Their decoded results (if any)
-        // land in the now-orphaned queue and are freed with the last task.
-        _async->cancelled.store(true);
-    }
     _resident.clear();
     _lru.clear();
     _lruIter.clear();
     _freeLayers.clear();
-    _pending.clear();
     _inUse.clear();
-    _stage.clear();
-    _async.reset();
+    _asset = nullptr;
     _array = nullptr; // IntrusivePtr releases the gfx texture
     _sampler = nullptr;
     _device = nullptr;

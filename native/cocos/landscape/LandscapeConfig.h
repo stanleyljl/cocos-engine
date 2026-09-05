@@ -30,30 +30,17 @@ namespace cc {
 namespace landscape {
 namespace config {
 
-// These values intentionally match cdlod_opengl/cdlod.h.
-constexpr uint32_t DEMO_HM_SIZE = 2048;
-constexpr float SECTOR_SIZE = 4096.0F;
-constexpr uint32_t DEMO_SECTORS = 3;
-constexpr float WORLD_SIZE = SECTOR_SIZE * static_cast<float>(DEMO_SECTORS);
-constexpr float HEIGHT_SCALE = 500.0F;
-constexpr float HEIGHT_BIAS = 0.0F;
-constexpr uint32_t DEMO_LOD_COUNT = 6;
-constexpr uint32_t MAX_LEVEL = DEMO_LOD_COUNT - 1U;
-constexpr int VERTS_PER_GRID_SIDE = 17;
-constexpr int GRIDS_PER_NODE_SIDE = 1;
-constexpr int GRIDS_PER_NODE = GRIDS_PER_NODE_SIDE * GRIDS_PER_NODE_SIDE;
+constexpr int       VERTS_PER_NODE_SIDE = 17;
+constexpr float     VIS_SAFETY = 1.05F;
+constexpr float     MORPH_RATIO = 0.66F;
+constexpr uint32_t  MAX_LOD_LEVELS = 8;
 
-constexpr float VIS_SAFETY = 1.05F;
-constexpr float MORPH_RATIO = 0.66F;
-constexpr uint32_t MAX_LOD_LEVELS = 8;
-constexpr float TERRAIN_MIN_Y = HEIGHT_BIAS;
-constexpr float TERRAIN_MAX_Y = HEIGHT_BIAS + HEIGHT_SCALE;
-
-// Constants retained for the dormant page/material/VT files.
-constexpr uint32_t TILE_RESOLUTION = 129;
-constexpr uint32_t PAGE_POOL_LAYERS = 512;
-constexpr uint32_t PAGE_UPLOAD_BUDGET = 6;
+// Active height-page cache configuration.
+constexpr uint32_t PAGE_POOL_LAYERS = 1024;
+constexpr uint32_t PAGE_UPLOAD_BUDGET = 8;
+// Retained for the material library and virtual texture implementation.
 constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
+
 constexpr uint32_t VT_ATLAS_SIZE = 4096;
 constexpr uint32_t VT_PAGE_RES = 128;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
@@ -62,12 +49,33 @@ constexpr uint32_t VT_COMPOSE_LAYER = 1U << 19;
 
 } // namespace config
 
+struct LandscapeData {
+    uint32_t sectorsX{0};
+    uint32_t sectorsZ{0};
+    uint32_t maxLevel{0};
+    uint32_t minTileLevel{0};
+    uint32_t tileResolution{0};
+    float sectorSize{0.0F};
+    float heightScale{0.0F};
+    float heightBias{0.0F};
+
+    float worldWidth() const { return sectorSize * static_cast<float>(sectorsX); }
+    float worldDepth() const { return sectorSize * static_cast<float>(sectorsZ); }
+    float minHeight() const { return heightBias; }
+    float maxHeight() const { return heightBias + heightScale; }
+    bool valid() const {
+        return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
+               minTileLevel <= maxLevel && tileResolution > 1U && sectorSize > 0.0F &&
+               heightScale > 0.0F;
+    }
+};
+
 struct QuadNode {
     uint32_t level{0};
     uint32_t ix{0};
     uint32_t iz{0};
-    float minY{config::TERRAIN_MIN_Y};
-    float maxY{config::TERRAIN_MAX_Y};
+    float minY{0.0F};
+    float maxY{0.0F};
 };
 
 constexpr uint32_t NODE_KEY_COORD_BITS = 28U;

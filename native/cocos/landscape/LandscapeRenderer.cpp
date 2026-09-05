@@ -34,12 +34,15 @@
 #include "core/scene-graph/Node.h"
 #include "core/TypedArray.h"
 #include "landscape/GridMesh.h"
+#include "landscape/TilePagePool.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "scene/RenderScene.h"
+#include "scene/Octree.h"
+#include "scene/Pass.h"
 
 namespace cc {
 namespace landscape {
@@ -101,30 +104,6 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     return true;
 }
 
-void LandscapeRenderer::setWorld(uint32_t sectorsX, uint32_t sectorsZ,
-                                 float sectorSize, uint32_t maxLevel) {
-    if (sectorsX == 0U || sectorsZ == 0U || sectorSize <= 0.0F ||
-        maxLevel >= config::MAX_LOD_LEVELS) {
-        return;
-    }
-    _sectorsX = sectorsX;
-    _sectorsZ = sectorsZ;
-    _sectorSize = sectorSize;
-    _maxLevel = maxLevel;
-    _worldWidth = sectorSize * static_cast<float>(sectorsX);
-    _worldDepth = sectorSize * static_cast<float>(sectorsZ);
-    updateMaterialProperties();
-}
-
-void LandscapeRenderer::setHeightRange(float scale, float bias) {
-    if (scale <= 0.0F) {
-        return;
-    }
-    _heightScale = scale;
-    _heightBias = bias;
-    updateMaterialProperties();
-}
-
 void LandscapeRenderer::setLodRanges(const ccstd::vector<float> &morphStart,
                                      const ccstd::vector<float> &morphEnd) {
     const size_t count = std::min({morphStart.size(), morphEnd.size(),
@@ -138,44 +117,37 @@ void LandscapeRenderer::setLodRanges(const ccstd::vector<float> &morphStart,
     updateMaterialProperties();
 }
 
-void LandscapeRenderer::setProceduralHeightmap(const ccstd::vector<float> &heightmap,
-                                               uint32_t size) {
-    if (heightmap.empty() || size == 0U || heightmap.size() != static_cast<size_t>(size) * size) {
-        return;
+bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
+    if (asset == nullptr || !asset->valid() || Root::getInstance() == nullptr) {
+        return false;
     }
     auto *root = Root::getInstance();
     auto *device = root != nullptr ? root->getDevice() : nullptr;
     if (device == nullptr) {
-        return;
+        return false;
     }
-
-    auto *texture = device->createTexture({
-        gfx::TextureType::TEX2D,
-        gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST,
-        gfx::Format::R32F,
-        size,
-        size,
-    });
-    if (texture == nullptr) {
-        CC_LOG_WARNING("[Landscape] failed to create the R32F heightmap texture");
-        return;
+    _asset = asset;
+    const auto &data = asset->data();
+    _dataDir = asset->dataDir();
+    _maxLevel = data.maxLevel;
+    _minTileLevel = data.minTileLevel;
+    _tileResolution = data.tileResolution;
+    _sectorSize = data.sectorSize;
+    _worldWidth = data.worldWidth();
+    _worldDepth = data.worldDepth();
+    _heightScale = data.heightScale;
+    _heightBias = data.heightBias;
+    const uint32_t tileNodeDivisions = 1U << (_maxLevel - _minTileLevel);
+    _heightSampleSpacing = (_sectorSize / static_cast<float>(tileNodeDivisions)) /
+                           static_cast<float>(_tileResolution - 1U);
+    _heightPages = std::make_unique<TilePagePool>();
+    if (!_heightPages->init(device, gfx::Format::RG8, _tileResolution, config::PAGE_POOL_LAYERS)) {
+        _heightPages.reset();
+        return false;
     }
-
-    const auto *data = reinterpret_cast<const uint8_t *>(heightmap.data());
-    gfx::BufferDataList buffers{data};
-    gfx::BufferTextureCopyList regions{{0U,
-                                        0U,
-                                        0U,
-                                        {0, 0, 0},
-                                        {size, size, 1U},
-                                        {0U, 0U, 1U}}};
-    device->copyBuffersToTexture(buffers, texture, regions);
-    _heightmap = texture;
+    _heightPages->setAsset(asset);
     updateMaterialProperties();
-}
-
-bool LandscapeRenderer::hasProceduralHeightmap() const {
-    return _heightmap != nullptr;
+    return true;
 }
 
 void LandscapeRenderer::setDebugFlags(bool lodColor, bool showRanges) {
@@ -228,9 +200,18 @@ void LandscapeRenderer::updateMaterialProperties() {
     for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("terrainWorld", terrainWorld);
+        material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
+                                                        static_cast<float>(_tileResolution),
+                                                        0.0F, 0.0F});
         material->setPropertyVec4Array("lodMorph", lodMorph);
-        if (_heightmap != nullptr) {
-            material->setPropertyGFXTexture("heightmap", _heightmap);
+        if (_heightPages != nullptr && _heightPages->array() != nullptr) {
+            material->setPropertyGFXTexture("heightmap", _heightPages->array());
+            for (const auto &pass : *material->getPasses()) {
+                const uint32_t handle = pass->getHandle("heightmap");
+                if (handle != 0U) {
+                    pass->bindSampler(scene::Pass::getBindingFromHandle(handle), _heightPages->sampler());
+                }
+            }
         }
     }
     updateMorphCameraProperty();
@@ -268,10 +249,82 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     instance[2] = nodeSize;
     instance[3] = static_cast<float>(node.level);
     model->setInstancedAttribute("a_gridInst", instance);
+
+    uint32_t sourceLevel = 0U;
+    uint32_t sourceX = 0U;
+    uint32_t sourceZ = 0U;
+    const int layer = resolveHeightPage(node, sourceLevel, sourceX, sourceZ);
+    const float sourceNodeSize = _sectorSize / static_cast<float>(1U << (_maxLevel - sourceLevel));
+    const Vec4 tileParams{
+        static_cast<float>(sourceX) * sourceNodeSize / _worldWidth,
+        static_cast<float>(sourceZ) * sourceNodeSize / _worldDepth,
+        sourceNodeSize / _worldWidth,
+        static_cast<float>(layer < 0 ? TilePagePool::FLAT_LAYER : layer),
+    };
+    // a_heightInst.xy = source tile origin in global [0,1] terrain UV,
+    // z = source tile UV size, w = array layer. For LODs finer than the
+    // generated tile level, keep the complete source-tile range here: the
+    // shader's global UV selects the corresponding subregion of that tile.
+    Float32Array heightInstance(4);
+    heightInstance[0] = tileParams.x;
+    heightInstance[1] = tileParams.y;
+    heightInstance[2] = tileParams.z;
+    heightInstance[3] = tileParams.w;
+    model->setInstancedAttribute("a_heightInst", heightInstance);
+}
+
+int LandscapeRenderer::resolveHeightPage(const QuadNode &node, uint32_t &sourceLevel,
+                                         uint32_t &sourceX, uint32_t &sourceZ) {
+    if (_heightPages == nullptr || _asset == nullptr) {
+        return TilePagePool::FLAT_LAYER;
+    }
+    sourceLevel = std::max(node.level, _minTileLevel);
+    const uint32_t shift = sourceLevel > node.level ? sourceLevel - node.level : 0U;
+    sourceX = node.ix >> shift;
+    sourceZ = node.iz >> shift;
+    const uint64_t key = makeNodeKey(sourceLevel, sourceX, sourceZ);
+    const ccstd::string path = _dataDir + "/nodes/L" + std::to_string(sourceLevel) +
+                               "/h_" + std::to_string(sourceX) + "_" + std::to_string(sourceZ) + ".png";
+    int layer = _heightPages->query(key, path);
+    if (layer >= 0) {
+        return layer;
+    }
+    for (uint32_t level = sourceLevel + 1U; level <= _maxLevel; ++level) {
+        const uint32_t ancestorShift = level - sourceLevel;
+        const uint32_t ancestorX = sourceX >> ancestorShift;
+        const uint32_t ancestorZ = sourceZ >> ancestorShift;
+        layer = _heightPages->peekResident(makeNodeKey(level, ancestorX, ancestorZ));
+        if (layer >= 0) {
+            sourceLevel = level;
+            sourceX = ancestorX;
+            sourceZ = ancestorZ;
+            return layer;
+        }
+    }
+    return TilePagePool::FLAT_LAYER;
 }
 
 void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node) {
     if (model == nullptr) {
+        return;
+    }
+
+    updateInstanceData(model, node);
+    _modelNodes[model] = node;
+    model->setEnabled(true);
+    updateModelBounds(model, node);
+}
+
+void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node) {
+    if (_freezeLod) {
+        // The frozen selection already passed the terrain frustum test. Models
+        // without world bounds bypass both forward and custom pipeline culling.
+        // Remove any octree entry before clearing bounds to avoid stale queries.
+        if (_scene != nullptr && _scene->getOctree() != nullptr) {
+            _scene->getOctree()->remove(model);
+        }
+        model->setWorldBounds(nullptr);
+        model->updateOctree();
         return;
     }
 
@@ -280,11 +333,8 @@ void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node) {
     const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F;
     const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F;
 
-    updateInstanceData(model, node);
-    _modelNodes[model] = node;
     model->createBoundingShape(Vec3{x, node.minY, z},
                                 Vec3{x + nodeSize, node.maxY, z + nodeSize});
-    model->setEnabled(true);
     model->updateWorldBound();
     model->updateOctree();
 }
@@ -296,6 +346,16 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
 
     ccstd::unordered_map<uint64_t, bool> visible;
     visible.reserve(selected.size());
+    _heightPages->beginFrame();
+    // Mark all visible pages before uploading staged tiles so LRU eviction never
+    // removes a tile needed by the current view.
+    for (const auto &node : selected) {
+        uint32_t sourceLevel = 0U;
+        uint32_t sourceX = 0U;
+        uint32_t sourceZ = 0U;
+        resolveHeightPage(node, sourceLevel, sourceX, sourceZ);
+    }
+    _heightPages->update(config::PAGE_UPLOAD_BUDGET);
     for (const auto &node : selected) {
         const uint64_t key = makeNodeKey(node);
         visible[key] = true;
@@ -322,6 +382,8 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
                 state->second.minY != node.minY ||
                 state->second.maxY != node.maxY) {
                 updateModel(iter->second, node);
+            } else {
+                updateInstanceData(iter->second, node);
             }
         }
     }
@@ -333,6 +395,19 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
             iter = _active.erase(iter);
         } else {
             ++iter;
+        }
+    }
+}
+
+void LandscapeRenderer::setFreezeLod(bool frozen) {
+    if (_freezeLod == frozen) {
+        return;
+    }
+    _freezeLod = frozen;
+    for (const auto &entry : _active) {
+        const auto state = _modelNodes.find(entry.second.get());
+        if (state != _modelNodes.end()) {
+            updateModelBounds(entry.second, state->second);
         }
     }
 }
@@ -371,7 +446,8 @@ RenderTexture *LandscapeRenderer::debugAtlas() const {
 
 bool LandscapeRenderer::valid() const {
     return _scene != nullptr && _node != nullptr && _mesh != nullptr &&
-           _materialSolid != nullptr && _materialWire != nullptr;
+           _materialSolid != nullptr && _materialWire != nullptr &&
+           _heightPages != nullptr && _heightPages->valid() && _asset != nullptr;
 }
 
 void LandscapeRenderer::destroy() {
@@ -395,10 +471,11 @@ void LandscapeRenderer::destroy() {
     _modelNodes.clear();
     _pool.clear();
 
-    if (_heightmap != nullptr) {
-        _heightmap->destroy();
+    if (_heightPages != nullptr) {
+        _heightPages->destroy();
     }
-    _heightmap = nullptr;
+    _heightPages.reset();
+    _asset = nullptr;
     _mesh = nullptr;
     _materialSolid = nullptr;
     _materialWire = nullptr;

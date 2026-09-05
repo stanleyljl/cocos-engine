@@ -10,7 +10,7 @@ const DEFAULT_MAX_LEVEL = 5;
 const DEFAULT_MIN_TILE_LEVEL = 0;
 const DEFAULT_HEIGHT_SCALE = 2000;
 const DEFAULT_HEIGHT_BIAS = 0;
-const HEIGHT_MAX = 0x7fff;
+const HEIGHT_MAX = 0xffff;
 
 function fail (message) {
     throw new Error(message);
@@ -112,26 +112,6 @@ function clamp01 (value) {
     return Math.max(0, Math.min(1, value));
 }
 
-// Splat texel = two material ids (5 bits each -> up to 32-material library) + the
-// upper layer's blend weight (6 bits). Sampling 4 neighbor texels blends up to 8 / pixel.
-function encodeSplat (id0, id1, weight6) {
-    return (id0 & 31) | ((id1 & 31) << 5) | ((weight6 & 63) << 10);
-}
-
-// Generic banding across N ARBITRARY material layers (no fixed semantics): elevation
-// picks a pair of adjacent layers, slope nudges the blend. Layer id = array index.
-function materialSplat (h01, slope01, layerCount) {
-    if (layerCount <= 1) {
-        return encodeSplat(0, 0, 0);
-    }
-    const bands = layerCount - 1;
-    const f = clamp01(h01) * bands;
-    const id0 = Math.min(bands, Math.floor(f));
-    const id1 = Math.min(bands, id0 + 1);
-    let weight = (f - id0) + (clamp01(slope01) - 0.5) * 0.4; // slope adds a little variation
-    return encodeSplat(id0, id1, Math.round(clamp01(weight) * 63));
-}
-
 // Discover the material-library albedo layers: PNGs directly under
 // <assetDir>/materials (sorted; the raw/ archive subdir is ignored). Layer id =
 // array index, capped at 32 (splat ids are 5-bit).
@@ -154,8 +134,6 @@ function printHelp () {
 Input:
   --input <png>       8-bit or 16-bit grayscale PNG, one meter per source sample
   --procedural        Generate a deterministic test height field without an input file
-  --holes <png>       Optional grayscale hole mask; non-zero samples set the height LSB
-
 Output:
   --out <dir>         Parent directory for assets/landscape/<name>
   --name <name>       Landscape asset directory and .json manifest name
@@ -167,16 +145,15 @@ Layout options:
   --sector-size <m>   Sector size in meters (default: 4096)
   --max-level <n>     Quadtree levels L0..Ln (default: 5)
   --min-tile-level <n> Finest level with a generated tile (default: 0).
-                      Levels finer than this (L0..n-1) get NO height/splat tile
+                      Levels finer than this (L0..n-1) get NO height tile
                       and permanently sample the L<n> ancestor at runtime.
   --tile-size <n>     Height tile resolution (default: 129)
-  --height-scale <m>  Physical height range represented by 15 bits (default: 2000)
+  --height-scale <m>  Physical height range represented by uint16 (default: 2000)
   --height-bias <m>   Physical height at encoded value 0 (default: 0)
 
 The output uses 16-bit grayscale PNG tiles (PNG color type 0, bit depth 16).
-After decoding, each sample is an R16UI uint16 value. The upper 15 bits encode
-height and bit 0 is reserved for the hole flag. Node coordinates are global per
-level.
+After decoding, each sample is an R16UI uint16 height value in [0, 65535].
+Node coordinates are global per level.
 `);
 }
 
@@ -219,22 +196,20 @@ function proceduralSample (x, y, width, height) {
     return clamp01(0.5 + broad + ridge + basin);
 }
 
-function writeHeightTile (filePath, tileSize, sampleAt, holeAt) {
+function writeHeightTile (filePath, tileSize, sampleAt) {
     // 16-bit grayscale PNG (color type 0, bit depth 16), directly viewable as a
-    // heightmap. After decoding, each sample is an R16UI uint16: bits 1..15 are
-    // the quantized height, bit 0 is the hole flag.
-    // Returns the tile's [min,max] quantized height15 (0..HEIGHT_MAX) so the
-    // manifest can carry a tight per-node vertical bound for culling / LOD.
+    // heightmap. After decoding, each sample is an R16UI uint16 height value.
+    // Returns the tile's [min,max] quantized height values so the manifest can
+    // carry a tight per-node vertical bound for culling / LOD.
     const values = new Uint16Array(tileSize * tileSize);
-    let min15 = HEIGHT_MAX;
-    let max15 = 0;
+    let minValue = HEIGHT_MAX;
+    let maxValue = 0;
     for (let y = 0; y < tileSize; ++y) {
         for (let x = 0; x < tileSize; ++x) {
-            const height15 = Math.round(clamp01(sampleAt(x, y)) * HEIGHT_MAX);
-            if (height15 < min15) min15 = height15;
-            if (height15 > max15) max15 = height15;
-            const hole = holeAt && holeAt(x, y) > 0.5 ? 1 : 0;
-            values[y * tileSize + x] = (height15 << 1) | hole;
+            const value = Math.round(clamp01(sampleAt(x, y)) * HEIGHT_MAX);
+            if (value < minValue) minValue = value;
+            if (value > maxValue) maxValue = value;
+            values[y * tileSize + x] = value;
         }
     }
 
@@ -249,7 +224,7 @@ function writeHeightTile (filePath, tileSize, sampleAt, holeAt) {
         deflateLevel: 9,
     });
     fs.writeFileSync(filePath, encoded);
-    return { min15, max15 };
+    return { minValue, maxValue };
 }
 
 // Computes a level's per-node tight height bounds directly from the source
@@ -259,38 +234,16 @@ function writeHeightTile (filePath, tileSize, sampleAt, holeAt) {
 // finest level's range past the whole world). Samples the source at its native
 // 1m resolution over each node's integer extent; cheap for the small fine nodes.
 function nodeBoundsFromSource (nodeSize, originX, originY, heightAt) {
-    let min15 = HEIGHT_MAX;
-    let max15 = 0;
+    let minValue = HEIGHT_MAX;
+    let maxValue = 0;
     for (let ty = 0; ty <= nodeSize; ++ty) {
         for (let tx = 0; tx <= nodeSize; ++tx) {
-            const height15 = Math.round(clamp01(heightAt(originX + tx, originY + ty)) * HEIGHT_MAX);
-            if (height15 < min15) min15 = height15;
-            if (height15 > max15) max15 = height15;
+            const value = Math.round(clamp01(heightAt(originX + tx, originY + ty)) * HEIGHT_MAX);
+            if (value < minValue) minValue = value;
+            if (value > maxValue) maxValue = value;
         }
     }
-    return { min15, max15 };
-}
-
-function writeSplatTile (filePath, tileSize, splatAt) {
-    // 16-bit grayscale PNG carrying the encoded splat value per texel (not meant
-    // to be human-viewable). Decoded to R16UI, sampled NEAREST on the GPU.
-    const values = new Uint16Array(tileSize * tileSize);
-    for (let y = 0; y < tileSize; ++y) {
-        for (let x = 0; x < tileSize; ++x) {
-            values[y * tileSize + x] = splatAt(x, y) & 0xffff;
-        }
-    }
-    const encoded = PNG.sync.write({
-        width: tileSize,
-        height: tileSize,
-        data: Buffer.from(values.buffer),
-    }, {
-        colorType: 0,
-        inputColorType: 0,
-        bitDepth: 16,
-        deflateLevel: 9,
-    });
-    fs.writeFileSync(filePath, encoded);
+    return { minValue, maxValue };
 }
 
 function removeExistingHeightTiles (assetDir) {
@@ -304,7 +257,7 @@ function removeExistingHeightTiles (assetDir) {
             continue;
         }
         for (const fileName of fs.readdirSync(levelDir)) {
-            if (/^[hs]_\d+_\d+\.(?:png|r16|bin)$/i.test(fileName)) {
+            if (/^h_\d+_\d+\.(?:png|r16|bin)$/i.test(fileName)) {
                 fs.unlinkSync(path.join(levelDir, fileName));
             }
         }
@@ -322,25 +275,15 @@ function makeManifest (options) {
         minTileLevel,
         heightScale,
         heightBias,
-        source,
         materialLayers,
         bounds,
     } = options;
     const levels = [];
     for (let level = 0; level <= maxLevel; ++level) {
-        // CDLOD numbering: L0 is the finest level (most subdivisions); larger
-        // level numbers are progressively coarser, with Lmax as the root.
-        const divisions = 1 << (maxLevel - level);
-        const nodeSize = sectorSize / divisions;
-        const hasTile = level >= minTileLevel;
         levels.push({
             level,
-            nodeSizeMeters: nodeSize,
-            hasTile,
-            sampleStepMeters: hasTile ? nodeSize / (tileSize - 1) : null,
-            nodeCount: [sectorsX * divisions, sectorsY * divisions],
             // Per-node quantized height bounds, row-major iz*nx+ix (global coords).
-            // Runtime builds a tight node AABB: y = heightBias + (v/32767)*heightScale.
+            // Runtime builds a tight node AABB: y = heightBias + (v/65535)*heightScale.
             heightRange: {
                 min: bounds[level].min,
                 max: bounds[level].max,
@@ -351,43 +294,13 @@ function makeManifest (options) {
     return {
         version: 1,
         name,
-        worldSizeMeters: [sectorsX * sectorSize, sectorsY * sectorSize],
         sectorSizeMeters: sectorSize,
         sectorCount: [sectorsX, sectorsY],
         maxLevel,
         minTileLevel,
         nodeTileResolution: tileSize,
-        nodeCoordinateSpace: 'global-per-level',
-        sectorFromNode: 'floor(nodeCoordinate / 2^(maxLevel-level))',
         heightScale,
         heightBias,
-        heightRangeEncoding: 'levels[].heightRange.{min,max}: per-node quantized height15 (0..32767), row-major iz*nx+ix, global per-level coords; heightMeters = heightBias + (v/32767)*heightScale; a node encloses its subtree (merged bottom-up)',
-        height: {
-            format: 'R16',
-            gpuFormat: 'R16UI',
-            container: 'PNG',
-            color: 'gray',
-            bitDepth: 16,
-            pngColorType: 0,
-            encoding: 'height15-hole-lsb',
-            value: 'heightMeters = heightBias + ((uint16 >> 1) / 32767) * heightScale',
-            tilePath: 'nodes/L{level}/h_{x}_{y}.png',
-            tileLevels: `>= L${minTileLevel}`,
-            note: `levels L0..L${minTileLevel - 1} have no tile; they sample the L${minTileLevel} ancestor at runtime`,
-            source: source.type,
-        },
-        splat: {
-            format: 'R16',
-            gpuFormat: 'R16UI',
-            container: 'PNG',
-            bitDepth: 16,
-            pngColorType: 0,
-            resolution: tileSize,
-            encoding: 'id0-5b | id1-5b<<5 | weight6<<10',
-            note: 'two material ids + upper-layer weight; 4-neighbor sampling blends up to 8 materials/pixel',
-            tilePath: 'nodes/L{level}/s_{x}_{y}.png',
-            tileLevels: `>= L${minTileLevel}`,
-        },
         materialLibrary: {
             count: materialLayers.length,
             dir: 'materials',
@@ -456,35 +369,22 @@ function generate (rawOptions) {
     const source = options.procedural
         ? { type: 'procedural' }
         : readHeightPng(path.resolve(options.input));
-    const holes = options.holes ? readHeightPng(path.resolve(options.holes)) : null;
-
     if (source.type !== 'procedural') {
         if (source.width !== sourceWidth || source.height !== sourceHeight) {
             fail(`Input size must be ${sourceWidth}x${sourceHeight}, got ${source.width}x${source.height}`);
         }
     }
-    if (holes && (holes.width !== sourceWidth || holes.height !== sourceHeight)) {
-        fail(`Hole mask size must be ${sourceWidth}x${sourceHeight}`);
-    }
 
     const heightAt = (x, y) => source.type === 'procedural'
         ? proceduralSample(x, y, sourceWidth, sourceHeight)
         : source.sampleAt(x, y);
-    const holeAt = holes ? (x, y) => holes.sampleAt(x, y) : null;
-    const sourceInfo = source.type === 'procedural'
-        ? { type: 'procedural' }
-        : { type: 'png', file: path.basename(options.input) };
-
     if (options.force) {
         removeExistingHeightTiles(assetDir);
     }
 
     const materialLayers = scanMaterialLayers(assetDir);
-    const layerCount = Math.max(1, materialLayers.length);
-    if (materialLayers.length === 0) {
-        console.warn('No material PNGs under materials/; splat will reference layer 0 only.');
-    } else {
-        console.log(`Material library: ${layerCount} layers (${materialLayers.join(', ')})`);
+    if (materialLayers.length > 0) {
+        console.log(`Material library: ${materialLayers.length} layers (${materialLayers.join(', ')})`);
     }
 
     let totalTiles = 0;
@@ -525,35 +425,18 @@ function generate (rawOptions) {
                         path.join(levelDir, `h_${x}_${y}.png`),
                         tileSize,
                         (tileX, tileY) => heightAt(originX + tileX * sampleStep, originY + tileY * sampleStep),
-                        holeAt && ((tileX, tileY) => holeAt(originX + tileX * sampleStep, originY + tileY * sampleStep)),
                     );
-                    writeSplatTile(
-                        path.join(levelDir, `s_${x}_${y}.png`),
-                        tileSize,
-                        (tileX, tileY) => {
-                            const px = originX + tileX * sampleStep;
-                            const py = originY + tileY * sampleStep;
-                            const nx = Math.min(sourceWidth - 1, px + sampleStep);
-                            const ny = Math.min(sourceHeight - 1, py + sampleStep);
-                            const h = heightAt(px, py);
-                            // Slope as rise/run in meters (tan of the slope angle).
-                            const dhdx = (heightAt(nx, py) - h) * heightScale / sampleStep;
-                            const dhdy = (heightAt(px, ny) - h) * heightScale / sampleStep;
-                            const slope = Math.sqrt(dhdx * dhdx + dhdy * dhdy);
-                            return materialSplat(h, clamp01(slope), layerCount);
-                        },
-                    );
-                    totalTiles += 2;
+                    ++totalTiles;
                 } else {
                     // No tile for this fine level; compute tight bounds from the
                     // source directly so CDLOD ranges stay sane.
                     range = nodeBoundsFromSource(nodeSize, originX, originY, heightAt);
                 }
-                bounds[level].min[y * nxLevel + x] = range.min15;
-                bounds[level].max[y * nxLevel + x] = range.max15;
+                bounds[level].min[y * nxLevel + x] = range.minValue;
+                bounds[level].max[y * nxLevel + x] = range.maxValue;
             }
         }
-        console.log(`L${level}: ${sectorsX * divisions}x${sectorsY * divisions} nodes${hasTile ? ' (height + splat)' : ' (bounds only, no tile)'}`);
+        console.log(`L${level}: ${sectorsX * divisions}x${sectorsY * divisions} nodes${hasTile ? ' (height)' : ' (bounds only, no tile)'}`);
     }
 
     // Bottom-up merge: a node's bound must enclose its 4 children so hierarchical
@@ -590,7 +473,6 @@ function generate (rawOptions) {
         minTileLevel,
         heightScale,
         heightBias,
-        source: sourceInfo,
         materialLayers,
         bounds,
     });

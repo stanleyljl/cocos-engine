@@ -7,14 +7,14 @@
 //
 //   node scripts/landscape/patch-height-range.js --manifest <path-to>.json
 //
-// heightRange values are quantized height15 (0..32767), row-major iz*nx+ix in
+// heightRange values are quantized uint16 (0..65535), row-major iz*nx+ix in
 // global per-level coords; a node encloses its subtree (merged bottom-up).
 
 const fs = require('fs');
 const path = require('path');
 const { PNG } = require('pngjs');
 
-const HEIGHT_MAX = 0x7fff;
+const HEIGHT_MAX = 0xffff;
 
 function fail (message) {
     console.error(`patch-height-range: ${message}`);
@@ -73,7 +73,7 @@ function stringifyManifest (manifest) {
     return `${json}\n`;
 }
 
-// Returns { min15, max15 } over a height tile's samples (channel 0, value>>1).
+// Returns { minValue, maxValue } over a height tile's samples (channel 0).
 function tileBounds (filePath, tileSize) {
     let png;
     try {
@@ -90,14 +90,14 @@ function tileBounds (filePath, tileSize) {
     if (channels !== 1 && channels !== 4 || !(png.data instanceof Uint16Array)) {
         fail(`Tile ${filePath} has an invalid 16-bit grayscale sample layout`);
     }
-    let min15 = HEIGHT_MAX;
-    let max15 = 0;
+    let minValue = HEIGHT_MAX;
+    let maxValue = 0;
     for (let i = 0; i < sampleCount; ++i) {
-        const h15 = png.data[i * channels] >> 1; // bit 0 is the hole flag
-        if (h15 < min15) min15 = h15;
-        if (h15 > max15) max15 = h15;
+        const value = png.data[i * channels];
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
     }
-    return { min15, max15 };
+    return { minValue, maxValue };
 }
 
 function main () {
@@ -158,8 +158,8 @@ function main () {
                     const tilePath = path.join(levelDir, `h_${x}_${y}.png`);
                     if (!fs.existsSync(tilePath)) fail(`Missing tile: ${tilePath}`);
                     const r = tileBounds(tilePath, tileSize);
-                    min[y * nx + x] = r.min15;
-                    max[y * nx + x] = r.max15;
+                    min[y * nx + x] = r.minValue;
+                    max[y * nx + x] = r.maxValue;
                 }
             }
         } else {
@@ -221,7 +221,16 @@ function main () {
         if (level < 0 || level > maxLevel) fail(`Unexpected level ${level}`);
         lv.heightRange = { min: bounds[level].min, max: bounds[level].max };
     }
-    manifest.heightRangeEncoding = 'levels[].heightRange.{min,max}: per-node quantized height15 (0..32767), row-major iz*nx+ix, global per-level coords; heightMeters = heightBias + (v/32767)*heightScale; a node encloses its subtree (merged bottom-up)';
+    // Remove descriptions and derived fields no longer consumed by the loader.
+    // Keep materialLibrary for the retained material/VT pipeline.
+    for (const key of ['worldSizeMeters', 'nodeCoordinateSpace', 'sectorFromNode', 'heightRangeEncoding', 'height', 'splat']) {
+        delete manifest[key];
+    }
+    for (const lv of manifest.levels) {
+        for (const key of ['nodeSizeMeters', 'hasTile', 'sampleStepMeters', 'nodeCount']) {
+            delete lv[key];
+        }
+    }
 
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));
     // Report the world-space span of the root so the effect is easy to verify.

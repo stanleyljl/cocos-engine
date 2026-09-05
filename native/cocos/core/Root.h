@@ -69,6 +69,8 @@ class Root final {
     DECLARE_TARGET_EVENT_END()
 public:
     static Root *getInstance(); // cjh todo: put Root Managerment to Director class.
+    // Configure before initialization; only affects subsequently created swapchains.
+    static void setDefaultVsyncMode(gfx::VsyncMode mode) { _defaultVsyncMode = mode; }
     explicit Root(gfx::Device *device);
     ~Root();
 
@@ -306,6 +308,7 @@ private:
     void addWindowEventListener();
     void removeWindowEventListener();
 
+    inline static gfx::VsyncMode _defaultVsyncMode{gfx::VsyncMode::ON};
     gfx::Device *_device{nullptr};
     gfx::Swapchain *_swapchain{nullptr};
     Batcher2d *_batcher{nullptr};

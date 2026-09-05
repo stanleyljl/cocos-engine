@@ -30,6 +30,8 @@
 #include "core/geometry/AABB.h"
 #include "core/scene-graph/Node.h"
 #include "core/scene-graph/Scene.h"
+#include "landscape/LandscapeAsset.h"
+#include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeRenderer.h"
 #include "landscape/Quadtree.h"
 #include "math/Mat4.h"
@@ -65,29 +67,45 @@ void Landscape::initializeRenderer() {
         return;
     }
 
+    if (_dataDir.empty()) {
+        return;
+    }
+    IntrusivePtr<LandscapeAsset> asset = ccnew LandscapeAsset();
+    if (!asset->load(_dataDir)) {
+        return;
+    }
     auto quadtree = std::make_unique<Quadtree>();
-    quadtree->setConfig(config::SECTOR_SIZE, config::MAX_LEVEL,
-                        config::TERRAIN_MIN_Y, config::TERRAIN_MAX_Y);
-    quadtree->setProceduralWorld(config::DEMO_SECTORS, config::DEMO_SECTORS);
+    if (!quadtree->init(*asset)) {
+        return;
+    }
+#if CC_EDITOR
+    // Keep the editor's inspection behavior compatible with the original
+    // global-height CDLOD ranges. Runtime uses tighter per-level ranges.
+    quadtree->setUseLevelHeightRanges(false);
+#else
+    quadtree->setUseLevelHeightRanges(true);
+#endif
+    const auto &data = asset->data();
 
     auto renderer = std::make_unique<LandscapeRenderer>();
     if (!renderer->init(_node.get(), _scene)) {
         return;
     }
-    renderer->setWorld(config::DEMO_SECTORS, config::DEMO_SECTORS,
-                       config::SECTOR_SIZE, config::MAX_LEVEL);
-    renderer->setHeightRange(config::HEIGHT_SCALE, config::HEIGHT_BIAS);
-    renderer->setProceduralHeightmap(quadtree->proceduralHeightmap(),
-                                     quadtree->proceduralHeightmapSize());
+    if (!renderer->setAsset(asset.get())) {
+        return;
+    }
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
+    renderer->setDebugFlags(_lodColor, _showRanges);
+    renderer->setWireframe(_wireframe);
+    renderer->setFreezeLod(_freezeLod);
+
     CC_LOG_INFO("[Landscape] LOD ranges:");
-    for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
+    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
         CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
                     level, quadtree->lodMorphStart()[level], quadtree->lodMorphEnd()[level]);
     }
-    renderer->setDebugFlags(_lodColor, _showRanges);
-    renderer->setWireframe(_wireframe);
 
+    _asset = std::move(asset);
     _quadtree = std::move(quadtree);
     _renderer = std::move(renderer);
 }
@@ -95,9 +113,9 @@ void Landscape::initializeRenderer() {
 void Landscape::onDisable() {
     _renderer = nullptr;
     _quadtree = nullptr;
+    _asset = nullptr;
     _selected.clear();
-    _lastLodNodeCounts.fill(0U);
-    _hasLastLodStats = false;
+    _lastLodNodeCounts.clear();
     _scene = nullptr;
     _node = nullptr;
 }
@@ -106,10 +124,10 @@ void Landscape::update() {
     if (_node == nullptr) {
         return;
     }
-    if (_renderer == nullptr || _quadtree == nullptr) {
-        initializeRenderer();
-    }
     if (_renderer == nullptr || _quadtree == nullptr || !_renderer->valid()) {
+        return;
+    }
+    if (_freezeLod) {
         return;
     }
 
@@ -117,23 +135,27 @@ void Landscape::update() {
     if (camera == nullptr) {
         return;
     }
+    // Selection runs before the render window updates its cameras. Refresh the
+    // view/projection here so culling and geomorph use this frame's camera pose.
+    camera->update();
     _renderer->setViewPos(camera->getPosition());
 
     _selected.clear();
     const Vec3 base = _node->getWorldPosition();
-    const float halfWorldX = config::SECTOR_SIZE * static_cast<float>(config::DEMO_SECTORS) * 0.5F;
-    const float halfWorldZ = halfWorldX;
-    for (uint32_t sectorZ = 0; sectorZ < config::DEMO_SECTORS; ++sectorZ) {
-        for (uint32_t sectorX = 0; sectorX < config::DEMO_SECTORS; ++sectorX) {
+    const auto &data = _asset->data();
+    const float halfWorldX = data.worldWidth() * 0.5F;
+    const float halfWorldZ = data.worldDepth() * 0.5F;
+    for (uint32_t sectorZ = 0; sectorZ < data.sectorsZ; ++sectorZ) {
+        for (uint32_t sectorX = 0; sectorX < data.sectorsX; ++sectorX) {
             const Vec3 origin{
-                base.x + (static_cast<float>(sectorX) + 0.5F) * config::SECTOR_SIZE - halfWorldX,
+                base.x + (static_cast<float>(sectorX) + 0.5F) * data.sectorSize - halfWorldX,
                 base.y,
-                base.z + (static_cast<float>(sectorZ) + 0.5F) * config::SECTOR_SIZE - halfWorldZ,
+                base.z + (static_cast<float>(sectorZ) + 0.5F) * data.sectorSize - halfWorldZ,
             };
             const auto &local = _quadtree->select(camera->getPosition(), camera->getFrustum(),
                                                   origin, sectorX, sectorZ);
             for (const auto &node : local) {
-                const uint32_t scale = 1U << (config::MAX_LEVEL - node.level);
+                const uint32_t scale = 1U << (data.maxLevel - node.level);
                 _selected.push_back(QuadNode{
                     node.level,
                     sectorX * scale + node.ix,
@@ -144,25 +166,19 @@ void Landscape::update() {
             }
         }
     }
-    ccstd::array<uint32_t, config::DEMO_LOD_COUNT> lodNodeCounts{};
+    ccstd::vector<uint32_t> lodNodeCounts(data.maxLevel + 1U, 0U);
     for (const auto &node : _selected) {
-        if (node.level < config::DEMO_LOD_COUNT) {
+        if (node.level <= data.maxLevel) {
             ++lodNodeCounts[node.level];
         }
     }
 
-    bool lodStatsChanged = !_hasLastLodStats;
-    for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
-        lodStatsChanged = lodStatsChanged ||
-                          lodNodeCounts[level] != _lastLodNodeCounts[level];
-    }
-    if (lodStatsChanged) {
-        constexpr uint32_t trianglesPerNode =
-            static_cast<uint32_t>(config::GRIDS_PER_NODE) * 16U * 16U * 2U;
+    if (lodNodeCounts != _lastLodNodeCounts) {
+        constexpr uint32_t trianglesPerNode = (config::VERTS_PER_NODE_SIDE - 1U) * (config::VERTS_PER_NODE_SIDE - 1U) * 2U;
         uint32_t totalNodeCount = 0U;
         uint32_t totalTriangleCount = 0U;
         CC_LOG_INFO("[Landscape] LOD stats:");
-        for (uint32_t level = 0; level < config::DEMO_LOD_COUNT; ++level) {
+        for (uint32_t level = 0; level <= data.maxLevel; ++level) {
             const uint32_t triangles = lodNodeCounts[level] * trianglesPerNode;
             totalNodeCount += lodNodeCounts[level];
             totalTriangleCount += triangles;
@@ -172,9 +188,15 @@ void Landscape::update() {
         CC_LOG_INFO("[Landscape]   total: nodes=%u triangles=%u",
                     totalNodeCount, totalTriangleCount);
         _lastLodNodeCounts = lodNodeCounts;
-        _hasLastLodStats = true;
     }
     _renderer->sync(_selected);
+}
+
+void Landscape::setFreezeLod(bool frozen) {
+    _freezeLod = frozen;
+    if (_renderer != nullptr) {
+        _renderer->setFreezeLod(frozen);
+    }
 }
 
 void Landscape::setWireframe(bool wireframe) {
@@ -199,7 +221,6 @@ void Landscape::setShowRanges(bool enabled) {
 }
 
 void Landscape::setDataDir(const ccstd::string &dir) {
-    // The current parity path uses the cdlod demo's procedural source.
     _dataDir = dir;
 }
 
@@ -237,12 +258,14 @@ void Landscape::drawDebugBounds() {
         {0.65F, 0.35F, 0.85F, 1.0F}, {0.95F, 0.55F, 0.20F, 1.0F},
     };
     const Mat4 &world = _node->getWorldMatrix();
-    const float halfWorld = config::WORLD_SIZE * 0.5F;
+    const auto &data = _asset->data();
+    const float halfWorldX = data.worldWidth() * 0.5F;
+    const float halfWorldZ = data.worldDepth() * 0.5F;
     for (const auto &node : _selected) {
-        const float size = config::SECTOR_SIZE /
-                           static_cast<float>(1U << (config::MAX_LEVEL - node.level));
-        const float x = static_cast<float>(node.ix) * size - halfWorld;
-        const float z = static_cast<float>(node.iz) * size - halfWorld;
+        const float size = data.sectorSize /
+                           static_cast<float>(1U << (data.maxLevel - node.level));
+        const float x = static_cast<float>(node.ix) * size - halfWorldX;
+        const float z = static_cast<float>(node.iz) * size - halfWorldZ;
         geometry::AABB box{
             x + size * 0.5F,
             (node.minY + node.maxY) * 0.5F,
@@ -260,7 +283,7 @@ void Landscape::drawDebugBounds() {
 
 void Landscape::drawDebugSectors() {
 #if CC_USE_GEOMETRY_RENDERER
-    if (_scene == nullptr || _node == nullptr || _quadtree == nullptr) {
+    if (_scene == nullptr || _node == nullptr || _asset == nullptr) {
         return;
     }
     auto *camera = pickMainCamera();
@@ -274,11 +297,13 @@ void Landscape::drawDebugSectors() {
     }
     static const gfx::Color color{1.0F, 0.15F, 0.90F, 1.0F};
     const Mat4 &world = _node->getWorldMatrix();
-    const float halfWorld = config::WORLD_SIZE * 0.5F;
+    const auto &data = _asset->data();
+    const float halfWorldX = data.worldWidth() * 0.5F;
+    const float halfWorldZ = data.worldDepth() * 0.5F;
     const uint32_t segments = 256U;
     const float lift = 3.0F;
     auto emitSeamLine = [&](float x0, float z0, float x1, float z1) {
-        Vec3 previous{x0, _quadtree->proceduralHeightAt(x0, z0) + lift, z0};
+        Vec3 previous{x0, data.minHeight() + lift, z0};
         for (uint32_t i = 1U; i <= segments; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(segments);
             Vec3 current{
@@ -286,7 +311,7 @@ void Landscape::drawDebugSectors() {
                 0.0F,
                 z0 + (z1 - z0) * t,
             };
-            current.y = _quadtree->proceduralHeightAt(current.x, current.z) + lift;
+            current.y = data.minHeight() + lift;
 
             Vec3 worldPrevious;
             Vec3 worldCurrent;
@@ -297,10 +322,13 @@ void Landscape::drawDebugSectors() {
         }
     };
 
-    for (uint32_t i = 0U; i <= config::DEMO_SECTORS; ++i) {
-        const float p = static_cast<float>(i) * config::SECTOR_SIZE - halfWorld;
-        emitSeamLine(p, -halfWorld, p, halfWorld);
-        emitSeamLine(-halfWorld, p, halfWorld, p);
+    for (uint32_t i = 0U; i <= data.sectorsX; ++i) {
+        const float p = static_cast<float>(i) * data.sectorSize - halfWorldX;
+        emitSeamLine(p, -halfWorldZ, p, halfWorldZ);
+    }
+    for (uint32_t i = 0U; i <= data.sectorsZ; ++i) {
+        const float p = static_cast<float>(i) * data.sectorSize - halfWorldZ;
+        emitSeamLine(-halfWorldX, p, halfWorldX, p);
     }
 #endif
 }

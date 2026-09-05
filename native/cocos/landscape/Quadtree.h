@@ -39,44 +39,42 @@ class Frustum;
 
 namespace landscape {
 
+class LandscapeAsset;
+
 class Quadtree {
 public:
     Quadtree();
     ~Quadtree();
 
-    void setConfig(float sectorSize, uint32_t maxLevel, float minY, float maxY);
-    void setProceduralWorld(uint32_t sectorsX, uint32_t sectorsZ);
+    // Copies the metadata needed for selection; does not load or retain the asset.
+    bool init(const LandscapeAsset &asset);
+
+    // Selects the vertical span used to build the CDLOD distance rings. The
+    // per-level mode uses the largest local node span at each level; disabling
+    // it restores the original global height range calculation.
+    void setUseLevelHeightRanges(bool enabled);
+    bool useLevelHeightRanges() const { return _useLevelHeightRanges; }
 
     const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const geometry::Frustum &frustum,
                                           const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ);
 
     const ccstd::vector<float> &lodMorphStart() const { return _lodMorphStart; }
     const ccstd::vector<float> &lodMorphEnd() const { return _lodMorphEnd; }
-    const ccstd::vector<float> &proceduralHeightmap() const { return _heightmap; }
-    uint32_t proceduralHeightmapSize() const { return config::DEMO_HM_SIZE; }
-    float proceduralHeightAt(float x, float z) const;
-
 private:
     struct HeightRange {
-        float minY{config::TERRAIN_MIN_Y};
-        float maxY{config::TERRAIN_MAX_Y};
+        float minY{0.0F};
+        float maxY{0.0F};
     };
 
     void computeRanges();
-    void buildHeightRanges();
+    void computeRangesGlobal();
+    void computeRangesPerLevel();
     void traverse(uint32_t level, uint32_t ix, uint32_t iz);
     void nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
-    void sampleHeightRange(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                           uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
     size_t nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
                           uint32_t ix, uint32_t iz) const;
 
-    float _sectorSize{config::SECTOR_SIZE};
-    uint32_t _maxLevel{config::MAX_LEVEL};
-    float _minY{config::TERRAIN_MIN_Y};
-    float _maxY{config::TERRAIN_MAX_Y};
-    uint32_t _sectorsX{config::DEMO_SECTORS};
-    uint32_t _sectorsZ{config::DEMO_SECTORS};
+    LandscapeData _data;
 
     Vec3 _camPos;
     Vec3 _sectorOrigin;
@@ -85,13 +83,13 @@ private:
     const geometry::Frustum *_frustum{nullptr};
     IntrusivePtr<geometry::AABB> _box;
     ccstd::vector<QuadNode> _selected;
-    ccstd::vector<float> _heightmap;
     ccstd::vector<size_t> _levelOffsets;
     ccstd::vector<HeightRange> _heightRanges;
     size_t _nodesPerSector{0};
     ccstd::vector<float> _lodRange;
     ccstd::vector<float> _lodMorphStart;
     ccstd::vector<float> _lodMorphEnd;
+    bool _useLevelHeightRanges{true};
 };
 
 } // namespace landscape

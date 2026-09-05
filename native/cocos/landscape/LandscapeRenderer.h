@@ -24,10 +24,13 @@
 
 #pragma once
 
+#include <memory>
+
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeAsset.h"
 #include "math/Vec3.h"
 #include "scene/Model.h"
 
@@ -48,6 +51,8 @@ class RenderScene;
 
 namespace landscape {
 
+class TilePagePool;
+
 /**
  * Cocos render-side implementation of the cdlod_opengl grid renderer.
  *
@@ -64,17 +69,13 @@ public:
     void destroy();
     bool valid() const;
 
-    void setWorld(uint32_t sectorsX, uint32_t sectorsZ,
-                  float sectorSize, uint32_t maxLevel);
-    void setHeightRange(float scale, float bias);
     void setLodRanges(const ccstd::vector<float> &morphStart,
                       const ccstd::vector<float> &morphEnd);
-    void setProceduralHeightmap(const ccstd::vector<float> &heightmap,
-                                uint32_t size);
-    bool hasProceduralHeightmap() const;
+    bool setAsset(LandscapeAsset *asset);
     void setDebugFlags(bool lodColor, bool showRanges);
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
+    void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
 
@@ -84,32 +85,39 @@ private:
     void updateMorphCameraProperty();
     void updateInstanceData(scene::Model *model, const QuadNode &node);
     void updateModel(scene::Model *model, const QuadNode &node);
+    void updateModelBounds(scene::Model *model, const QuadNode &node);
+    int resolveHeightPage(const QuadNode &node, uint32_t &sourceLevel,
+                          uint32_t &sourceX, uint32_t &sourceZ);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
-    IntrusivePtr<gfx::Texture> _heightmap;
+    IntrusivePtr<LandscapeAsset> _asset;
+    std::unique_ptr<TilePagePool> _heightPages;
+    ccstd::string _dataDir;
 
     ccstd::unordered_map<uint64_t, IntrusivePtr<scene::Model>> _active;
     ccstd::unordered_map<scene::Model *, QuadNode> _modelNodes;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
 
-    uint32_t _sectorsX{config::DEMO_SECTORS};
-    uint32_t _sectorsZ{config::DEMO_SECTORS};
-    uint32_t _maxLevel{config::MAX_LEVEL};
-    float _sectorSize{config::SECTOR_SIZE};
-    float _worldWidth{config::WORLD_SIZE};
-    float _worldDepth{config::WORLD_SIZE};
-    float _heightScale{config::HEIGHT_SCALE};
-    float _heightBias{config::HEIGHT_BIAS};
+    uint32_t _maxLevel{0};
+    uint32_t _minTileLevel{0};
+    uint32_t _tileResolution{0};
+    float _sectorSize{0.0F};
+    float _worldWidth{0.0F};
+    float _worldDepth{0.0F};
+    float _heightScale{0.0F};
+    float _heightBias{0.0F};
+    float _heightSampleSpacing{1.0F};
     Vec3 _viewPosition;
     ccstd::vector<float> _morphStart;
     ccstd::vector<float> _morphEnd;
     bool _lodColor{false};
     bool _showRanges{false};
     bool _wireframe{false};
+    bool _freezeLod{false};
 };
 
 } // namespace landscape

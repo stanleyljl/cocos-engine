@@ -26,6 +26,7 @@ import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable,
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
 import { Asset } from '../asset/assets';
+import { director, DirectorEvent } from '../game/director';
 
 // The native binding only exists on JSB platforms; guard native access with JSB.
 declare const jsb: any;
@@ -108,9 +109,9 @@ export class Landscape extends Component {
     }
 
     /**
-     * @en Freezes the quadtree LOD selection so the current node set stays put.
+     * @en Freezes terrain geometry, morph and frustum selection, including render culling.
      * Move the camera freely to inspect a specific seam up close (debug).
-     * @zh 冻结四叉树 LOD 选级，固定当前节点集。可自由移动相机凑近检查某条接缝（调试用）。
+     * @zh 冻结地形几何、morph 和视锥剔除结果；相机仍可自由移动（调试用）。
      */
     @editable
     get freezeLod (): boolean {
@@ -118,6 +119,9 @@ export class Landscape extends Component {
     }
     set freezeLod (v: boolean) {
         this._freezeLod = v;
+        if (this._native) {
+            this._native.setFreezeLod(v);
+        }
     }
 
     /**
@@ -187,14 +191,18 @@ export class Landscape extends Component {
     public onEnable (): void {
         if (this._native) {
             this._native.setDataDir(this._dataDir);
+            this._native.setFreezeLod(this._freezeLod);
             this._native.onEnable(this.node);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);
             this._native.setShowRanges(this._showRanges);
+            // Wait for camera controllers in update/lateUpdate and systems to finish.
+            director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         }
     }
 
     public onDisable (): void {
+        director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         if (this._native) {
             this._native.onDisable();
         }
@@ -204,23 +212,16 @@ export class Landscape extends Component {
      * @en Drives the native per-frame quadtree traversal (LOD selection + frustum culling).
      * @zh 每帧驱动原生四叉树遍历（LOD 选级 + 视锥剔除）。
      */
-    public update (): void {
+    private _beforeDraw (): void {
         if (!this._native) {
             return;
-        }
-        if (!this._native.isInitialized() && this.node.scene) {
-            this._native.setDataDir(this._dataDir);
-            this._native.onEnable(this.node);
-            this._native.setWireframe(this._wireframe);
-            this._native.setLodColor(this._lodColor);
-            this._native.setShowRanges(this._showRanges);
         }
         if (!this._native.isInitialized()) {
             return;
         }
-        if (!this._freezeLod) {
-            this._native.update();
-        }
+        // Native captures the initial selection, then holds geometry and both
+        // terrain/render frustum culling while frozen.
+        this._native.update();
         // Immediate-mode debug boxes must be re-submitted every frame, even while
         // LOD is frozen (native redraws the last selected node set).
         if (this._showBox) {
