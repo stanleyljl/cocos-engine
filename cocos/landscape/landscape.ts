@@ -62,6 +62,9 @@ export class Landscape extends Component {
     private _freezeLod = false;
 
     @serializable
+    private _detailHeightEnabled = false;
+
+    @serializable
     private _showBox = false;
 
     @serializable
@@ -182,6 +185,18 @@ export class Landscape extends Component {
         this._showSectors = v;
     }
 
+    /** Enables material vertex displacement for before/after comparison. Defaults to off. */
+    @editable
+    get detailHeightEnabled (): boolean {
+        return this._detailHeightEnabled;
+    }
+    set detailHeightEnabled (v: boolean) {
+        this._detailHeightEnabled = v;
+        if (this._native) {
+            this._native.setDetailHeightEnabled(v);
+        }
+    }
+
     public onLoad (): void {
         if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
             this._native = new jsb.Landscape();
@@ -192,6 +207,7 @@ export class Landscape extends Component {
         if (this._native) {
             this._native.setDataDir(this._dataDir);
             this._native.setFreezeLod(this._freezeLod);
+            this._native.setDetailHeightEnabled(this._detailHeightEnabled);
             this._native.onEnable(this.node);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);

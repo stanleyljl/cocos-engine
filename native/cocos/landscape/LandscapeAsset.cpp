@@ -25,6 +25,7 @@
 #include "landscape/LandscapeAsset.h"
 
 #include <cmath>
+#include <cstring>
 #include <utility>
 
 #include "base/Log.h"
@@ -181,45 +182,147 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         }
     }
 
+    const size_t slash = manifestPath.find_last_of("/\\");
+    const ccstd::string assetDir = slash == ccstd::string::npos ? "." : manifestPath.substr(0, slash);
+    ccstd::vector<MaterialLayer> materialLayers;
+    uint32_t materialResolution = 0U;
+    if (document.HasMember("materialLibrary")) {
+        const auto &library = document["materialLibrary"];
+        uint32_t count = 0U;
+        if (!readUnsigned(library, "count", count) || count == 0U || count > config::MATERIAL_LIBRARY_MAX ||
+            !readUnsigned(library, "resolution", materialResolution) || materialResolution == 0U ||
+            !library.HasMember("format") || !library["format"].IsString() ||
+            ccstd::string(library["format"].GetString()) != "RGBA8" ||
+            !library.HasMember("dir") || !library["dir"].IsString() ||
+            !library.HasMember("layers") || !library["layers"].IsArray() || library["layers"].Size() != count) {
+            CC_LOG_WARNING("[Landscape] invalid RGBA8 materialLibrary in '%s'", manifestPath.c_str());
+            return false;
+        }
+        const ccstd::string materialDir = assetDir + "/" + library["dir"].GetString() + "/";
+        for (uint32_t i = 0U; i < count; ++i) {
+            const auto &value = library["layers"][i];
+            MaterialLayer layer;
+            if (!readUnsigned(value, "id", layer.id) || layer.id != i ||
+                !value.HasMember("name") || !value["name"].IsString() ||
+                !value.HasMember("albedoHeight") || !value["albedoHeight"].IsString() ||
+                !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
+                !readFloat(value, "detailHeightScale", layer.detailHeightScale) ||
+                !readFloat(value, "detailHeightBias", layer.detailHeightBias) ||
+                (value.HasMember("uvScale") && (!readFloat(value, "uvScale", layer.uvScale) || layer.uvScale <= 0.0F))) {
+                CC_LOG_WARNING("[Landscape] invalid material layer %u in '%s'", i, manifestPath.c_str());
+                return false;
+            }
+            layer.name = value["name"].GetString();
+            layer.albedoHeight = materialDir + value["albedoHeight"].GetString();
+            layer.normalRoughnessAO = materialDir + value["normalRoughnessAO"].GetString();
+            materialLayers.emplace_back(std::move(layer));
+        }
+    }
+
+    // The shader's integer decode and the shared page pool require this layout.
+    if (!document.HasMember("splatMap") || !document["splatMap"].IsObject()) {
+        CC_LOG_WARNING("[Landscape] manifest requires paired splatMap tiles");
+        return false;
+    }
+    const auto &splat = document["splatMap"];
+    const auto matchesString = [](const rapidjson::Value &v, const char *name, const char *expected) {
+        return v.HasMember(name) && v[name].IsString() && std::strcmp(v[name].GetString(), expected) == 0;
+    };
+    const auto matchesUint = [](const rapidjson::Value &v, const char *name, uint32_t expected) {
+        uint32_t value = 0;
+        return readUnsigned(v, name, value) && value == expected;
+    };
+    if (!matchesString(splat, "format", "R16UI") || !matchesString(splat, "fileFormat", "PNG") ||
+        !matchesString(splat, "path", "nodes/L{level}/s_{x}_{z}.png") ||
+        !matchesUint(splat, "resolution", parsed.tileResolution) ||
+        !matchesUint(splat, "minTileLevel", parsed.minTileLevel) ||
+        !matchesUint(splat, "maxTileLevel", parsed.maxLevel) ||
+        !splat.HasMember("encoding") || !splat["encoding"].IsObject() || materialLayers.empty()) {
+        CC_LOG_WARNING("[Landscape] splatMap must match the height tile pyramid and material library");
+        return false;
+    }
+    const auto &encoding = splat["encoding"];
+    const auto matchesField = [&](const char *name, uint32_t offset, uint32_t bits) {
+        return encoding.HasMember(name) && encoding[name].IsObject() &&
+               matchesUint(encoding[name], "offset", offset) && matchesUint(encoding[name], "bits", bits);
+    };
+    if (!matchesField("layer0", 0U, 5U) || !matchesField("layer1", 5U, 5U) ||
+        !matchesField("layer1Weight", 10U, 6U) || !matchesUint(encoding["layer1Weight"], "divisor", 63U)) {
+        CC_LOG_WARNING("[Landscape] unsupported splat bit encoding; expected 5/5/6");
+        return false;
+    }
+
     _data = parsed;
-    _dataDir = dataDir;
+    _dataDir = assetDir;
+    _materialLayers = std::move(materialLayers);
+    _materialResolution = materialResolution;
     _levelOffsets = std::move(levelOffsets);
     _heightRanges = std::move(ranges);
     _nodesPerSector = nodesPerSector;
     return true;
 }
 
-bool LandscapeAsset::requestTile(uint64_t key, const ccstd::string &tilePath,
-                                 gfx::Format format, uint32_t tileResolution) {
-    if (tilePath.empty() || tileResolution == 0U) {
+bool LandscapeAsset::decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
+                                    uint32_t resolution, uint32_t layerCount, TileData &tile) {
+    bool valid = loadTile(heightPath, gfx::Format::RG8, resolution, tile.height) &&
+                 loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat);
+    for (size_t i = 0; valid && i < tile.splat.size(); i += sizeof(uint16_t)) {
+        uint16_t packed = 0;
+        std::memcpy(&packed, tile.splat.data() + i, sizeof(packed));
+        valid = (packed & 31U) < layerCount && ((packed >> 5U) & 31U) < layerCount;
+    }
+    if (!valid) {
+        CC_LOG_WARNING("[Landscape] failed to load height/splat pair: %s, %s",
+                       heightPath.c_str(), splatPath.c_str());
+    }
+    return valid;
+}
+
+bool LandscapeAsset::loadRootTile(uint32_t x, uint32_t z, TileData &tile) const {
+    if (!valid() || x >= _data.sectorsX || z >= _data.sectorsZ) {
+        return false;
+    }
+    tile.key = makeNodeKey(_data.maxLevel, x, z);
+    const ccstd::string directory = _dataDir + "/nodes/L" + std::to_string(_data.maxLevel) + "/";
+    const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
+    return decodeTilePair(directory + "h_" + suffix, directory + "s_" + suffix,
+                          _data.tileResolution, static_cast<uint32_t>(_materialLayers.size()), tile);
+}
+
+bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
+    if (level < _data.minTileLevel || level > _data.maxLevel) {
         return false;
     }
     if (_async == nullptr) {
         _async = std::make_shared<AsyncState>();
     }
+    const uint64_t key = makeNodeKey(level, x, z);
     if (!_pendingTiles.insert(key).second) {
         return false;
     }
-
+    const ccstd::string directory = _dataDir + "/nodes/L" + std::to_string(level) + "/";
+    const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
+    const ccstd::string heightPath = directory + "h_" + suffix;
+    const ccstd::string splatPath = directory + "s_" + suffix;
+    const uint32_t resolution = _data.tileResolution;
+    const uint32_t layerCount = static_cast<uint32_t>(_materialLayers.size());
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, tilePath, format, tileResolution](int /*threadId*/) {
+        [async, key, heightPath, splatPath, resolution, layerCount](int /*threadId*/) {
             if (async->cancelled.load()) {
-                return;
-            }
-            ccstd::vector<uint8_t> decoded;
-            if (!LandscapeAsset::loadTile(tilePath, format, tileResolution, decoded)) {
-                CC_LOG_WARNING("[Landscape] failed to load tile: %s", tilePath.c_str());
-                std::lock_guard<std::mutex> lock(async->mutex);
-                async->failed.push_back(key);
                 return;
             }
             TileData tile;
             tile.key = key;
-            tile.data = std::move(decoded);
+            const bool valid = decodeTilePair(heightPath, splatPath, resolution, layerCount, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
-            if (!async->cancelled.load()) {
+            if (async->cancelled.load()) {
+                return;
+            }
+            if (valid) {
                 async->ready.push_back(std::move(tile));
+            } else {
+                async->failed.push_back(key);
             }
         },
         LegacyThreadPool::TaskType::IO);
@@ -304,6 +407,9 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,
     }
     const size_t sampleCount = static_cast<size_t>(tileResolution) * tileResolution;
     const size_t sourceByteSize = sampleCount * sizeof(uint16_t);
+    if (image->getDataLen() != sourceByteSize) {
+        return false;
+    }
     if (packHeight) {
         // Pack each source uint16 as high byte, low byte into an RG8 page.
         // The shader reconstructs the original 16-bit value after sampling.

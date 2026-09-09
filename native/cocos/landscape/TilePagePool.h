@@ -27,7 +27,6 @@
 #include <list>
 
 #include "base/Ptr.h"
-#include "base/std/container/string.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
@@ -37,7 +36,6 @@ namespace gfx {
 class Device;
 class Texture;
 class Sampler;
-enum class Format : uint32_t; // opaque; full definition only needed in the .cpp
 } // namespace gfx
 
 namespace landscape {
@@ -45,30 +43,20 @@ namespace landscape {
 class LandscapeAsset;
 
 /**
- * Fixed-capacity LRU page cache for per-Node tiles, backed by one TEX2D_ARRAY
- * texture. Active height tiles use RG8; R16UI remains available for raw tile
- * data in the material/VT pipeline. Each resident tile occupies one layer,
- * selected by per-instance shader attributes.
- *
- * query() is non-blocking: a resident tile returns its layer and touches LRU;
- * a missing tile requests asynchronous decoding and returns -1 so the caller
- * can choose a fallback. update() runs on the main
- * thread each frame and uploads a budgeted number of decoded tiles to the GPU,
- * evicting the least-recently-used tile (never one used this frame) when the
- * pool is full. Layer 0 is the flat (all-zero) fallback.
+ * One LRU cache for paired height (RG8) and splat (R16UI) texture arrays.
+ * A node has one request, readiness state and array layer for both textures.
+ * Both uploads finish before residency is published; eviction replaces both.
+ * Sector roots are loaded during init and never enter the eviction LRU.
+ * They remain resident until destroy, providing a real terrain fallback.
  */
 class TilePagePool {
 public:
-    static constexpr int FLAT_LAYER = 0;
-
     TilePagePool();
     ~TilePagePool();
 
-    // `format` is the GPU pixel format of the tiles (bytes/texel derived from it).
-    bool init(gfx::Device *device, gfx::Format format, uint32_t tileRes, uint32_t layerCount);
-    void setAsset(LandscapeAsset *asset);
+    bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount);
     void destroy();
-    inline bool valid() const { return _array != nullptr; }
+    inline bool valid() const { return _heightArray != nullptr && _splatArray != nullptr; }
 
     // Marks the start of a frame: clears the "in use this frame" set that
     // protects visible tiles from LRU eviction.
@@ -76,7 +64,7 @@ public:
     // Non-blocking: returns the tile's resident layer (touched for LRU) or -1
     // while it streams in. Requests a decode from the LandscapeAsset on first
     // miss. Callers use a resident ancestor tile as the fallback for a -1.
-    int query(uint64_t key, const ccstd::string &tilePath);
+    int query(uint32_t level, uint32_t x, uint32_t z);
     // Returns a resident tile's layer without triggering a load, or -1 if not
     // resident. Touches LRU + marks in-use so a fallback ancestor is protected.
     int peekResident(uint64_t key);
@@ -85,22 +73,23 @@ public:
     // full).
     void update(uint32_t maxUploads);
 
-    inline gfx::Texture *array() const { return _array; }
-    inline gfx::Sampler *sampler() const { return _sampler; }
+    inline gfx::Texture *heightArray() const { return _heightArray; }
+    inline gfx::Texture *splatArray() const { return _splatArray; }
+    inline gfx::Sampler *heightSampler() const { return _heightSampler; }
+    inline gfx::Sampler *splatSampler() const { return _splatSampler; }
     inline uint32_t layerCount() const { return _layerCount; }
 
 private:
-    void uploadZeroLayer(uint32_t layer) const;
-    void uploadLayer(uint32_t layer, const uint8_t *data) const;
+    void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     void touchLRU(uint64_t key);
     int acquireLayer(); // free layer, else evict LRU non-in-use; -1 if none
 
     gfx::Device *_device{nullptr};     // weak; owned by Root
     IntrusivePtr<LandscapeAsset> _asset;
-    IntrusivePtr<gfx::Texture> _array; // TEX2D_ARRAY of `_format`
-    gfx::Sampler *_sampler{nullptr};   // weak; cached by device
-    gfx::Format _format{};             // tile pixel format (set in init)
-    uint32_t _bytesPerTexel{0};        // derived from _format
+    IntrusivePtr<gfx::Texture> _heightArray;
+    IntrusivePtr<gfx::Texture> _splatArray;
+    gfx::Sampler *_heightSampler{nullptr}; // cached by device
+    gfx::Sampler *_splatSampler{nullptr};
     uint32_t _tileRes{129};
     uint32_t _layerCount{0};
 

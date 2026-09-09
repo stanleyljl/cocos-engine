@@ -25,46 +25,34 @@
 #pragma once
 
 #include "base/Ptr.h"
-#include "base/std/container/string.h"
-#include "base/std/container/vector.h"
+#include "landscape/LandscapeAsset.h"
 
 namespace cc {
 namespace gfx {
 class Device;
 class Texture;
 class Sampler;
-} // namespace gfx
-
+}
 namespace landscape {
 
-/**
- * The terrain material library: one RGBA8 TEX2D_ARRAY holding every material
- * layer's albedo (indexed by the splat map's material ids, up to 32 arbitrary
- * layers — no fixed semantics). Layers are loaded from albedo PNGs (all the same
- * resolution) and bound to the VT-compose shader as `sampler2DArray materialAlbedo`.
- */
+// All packed material layers and their mip chains, in two texture arrays.
 class MaterialLibrary {
 public:
     MaterialLibrary();
     ~MaterialLibrary();
-
-    // paths: albedo image files, one per layer (layer id = index). All must share
-    // one resolution. Extra layers past config::MATERIAL_LIBRARY_MAX are dropped.
-    bool init(gfx::Device *device, const ccstd::vector<ccstd::string> &paths);
+    bool init(gfx::Device *device, const LandscapeAsset &asset);
     void destroy();
 
-    inline bool valid() const { return _array != nullptr; }
-    inline gfx::Texture *array() const { return _array; }
-    inline gfx::Sampler *sampler() const { return _sampler; }
-    inline uint32_t layerCount() const { return _layerCount; }
+    bool valid() const { return _albedoHeight != nullptr && _normalRoughnessAO != nullptr; }
+    gfx::Texture *albedoHeight() const { return _albedoHeight; }
+    gfx::Texture *normalRoughnessAO() const { return _normalRoughnessAO; }
+    gfx::Sampler *sampler() const { return _sampler; }
 
 private:
-    gfx::Device *_device{nullptr};    // weak; owned by Root
-    IntrusivePtr<gfx::Texture> _array; // RGBA8 TEX2D_ARRAY
-    gfx::Sampler *_sampler{nullptr};   // weak; cached by device
-    uint32_t _layerCount{0};
+    IntrusivePtr<gfx::Texture> _albedoHeight;
+    IntrusivePtr<gfx::Texture> _normalRoughnessAO;
+    gfx::Sampler *_sampler{nullptr}; // cached by device
 };
 
 } // namespace landscape
 } // namespace cc
-

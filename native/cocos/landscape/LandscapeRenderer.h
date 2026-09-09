@@ -52,6 +52,7 @@ class RenderScene;
 namespace landscape {
 
 class TilePagePool;
+class MaterialLibrary;
 
 /**
  * Cocos render-side implementation of the cdlod_opengl grid renderer.
@@ -76,6 +77,7 @@ public:
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
     void setFreezeLod(bool frozen);
+    void setDetailHeightEnabled(bool enabled);
     void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
 
@@ -86,7 +88,7 @@ private:
     void updateInstanceData(scene::Model *model, const QuadNode &node);
     void updateModel(scene::Model *model, const QuadNode &node);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
-    int resolveHeightPage(const QuadNode &node, uint32_t &sourceLevel,
+    int resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
                           uint32_t &sourceX, uint32_t &sourceZ);
 
     IntrusivePtr<Node> _node;
@@ -95,8 +97,8 @@ private:
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
     IntrusivePtr<LandscapeAsset> _asset;
-    std::unique_ptr<TilePagePool> _heightPages;
-    ccstd::string _dataDir;
+    std::unique_ptr<TilePagePool> _tilePages;
+    std::unique_ptr<MaterialLibrary> _materialLibrary;
 
     ccstd::unordered_map<uint64_t, IntrusivePtr<scene::Model>> _active;
     ccstd::unordered_map<scene::Model *, QuadNode> _modelNodes;
@@ -118,6 +120,7 @@ private:
     bool _showRanges{false};
     bool _wireframe{false};
     bool _freezeLod{false};
+    bool _detailHeightEnabled{false};
 };
 
 } // namespace landscape

@@ -3,240 +3,334 @@ CCEffect %{
   techniques:
   - name: opaque
     passes:
-    - vert: landscape-vs:vert
-      frag: landscape-fs:frag
+    - vert: landscape-vs
+      frag: landscape-fs
       properties:
-        mainColor:    { value: [1.0, 1.0, 1.0, 1.0], linear: true, editor: { type: color } }
-        # x = height scale (m), y = height bias (m), z = lodColor flag,
-        # w = showRanges flag (both debug; CDLOD morph uses lodMorph[] below).
-        terrainParams: { value: [3000.0, 0.0, 0.0, 0.0] }
-        morphCameraPos: { value: [0.0, 0.0, 0.0, 0.0] }
-        terrainWorld: { value: [12288.0, 12288.0, 0.0000813802, 0.0000813802] }
-        heightParams: { value: [1.0, 129.0, 0.0, 0.0] }
-        heightmap: { value: white }
-        lodMorph: { value: [0.0, 0.0, 0.0, 0.0] }
+        mainColor: { value: [1, 1, 1, 1], linear: true, editor: { type: color } }
+        terrainParams: { value: [3000, 0, 0, 0] }
+        morphCameraPos: { value: [0, 0, 0, 0] }
+        heightParams: { value: [1, 129, 0, 0] }
+        detailParams: { value: [0.1, 1, 0, 0] }
+        materialParams: { value: [0, 0, 0, 0] }
+        # Runtime texture arrays are bound by LandscapeRenderer before the
+        # material is used by a model. Leaving value unset makes Pass use its
+        # existing non-null default during validated material initialization.
+        splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
+        heightmap: { sampler: { minFilter: linear, magFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+        normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+        lodMorph: { value: [0, 0, 0, 0] }
+    - vert: landscape-vs
+      frag: landscape-fs
+      phase: forward-add
+      propertyIndex: 0
+      embeddedMacros: { CC_FORWARD_ADD: true }
+      depthStencilState:
+        depthFunc: equal
+        depthTest: true
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: one
+          blendDst: one
+          blendSrcAlpha: zero
+          blendDstAlpha: one
+    - vert: landscape-shadow-vs
+      frag: landscape-shadow-fs
+      phase: shadow-caster
+      propertyIndex: 0
+      rasterizerState:
+        cullMode: front
+    - vert: landscape-vs
+      frag: landscape-fs
+      phase: deferred-forward
+      propertyIndex: 0
+      embeddedMacros: { CC_FORCE_FORWARD_SHADING: true }
+}%
+
+CCProgram landscape-uniforms %{
+  uniform Constants {
+    vec4 mainColor;
+    vec4 terrainParams; // height scale/bias, LOD color flag, range flag
+    vec4 morphCameraPos;
+    vec4 heightParams; // height sample spacing (m), tile resolution
+    vec4 detailParams[32]; // per-layer UV repeats/m, detailHeightScale, detailHeightBias
+    vec4 materialParams; // any layer uses detail displacement
+    vec4 lodMorph[8];
+  };
+}%
+
+CCProgram landscape-macros %{
+  #define CC_SURFACES_USE_TANGENT_SPACE 1
+  #include <surfaces/effect-macros/terrain>
+}%
+
+CCProgram landscape-splat %{
+  #if __VERSION__ >= 300
+    uniform highp usampler2DArray splatmap;
+    uniform sampler2DArray albedoHeightMap;
+
+    void landscapeSplatSamples(vec2 localXZ, vec4 tile, out uvec4 packed, out vec4 weights) {
+      float edge = heightParams.y - 1.0;
+      vec2 pixel = clamp((localXZ - tile.xy) / tile.z * edge, vec2(0.0), vec2(edge));
+      ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
+      vec2 f = pixel - vec2(origin);
+      int page = int(tile.w);
+      packed = uvec4(texelFetch(splatmap, ivec3(origin, page), 0).r,
+                     texelFetch(splatmap, ivec3(origin + ivec2(1, 0), page), 0).r,
+                     texelFetch(splatmap, ivec3(origin + ivec2(0, 1), page), 0).r,
+                     texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
+      weights = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
+                     (1.0 - f.x) * f.y, f.x * f.y);
+    }
+  #endif
+}%
+
+CCProgram landscape-vertex %{
+  #if USE_INSTANCING
+    in vec4 a_gridInst;   // local XZ origin, node size, LOD
+    in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
+  #endif
+  #if __VERSION__ >= 300
+    uniform sampler2DArray heightmap;
+    flat out float v_lod;
+    flat out vec4 v_tileParams;
+  #else
+    out float v_lod;
+  #endif
+
+  float sampleHeight(vec2 localXZ) {
+  #if __VERSION__ >= 300 && USE_INSTANCING
+    vec2 tileUv = (localXZ - a_tileInst.xy) / max(a_tileInst.z, 1e-6);
+    float resolution = max(heightParams.y, 2.0);
+    tileUv = tileUv * ((resolution - 1.0) / resolution) + 0.5 / resolution;
+    vec2 encoded = textureLod(heightmap, vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), a_tileInst.w), 0.0).rg;
+    return dot(encoded, vec2(256.0, 1.0)) / 257.0 * terrainParams.x + terrainParams.y;
+  #else
+    return terrainParams.y;
+  #endif
+  }
+
+  #if __VERSION__ >= 300
+    float sampleLayerHeight(int layer, vec2 localXZ) {
+      vec4 params = detailParams[layer];
+      if (params.y == 0.0) return params.z;
+      vec2 uv = vec2(localXZ.x, -localXZ.y) * params.x;
+      return textureLod(albedoHeightMap, vec3(uv, float(layer)), 0.0).a * params.y + params.z;
+    }
+
+    float sampleDetailHeight(vec2 localXZ, vec4 tile) {
+      uvec4 packed;
+      vec4 weights;
+      landscapeSplatSamples(localXZ, tile, packed, weights);
+      float height = 0.0;
+      for (int i = 0; i < 4; ++i) {
+        uint value = packed[i];
+        int layer0 = int(value & 31u);
+        int layer1 = int((value >> 5u) & 31u);
+        float weight = float(value >> 10u) / 63.0;
+        height += weights[i] * mix(sampleLayerHeight(layer0, localXZ), sampleLayerHeight(layer1, localXZ), weight);
+      }
+      return height;
+    }
+  #endif
+
+  #define CC_SURFACES_VERTEX_MODIFY_LOCAL_POS
+  vec3 SurfacesVertexModifyLocalPos(in SurfacesStandardVertexIntermediate In) {
+    vec2 localXZ = In.position.xz;
+    v_lod = 0.0;
+  #if __VERSION__ >= 300
+    v_tileParams = vec4(0.0, 0.0, 1.0, 0.0);
+    #if USE_INSTANCING
+      v_tileParams = a_tileInst;
+    #endif
+  #endif
+  #if USE_INSTANCING
+    localXZ = a_gridInst.xy + In.position.xz * a_gridInst.z;
+    v_lod = a_gridInst.w;
+    // LOD depends only on base terrain. Detail height is deliberately excluded.
+    mat4 matWorld;
+    CCGetWorldMatrix(matWorld);
+    vec3 baseWorld = (matWorld * vec4(localXZ.x, sampleHeight(localXZ), localXZ.y, 1.0)).xyz;
+    float eyeDist = distance(morphCameraPos.xyz, baseWorld);
+    #if __VERSION__ >= 300
+      vec2 range = lodMorph[int(v_lod)].xy;
+      float morph = clamp((eyeDist - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
+      vec2 odd = fract(In.position.xz * 16.0 * 0.5) * 2.0;
+      localXZ -= odd * (a_gridInst.z / 16.0) * morph;
+    #endif
+  #endif
+    float height = sampleHeight(localXZ);
+    // Sample at the final morphed coordinate so coincident edge vertices agree.
+    // Fixed mip level keeps geometry unchanged when the frozen camera moves.
+  #if __VERSION__ >= 300 && USE_INSTANCING
+    if (materialParams.x > 0.5) {
+      height += sampleDetailHeight(localXZ, a_tileInst);
+    }
+  #endif
+    return vec3(localXZ.x, height, localXZ.y);
+  }
+
+  #define CC_SURFACES_VERTEX_MODIFY_LOCAL_SHARED_DATA
+  void SurfacesVertexModifyLocalSharedData(inout SurfacesStandardVertexIntermediate In) {
+    vec2 p = In.position.xz;
+    float stepSize = max(heightParams.x, 0.001);
+    float dx = (sampleHeight(p + vec2(stepSize, 0.0)) - sampleHeight(p - vec2(stepSize, 0.0))) / (2.0 * stepSize);
+    float dz = (sampleHeight(p + vec2(0.0, stepSize)) - sampleHeight(p - vec2(0.0, stepSize))) / (2.0 * stepSize);
+    In.normal = normalize(vec3(-dx, 1.0, -dz));
+    // OpenGL tangent normal: U along +X, V along -Z, B = cross(N, T).
+    In.tangent = vec4(normalize(vec3(1.0, dx, 0.0)), 1.0);
+  }
+
+  #define CC_SURFACES_VERTEX_MODIFY_UV
+  void SurfacesVertexModifyUV(inout SurfacesStandardVertexIntermediate In) {
+    In.texCoord = vec2(In.position.x, -In.position.z);
+  }
+}%
+
+CCProgram landscape-surface %{
+  #if __VERSION__ >= 300
+    uniform sampler2DArray normalRoughnessAOMap;
+    flat in vec4 v_tileParams;
+  #endif
+  #if __VERSION__ >= 300
+    flat in float v_lod;
+  #else
+    in float v_lod;
+  #endif
+
+  vec3 lodPalette(int lod) {
+    if (lod == 0) return vec3(1.00, 0.15, 0.15);
+    if (lod == 1) return vec3(0.15, 0.90, 0.20);
+    if (lod == 2) return vec3(0.20, 0.45, 1.00);
+    if (lod == 3) return vec3(1.00, 0.90, 0.10);
+    if (lod == 4) return vec3(1.00, 0.15, 0.90);
+    return vec3(0.10, 0.90, 0.95);
+  }
+
+  #include <surfaces/data-structures/standard>
+  #define CC_SURFACES_FRAGMENT_MODIFY_SHARED_DATA
+  void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
+    vec3 albedo = vec3(0.0);
+    vec3 detailNormal = vec3(0.0, 0.0, 1.0);
+    float roughness = 1.0;
+    float ao = 1.0;
+  #if __VERSION__ >= 300
+    uvec4 packed;
+    vec4 spatialWeights;
+    vec2 uv = FSInput_texcoord;
+    landscapeSplatSamples(vec2(uv.x, -uv.y), v_tileParams, packed, spatialWeights);
+    int layers[8];
+    float weights[8];
+    for (int i = 0; i < 4; ++i) {
+      uint value = packed[i];
+      float blend = float(value >> 10u) / 63.0;
+      layers[i * 2] = int(value & 31u);
+      layers[i * 2 + 1] = int((value >> 5u) & 31u);
+      weights[i * 2] = spatialWeights[i] * (1.0 - blend);
+      weights[i * 2 + 1] = spatialWeights[i] * blend;
+    }
+    // Merge repeated IDs before texture sampling (usually only 2-3 unique layers).
+    for (int i = 1; i < 8; ++i) {
+      for (int j = 0; j < i; ++j) {
+        if (layers[j] == layers[i]) {
+          weights[j] += weights[i];
+          weights[i] = 0.0;
+          break;
+        }
+      }
+    }
+    // Explicit gradients remain valid inside the per-pixel layer branches.
+    vec2 uvDx = dFdx(uv);
+    vec2 uvDy = dFdy(uv);
+    detailNormal = vec3(0.0);
+    roughness = 0.0;
+    ao = 0.0;
+    for (int i = 0; i < 8; ++i) {
+      if (weights[i] > 0.0) {
+        float tiling = detailParams[layers[i]].x;
+        vec3 coord = vec3(uv * tiling, float(layers[i]));
+        vec4 ah = textureGrad(albedoHeightMap, coord, uvDx * tiling, uvDy * tiling);
+        vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * tiling, uvDy * tiling);
+        vec2 xy = nra.rg * 2.0 - 1.0;
+        vec3 normal = normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+        albedo += SRGBToLinear(ah.rgb) * weights[i];
+        detailNormal += normal * weights[i];
+        roughness += nra.b * weights[i];
+        ao += nra.a * weights[i];
+      }
+    }
+    detailNormal = normalize(detailNormal);
+  #endif
+    surfaceData.baseColor = vec4(albedo * mainColor.rgb, 1.0);
+    // Only RG carries the normal. B is roughness; A is linear AO.
+    vec3 normal = normalize(FSInput_worldNormal);
+    vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
+    surfaceData.worldNormal = normalize(CalculateNormalFromTangentSpace(detailNormal, 1.0,
+      normal, tangent, FSInput_mirrorNormal));
+    surfaceData.roughness = roughness;
+    surfaceData.ao = ao;
+    surfaceData.metallic = 0.0;
+    surfaceData.specularIntensity = 0.5;
+    surfaceData.emissive = vec3(0.0);
+
+    if (terrainParams.z > 0.5) {
+      surfaceData.baseColor.rgb = lodPalette(int(mod(v_lod, 6.0)));
+    }
+    if (terrainParams.w > 0.5) {
+      float d = distance(morphCameraPos.xyz, FSInput_worldPos);
+      float width = fwidth(d) * 1.5;
+      for (int i = 0; i < 6; ++i) {
+        if (abs(d - lodMorph[i].x) < width) surfaceData.baseColor.rgb = mix(lodPalette(i), vec3(0.95), 0.62);
+        if (abs(d - lodMorph[i].y) < width) surfaceData.baseColor.rgb = lodPalette(i) * 0.45;
+      }
+    }
+  }
 }%
 
 CCProgram landscape-vs %{
   precision highp float;
-  #include <legacy/input>
-  #include <builtin/uniforms/cc-global>
-  #include <legacy/decode-base>
-  #include <legacy/local-batch>
-
-  uniform Constants {
-    vec4 mainColor;
-    vec4 terrainParams; // x=height scale (m), y=height bias (m), z=lodColor, w=showRanges
-    vec4 morphCameraPos;
-    // x/y = world dimensions; z/w = reciprocal dimensions.
-    vec4 terrainWorld;
-    vec4 heightParams; // x = height sample spacing (m), y = tile resolution.
-    // CDLOD per-level morph thresholds, indexed by node LOD (L0 = finest):
-    // .x = morphStart distance, .y = morphEnd (= range[lod]). Uploaded from
-    // LandscapeRenderer::setLodRanges; matches Quadtree's CPU selection ranges.
-    vec4 lodMorph[8];
-  };
-  #if __VERSION__ >= 300
-    // RG8 stores the source uint16 height as high-byte/low-byte channels.
-    uniform sampler2DArray heightmap;
-  #endif
-
-  #if USE_INSTANCING
-    // Per-grid instance data: xy = grid world origin (world-XZ, landscape-local),
-    // z = grid world size, w = LOD.
-    in vec4 a_gridInst;
-    // xy = source tile origin in global terrain UV, z = tile UV size, w = array layer.
-    in vec4 a_heightInst;
-  #endif
-
-  out vec3 v_worldPos;
-  out vec2 v_terrainXZ;
-#if __VERSION__ >= 300
-  flat out vec4 v_heightInst;
-#else
-  out vec4 v_heightInst;
-#endif
-#if __VERSION__ >= 300
-  flat out float v_lod;
-#else
-  out float v_lod;
-#endif
-
-  float sampleHeight (vec2 localXZ) {
-    vec2 uv = (localXZ + vec2(0.5 * terrainWorld.x, 0.5 * terrainWorld.y)) * terrainWorld.zw;
-  #if __VERSION__ >= 300
-    #if USE_INSTANCING
-    vec2 tileUv = (uv - a_heightInst.xy) / max(a_heightInst.z, 1e-6);
-    float tileResolution = max(heightParams.y, 2.0);
-    // Height tiles store samples on both node endpoints. Map those endpoints
-    // to texel centers before hardware linear filtering.
-    tileUv = tileUv * ((tileResolution - 1.0) / tileResolution) +
-             0.5 / tileResolution;
-    vec2 encoded = texture(heightmap,
-                           vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), a_heightInst.w)).rg;
-    // RG8 returns byte / 255 for each channel. Reconstructing
-    // (high * 256 + low) / 65535 therefore simplifies to / 257.
-    float normalized = dot(encoded, vec2(256.0, 1.0)) / 257.0;
-    return normalized * terrainParams.x + terrainParams.y;
-    #else
-    return terrainParams.y;
-    #endif
-  #else
-    return terrainParams.y;
-  #endif
-  }
-
-  vec4 vert () {
-    vec4 position;
-    CCVertInput(position);
-
-    mat4 matWorld;
-    CCGetWorldMatrix(matWorld);
-
-    vec2 worldXZ;
-    vec2 local = vec2(0.0);
-    float gridSize = 0.0;
-    float morphK = 0.0;
-    bool doMorph = false;
-  #if USE_INSTANCING
-    local = position.xz;
-    gridSize = a_gridInst.z;
-    worldXZ = a_gridInst.xy + local * gridSize;
-    v_lod = a_gridInst.w;
-    doMorph = true;
-  #else
-    worldXZ = position.xz;
-    v_lod = 0.0;
-  #endif
-
-    // Standard CDLOD geomorph (no stitch mesh): sample this vertex's height
-    // BEFORE morphing and use the full 3D distance to the camera, matching the
-    // CPU point-to-AABB metric and the reference CDLOD morph band. The vertical
-    // component is intentional: it keeps selection and geomorph thresholds
-    // mathematically identical when terrain height varies.
-    if (doMorph) {
-      float h0 = sampleHeight(worldXZ);
-      vec3 worldPos0 = (matWorld * vec4(worldXZ.x, h0, worldXZ.y, 1.0)).xyz;
-      float eyeDist = distance(morphCameraPos.xyz, worldPos0);
-    #if __VERSION__ >= 300
-      int lod = int(v_lod);
-      vec2 mm = lodMorph[lod].xy;                      // (morphStart, morphEnd)
-      morphK = clamp((eyeDist - mm.x) / max(mm.y - mm.x, 1e-3), 0.0, 1.0);
-    #endif
-
-      vec2 gridIdx = local * 16.0;                     // vertex index within grid [0..16]
-      vec2 isOdd = fract(gridIdx * 0.5) * 2.0;         // 0 for even node-cells, 1 for odd
-      float fineSpacing = gridSize / 16.0;             // finest cell size (m)
-      worldXZ -= isOdd * fineSpacing * morphK;         // snap odd cells toward even
-    }
-
-    float h = sampleHeight(worldXZ);
-    vec4 worldPos = matWorld * vec4(worldXZ.x, h, worldXZ.y, 1.0);
-    v_worldPos = worldPos.xyz;
-    v_terrainXZ = worldXZ;
-  #if USE_INSTANCING
-    v_heightInst = a_heightInst;
-  #else
-    v_heightInst = vec4(0.0, 0.0, 1.0, 0.0);
-  #endif
-
-    return cc_matProj * (cc_matView * worldPos);
-  }
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/includes/common-vs>
+  #include <landscape-uniforms>
+  #include <landscape-splat>
+  #include <landscape-vertex>
+  #include <surfaces/includes/standard-vs>
+  #include <shading-entries/main-functions/render-to-scene/vs>
 }%
 
 CCProgram landscape-fs %{
   precision highp float;
-  #include <builtin/uniforms/cc-global>
-  #include <legacy/output-standard>
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/includes/common-fs>
+  #include <landscape-uniforms>
+  #include <landscape-splat>
+  #include <landscape-surface>
+  #include <lighting-models/includes/standard>
+  #include <surfaces/includes/standard-fs>
+  #include <shading-entries/main-functions/render-to-scene/fs>
+}%
 
-  uniform Constants {
-    vec4 mainColor;
-    vec4 terrainParams; // x=height scale (m), y=height bias (m), z=lodColor, w=showRanges
-    vec4 morphCameraPos;
-    vec4 terrainWorld;
-    vec4 heightParams; // x = height sample spacing (m), y = tile resolution.
-    vec4 lodMorph[8];   // must match the vertex Constants block layout
-  };
-#if __VERSION__ >= 300
-  uniform sampler2DArray heightmap;
-#endif
+CCProgram landscape-shadow-vs %{
+  precision highp float;
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/effect-macros/render-to-shadowmap>
+  #include <surfaces/includes/common-vs>
+  #include <landscape-uniforms>
+  #include <landscape-splat>
+  #include <landscape-vertex>
+  #include <shading-entries/main-functions/render-to-shadowmap/vs>
+}%
 
-  in vec3 v_worldPos;
-  in vec2 v_terrainXZ;
-#if __VERSION__ >= 300
-  flat in float v_lod;
-#else
-  in float v_lod;
-#endif
-#if __VERSION__ >= 300
-  flat in vec4 v_heightInst;
-#else
-  in vec4 v_heightInst;
-#endif
-
-  // Exactly the six debug colors used by cdlod_opengl/cdlod.cpp.
-  vec3 lodPalette (int lod) {
-    if (lod == 0) return vec3(1.00, 0.15, 0.15); // L0 red
-    if (lod == 1) return vec3(0.15, 0.90, 0.20); // L1 green
-    if (lod == 2) return vec3(0.20, 0.45, 1.00); // L2 blue
-    if (lod == 3) return vec3(1.00, 0.90, 0.10); // L3 yellow
-    if (lod == 4) return vec3(1.00, 0.15, 0.90); // L4 magenta
-    return vec3(0.10, 0.90, 0.95);              // L5 cyan
-  }
-
-#if __VERSION__ >= 300
-  float sampleHeight (vec2 localXZ) {
-    vec2 uv = (localXZ + vec2(0.5 * terrainWorld.x, 0.5 * terrainWorld.y)) * terrainWorld.zw;
-    vec2 tileUv = (uv - v_heightInst.xy) / max(v_heightInst.z, 1e-6);
-    float tileResolution = max(heightParams.y, 2.0);
-    tileUv = tileUv * ((tileResolution - 1.0) / tileResolution) +
-             0.5 / tileResolution;
-    vec2 encoded = texture(heightmap,
-                           vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), v_heightInst.w)).rg;
-    float normalized = dot(encoded, vec2(256.0, 1.0)) / 257.0;
-    return normalized * terrainParams.x + terrainParams.y;
-  }
-#endif
-
-  vec4 frag () {
-  #if __VERSION__ >= 300
-    // Keep the cdlod_opengl fragment calculation unchanged: fixed light,
-    // height-based terrain base color, then the optional LOD overlay.
-    float spacingX = heightParams.x;
-    float spacingZ = heightParams.x;
-    float hLeft = sampleHeight(v_terrainXZ - vec2(spacingX, 0.0));
-    float hRight = sampleHeight(v_terrainXZ + vec2(spacingX, 0.0));
-    float hBottom = sampleHeight(v_terrainXZ - vec2(0.0, spacingZ));
-    float hTop = sampleHeight(v_terrainXZ + vec2(0.0, spacingZ));
-    vec3 n = normalize(vec3(hLeft - hRight, 2.0 * spacingX, hBottom - hTop));
-    float diff = max(dot(n, normalize(vec3(-0.5, 1.0, -0.35))), 0.0) * 0.85 + 0.15;
-
-    float hN = (v_worldPos.y - terrainParams.y) / terrainParams.x;
-    vec3 base = mix(vec3(0.30, 0.45, 0.22), vec3(0.42, 0.38, 0.34), smoothstep(0.35, 0.55, hN));
-    base = mix(base, vec3(0.92, 0.94, 0.98), smoothstep(0.70, 0.85, hN));
-
-    // Matches cdlod.cpp: overlay 80% of the six-color palette, then apply
-    // the same lighting factor.
-    if (terrainParams.z > 0.5) {
-      base = mix(base, lodPalette(int(mod(v_lod, 6.0))), 0.80);
-    }
-    vec3 color = base * diff;
-
-    // Match cdlod.cpp's palette and ring order. The end ring is darkened only
-    // for contrast: the demo's raw palette color is too close to the 80%
-    // lodColor overlay after terrain lighting is applied.
-    if (terrainParams.w > 0.5) {
-      float d = distance(morphCameraPos.xyz, v_worldPos);
-      float w = fwidth(d) * 1.5;
-      for (int i = 0; i < 6; ++i) {
-        if (abs(d - lodMorph[i].x) < w) color = mix(lodPalette(i), vec3(0.95), 0.62);
-        if (abs(d - lodMorph[i].y) < w) color = lodPalette(i) * 0.45;
-      }
-    }
-  #else
-    vec3 color = vec3(0.30, 0.45, 0.22);
-  #endif
-
-    return CCFragOutput(vec4(color, 1.0));
-  }
+CCProgram landscape-shadow-fs %{
+  precision highp float;
+  precision highp int;
+  #include <surfaces/effect-macros/render-to-shadowmap>
+  #include <surfaces/includes/common-fs>
+  #include <landscape-uniforms>
+  #include <shading-entries/main-functions/render-to-shadowmap/fs>
 }%

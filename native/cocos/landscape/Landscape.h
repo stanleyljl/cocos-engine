@@ -59,6 +59,7 @@ public:
 
     void setWireframe(bool wireframe);
     void setFreezeLod(bool frozen);
+    void setDetailHeightEnabled(bool enabled);
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
     void setDataDir(const ccstd::string &dir);
@@ -75,6 +76,7 @@ private:
 
     bool _wireframe{false};
     bool _freezeLod{false};
+    bool _detailHeightEnabled{false};
     bool _lodColor{false};
     bool _showRanges{false};
     ccstd::string _dataDir;

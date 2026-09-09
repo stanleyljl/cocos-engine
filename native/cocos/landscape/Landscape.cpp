@@ -98,6 +98,7 @@ void Landscape::initializeRenderer() {
     renderer->setDebugFlags(_lodColor, _showRanges);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
+    renderer->setDetailHeightEnabled(_detailHeightEnabled);
 
     CC_LOG_INFO("[Landscape] LOD ranges:");
     for (uint32_t level = 0; level <= data.maxLevel; ++level) {
@@ -190,6 +191,13 @@ void Landscape::update() {
         _lastLodNodeCounts = lodNodeCounts;
     }
     _renderer->sync(_selected);
+}
+
+void Landscape::setDetailHeightEnabled(bool enabled) {
+    _detailHeightEnabled = enabled;
+    if (_renderer != nullptr) {
+        _renderer->setDetailHeightEnabled(enabled);
+    }
 }
 
 void Landscape::setFreezeLod(bool frozen) {

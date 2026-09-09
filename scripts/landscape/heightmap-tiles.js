@@ -126,6 +126,38 @@ function scanMaterialLayers (assetDir) {
         .slice(0, 32);
 }
 
+function scanMaterialLibrary (assetDir, manifestPath) {
+    // Packed materials have two images per layer. Preserve explicit ids and
+    // per-layer parameters rather than treating each PNG as another material.
+    const library = fs.existsSync(manifestPath)
+        ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')).materialLibrary : null;
+    if (library && library.dir === 'textures') {
+        if (library.dir !== 'textures' || library.format !== 'RGBA8'
+            || !Number.isInteger(library.resolution) || library.resolution <= 0
+            || !Array.isArray(library.layers) || library.layers.length > 32
+            || library.count !== library.layers.length) {
+            fail(`Invalid packed material library: ${manifestPath}`);
+        }
+        for (const [index, layer] of library.layers.entries()) {
+            if (layer.id !== index || !Number.isFinite(layer.detailHeightScale)
+                || !Number.isFinite(layer.detailHeightBias)) {
+                fail(`Invalid packed material layer ${index}`);
+            }
+            for (const property of ['albedoHeight', 'normalRoughnessAO']) {
+                const file = layer[property];
+                if (typeof file !== 'string' || path.basename(file) !== file
+                    || !file.endsWith('.png')
+                    || !fs.existsSync(path.join(assetDir, library.dir, file))) {
+                    fail(`Missing or invalid ${property} in material layer ${index}`);
+                }
+            }
+        }
+        return library;
+    }
+    const files = scanMaterialLayers(assetDir);
+    return { count: files.length, dir: 'materials', layers: files.map((file, id) => ({ id, file })) };
+}
+
 function printHelp () {
     console.log(`Usage:
   node scripts/landscape/heightmap-tiles.js --input source.png --out D:\\work\\editors\\projects\\landscape\\assets\\landscape --name terrain
@@ -275,7 +307,7 @@ function makeManifest (options) {
         minTileLevel,
         heightScale,
         heightBias,
-        materialLayers,
+        materialLibrary,
         bounds,
     } = options;
     const levels = [];
@@ -301,11 +333,7 @@ function makeManifest (options) {
         nodeTileResolution: tileSize,
         heightScale,
         heightBias,
-        materialLibrary: {
-            count: materialLayers.length,
-            dir: 'materials',
-            layers: materialLayers.map((file, id) => ({ id, file })),
-        },
+        materialLibrary,
         levels,
     };
 }
@@ -363,6 +391,7 @@ function generate (rawOptions) {
         fail(`Output already exists: ${manifestPath}. Use --force to replace it.`);
     }
     fs.mkdirSync(assetDir, { recursive: true });
+    const materialLibrary = scanMaterialLibrary(assetDir, manifestPath);
 
     const sourceWidth = safeDimension(sectorsX, sectorSize, 'Source width');
     const sourceHeight = safeDimension(sectorsY, sectorSize, 'Source height');
@@ -382,9 +411,8 @@ function generate (rawOptions) {
         removeExistingHeightTiles(assetDir);
     }
 
-    const materialLayers = scanMaterialLayers(assetDir);
-    if (materialLayers.length > 0) {
-        console.log(`Material library: ${materialLayers.length} layers (${materialLayers.join(', ')})`);
+    if (materialLibrary.count > 0) {
+        console.log(`Material library: ${materialLibrary.count} layers (${materialLibrary.dir})`);
     }
 
     let totalTiles = 0;
@@ -473,7 +501,7 @@ function generate (rawOptions) {
         minTileLevel,
         heightScale,
         heightBias,
-        materialLayers,
+        materialLibrary,
         bounds,
     });
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));

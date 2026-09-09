@@ -45,19 +45,33 @@ namespace landscape {
 
 class LandscapeAsset : public RefCounted {
 public:
+    struct MaterialLayer {
+        uint32_t id{0};
+        ccstd::string name;
+        ccstd::string albedoHeight;
+        ccstd::string normalRoughnessAO;
+        float detailHeightScale{1.0F};
+        float detailHeightBias{0.0F};
+        float uvScale{0.1F}; // texture repeats per landscape-local meter
+    };
+
     struct TileData {
         uint64_t key{0};
-        ccstd::vector<uint8_t> data;
+        ccstd::vector<uint8_t> height;
+        ccstd::vector<uint8_t> splat;
     };
 
     LandscapeAsset();
     ~LandscapeAsset() override;
 
     bool load(const ccstd::string &dataDir);
-    // Requests a tile without blocking the caller. The decoded tile is made
+#ifndef SWIGCOCOS
+    // Synchronously loads a sector root pair before terrain rendering starts.
+    bool loadRootTile(uint32_t x, uint32_t z, TileData &tile) const;
+#endif
+    // Requests a height/splat pair as one job. Only complete pairs are made
     // available through takeReadyTile() on the main thread.
-    bool requestTile(uint64_t key, const ccstd::string &tilePath,
-                     gfx::Format format, uint32_t tileResolution);
+    bool requestTile(uint32_t level, uint32_t x, uint32_t z);
     bool takeReadyTile(TileData &tile);
     bool takeFailedTile(uint64_t &key);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
@@ -69,6 +83,8 @@ public:
     const LandscapeData &data() const { return _data; }
     const ccstd::string &dataDir() const { return _dataDir; }
     bool valid() const { return _data.valid(); }
+    const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
+    uint32_t materialResolution() const { return _materialResolution; }
 
 private:
     struct AsyncState {
@@ -84,10 +100,14 @@ private:
     };
 
     void resetAsyncState();
+    static bool decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
+                               uint32_t resolution, uint32_t layerCount, TileData &tile);
     size_t rangeOffset(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
 
     ccstd::string _dataDir;
     LandscapeData _data;
+    ccstd::vector<MaterialLayer> _materialLayers;
+    uint32_t _materialResolution{0};
     ccstd::vector<size_t> _levelOffsets;
     ccstd::vector<HeightRange> _heightRanges;
     size_t _nodesPerSector{0U};

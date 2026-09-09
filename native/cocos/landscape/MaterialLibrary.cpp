@@ -25,179 +25,167 @@
 #include "landscape/MaterialLibrary.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "base/Log.h"
-#include "base/Ptr.h"
-#include "landscape/LandscapeConfig.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
-#include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXTexture.h"
 
 namespace cc {
 namespace landscape {
-
 namespace {
-// Decodes an albedo image into a tightly packed RGBA8 buffer of res*res texels.
-// Returns false if it cannot be read / is the wrong size. Expands RGB -> RGBA.
-bool decodeAlbedo(const ccstd::string &path, uint32_t res, ccstd::vector<uint8_t> &out) {
+
+bool decodeRGBA8(const ccstd::string &path, uint32_t resolution, ccstd::vector<uint8_t> &pixels) {
     const Data data = FileUtils::getInstance()->getDataFromFile(path);
-    if (data.isNull()) {
-        return false;
-    }
     IntrusivePtr<Image> image = ccnew Image();
-    if (!image->initWithImageData(data.getBytes(), data.getSize())) {
+    if (data.isNull() || !image->initWithImageData(data.getBytes(), data.getSize()) ||
+        image->getRenderFormat() != gfx::Format::RGBA8 ||
+        static_cast<uint32_t>(image->getWidth()) != resolution ||
+        static_cast<uint32_t>(image->getHeight()) != resolution ||
+        image->getDataLen() != static_cast<size_t>(resolution) * resolution * 4U) {
+        CC_LOG_WARNING("[Landscape] expected %ux%u RGBA8 material PNG: %s", resolution, resolution, path.c_str());
         return false;
     }
-    if (static_cast<uint32_t>(image->getWidth()) != res || static_cast<uint32_t>(image->getHeight()) != res) {
-        CC_LOG_WARNING("[Landscape] material '%s' is %dx%d, expected %ux%u", path.c_str(), image->getWidth(), image->getHeight(), res, res);
-        return false;
-    }
-    const gfx::Format fmt = image->getRenderFormat();
-    const uint8_t *src = image->getData();
-    const uint32_t count = res * res;
-    out.resize(count * 4U);
-    if (fmt == gfx::Format::RGBA8) {
-        std::copy(src, src + count * 4U, out.begin());
-    } else if (fmt == gfx::Format::RGB8) {
-        for (uint32_t i = 0; i < count; ++i) {
-            out[i * 4U + 0U] = src[i * 3U + 0U];
-            out[i * 4U + 1U] = src[i * 3U + 1U];
-            out[i * 4U + 2U] = src[i * 3U + 2U];
-            out[i * 4U + 3U] = 255U;
-        }
-    } else {
-        CC_LOG_WARNING("[Landscape] material '%s' has unsupported format %d (need RGB8/RGBA8)", path.c_str(), static_cast<int>(fmt));
-        return false;
-    }
+    // Image's PNG decoder does not apply gamma or premultiply alpha. Alpha is
+    // height/AO data, never opacity. Keep the complete base level unchanged.
+    pixels.assign(image->getData(), image->getData() + image->getDataLen());
     return true;
 }
 
-// Box-downsamples an RGBA8 image to half size (into dst). Assumes even dims > 1.
-void downsampleRGBA8(const uint8_t *src, uint32_t sw, uint32_t sh, ccstd::vector<uint8_t> &dst) {
-    const uint32_t dw = sw >> 1;
-    const uint32_t dh = sh >> 1;
-    dst.resize(static_cast<size_t>(dw) * dh * 4U);
-    for (uint32_t y = 0; y < dh; ++y) {
-        for (uint32_t x = 0; x < dw; ++x) {
-            const uint32_t sx = x * 2U;
-            const uint32_t sy = y * 2U;
-            for (uint32_t c = 0; c < 4U; ++c) {
-                const uint32_t sum = src[(sy * sw + sx) * 4U + c] +
-                                     src[(sy * sw + sx + 1U) * 4U + c] +
-                                     src[((sy + 1U) * sw + sx) * 4U + c] +
-                                     src[((sy + 1U) * sw + sx + 1U) * 4U + c];
-                dst[(y * dw + x) * 4U + c] = static_cast<uint8_t>(sum >> 2U);
+float srgbToLinear(float value) {
+    return value <= 0.04045F ? value / 12.92F : std::pow((value + 0.055F) / 1.055F, 2.4F);
+}
+
+float linearToSrgb(float value) {
+    return value <= 0.0031308F ? value * 12.92F : 1.055F * std::pow(value, 1.0F / 2.4F) - 0.055F;
+}
+
+uint8_t encode(float value) {
+    return static_cast<uint8_t>(std::round(std::clamp(value, 0.0F, 1.0F) * 255.0F));
+}
+
+void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, ccstd::vector<uint8_t> &dst) {
+    const uint32_t nextSize = std::max(1U, size / 2U);
+    dst.resize(static_cast<size_t>(nextSize) * nextSize * 4U);
+    for (uint32_t y = 0; y < nextSize; ++y) {
+        for (uint32_t x = 0; x < nextSize; ++x) {
+            float sum[4]{};
+            float normal[3]{};
+            uint32_t count = 0U;
+            for (uint32_t sy = y * size / nextSize; sy < (y + 1U) * size / nextSize; ++sy) {
+                for (uint32_t sx = x * size / nextSize; sx < (x + 1U) * size / nextSize; ++sx) {
+                    const auto *pixel = src.data() + (static_cast<size_t>(sy) * size + sx) * 4U;
+                    for (uint32_t c = 0; c < 4U; ++c) {
+                        const float value = static_cast<float>(pixel[c]) / 255.0F;
+                        sum[c] += albedo && c < 3U ? srgbToLinear(value) : value;
+                    }
+                    if (!albedo) {
+                        const float nx = static_cast<float>(pixel[0]) / 127.5F - 1.0F;
+                        const float ny = static_cast<float>(pixel[1]) / 127.5F - 1.0F;
+                        normal[0] += nx;
+                        normal[1] += ny;
+                        normal[2] += std::sqrt(std::max(0.0F, 1.0F - nx * nx - ny * ny));
+                    }
+                    ++count;
+                }
             }
+            auto *pixel = dst.data() + (static_cast<size_t>(y) * nextSize + x) * 4U;
+            for (uint32_t c = 0; c < 4U; ++c) {
+                const float value = sum[c] / static_cast<float>(count);
+                pixel[c] = encode(albedo && c < 3U ? linearToSrgb(value) : value);
+            }
+            if (!albedo) {
+                const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+                pixel[0] = encode(length > 1e-6F ? normal[0] / length * 0.5F + 0.5F : 0.5F);
+                pixel[1] = encode(length > 1e-6F ? normal[1] / length * 0.5F + 0.5F : 0.5F);
+            }
+        }
+    }
+}
+
+IntrusivePtr<gfx::Texture> createTexture(gfx::Device *device, uint32_t resolution, uint32_t layerCount) {
+    gfx::TextureInfo info;
+    info.type = gfx::TextureType::TEX2D_ARRAY;
+    info.layerCount = layerCount;
+    info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
+    // Match builtin-standard: RGBA8 sampling, followed by shader RGB decoding.
+    // Alpha remains linear height/AO data throughout filtering and shading.
+    info.format = gfx::Format::RGBA8;
+    info.width = resolution;
+    info.height = resolution;
+    info.levelCount = 1U;
+    for (uint32_t size = resolution; size > 1U; size >>= 1U) {
+        ++info.levelCount;
+    }
+    return device->createTexture(info);
+}
+
+void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
+                   uint32_t layer, ccstd::vector<uint8_t> pixels, bool albedo) {
+    ccstd::vector<uint8_t> next;
+    uint32_t size = resolution;
+    for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
+        gfx::BufferTextureCopy region;
+        region.texExtent = {size, size, 1U};
+        region.texSubres.mipLevel = mip;
+        region.texSubres.baseArrayLayer = layer;
+        region.texSubres.layerCount = 1U;
+        const uint8_t *buffers[]{pixels.data()};
+        device->copyBuffersToTexture(buffers, texture, &region, 1U);
+        if (mip + 1U < texture->getInfo().levelCount) {
+            downsample(pixels, size, albedo, next);
+            pixels.swap(next);
+            size = std::max(1U, size / 2U);
         }
     }
 }
 } // namespace
 
 MaterialLibrary::MaterialLibrary() = default;
+MaterialLibrary::~MaterialLibrary() { destroy(); }
 
-MaterialLibrary::~MaterialLibrary() {
+bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     destroy();
-}
-
-bool MaterialLibrary::init(gfx::Device *device, const ccstd::vector<ccstd::string> &paths) {
-    if (device == nullptr || paths.empty()) {
+    const auto &layers = asset.materialLayers();
+    if (device == nullptr || layers.empty()) {
         return false;
     }
-    _device = device;
-    const uint32_t layerCount = std::min(static_cast<uint32_t>(paths.size()), config::MATERIAL_LIBRARY_MAX);
-
-    // Resolution comes from the first readable image; all layers must match it.
-    uint32_t res = 0;
-    {
-        const Data probe = FileUtils::getInstance()->getDataFromFile(paths[0]);
-        IntrusivePtr<Image> image = ccnew Image();
-        if (probe.isNull() || !image->initWithImageData(probe.getBytes(), probe.getSize())) {
-            CC_LOG_WARNING("[Landscape] MaterialLibrary: cannot read first albedo '%s'", paths[0].c_str());
-            _device = nullptr;
-            return false;
-        }
-        res = static_cast<uint32_t>(image->getWidth());
-        if (res == 0 || static_cast<uint32_t>(image->getHeight()) != res) {
-            CC_LOG_WARNING("[Landscape] MaterialLibrary: first albedo must be square, got %dx%d", image->getWidth(), image->getHeight());
-            _device = nullptr;
-            return false;
-        }
-    }
-
-    // Full mip chain so the compose pass can minify densely-tiled coarse pages
-    // (a coarse Node tiles the material many times into its 128^2 page; without
-    // mips that undersamples into aliasing/moire and looks different from finer LODs).
-    uint32_t mipCount = 1;
-    for (uint32_t r = res; r > 1U; r >>= 1U) {
-        ++mipCount;
-    }
-
-    gfx::TextureInfo info;
-    info.type = gfx::TextureType::TEX2D_ARRAY;
-    info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
-    info.format = gfx::Format::RGBA8;
-    info.width = res;
-    info.height = res;
-    info.layerCount = layerCount;
-    info.levelCount = mipCount;
-    _array = _device->createTexture(info);
-    if (_array == nullptr) {
-        CC_LOG_WARNING("[Landscape] MaterialLibrary: failed to create RGBA8 TEX2D_ARRAY (%u layers @ %u, %u mips)", layerCount, res, mipCount);
-        _device = nullptr;
+    const uint32_t resolution = asset.materialResolution();
+    const uint32_t count = static_cast<uint32_t>(layers.size());
+    _albedoHeight = createTexture(device, resolution, count);
+    _normalRoughnessAO = createTexture(device, resolution, count);
+    if (!valid()) {
+        destroy();
         return false;
     }
-
-    gfx::SamplerInfo si;
-    si.minFilter = gfx::Filter::LINEAR;
-    si.magFilter = gfx::Filter::LINEAR;
-    si.mipFilter = gfx::Filter::LINEAR; // trilinear across the generated mips
-    si.addressU = gfx::Address::WRAP;
-    si.addressV = gfx::Address::WRAP;
-    si.addressW = gfx::Address::CLAMP;
-    _sampler = _device->getSampler(si);
-
-    ccstd::vector<uint8_t> level;    // current mip level data
-    ccstd::vector<uint8_t> next;     // scratch for the next (downsampled) level
-    const ccstd::vector<uint8_t> fallback(static_cast<size_t>(res) * res * 4U, 128U); // neutral gray for unreadable layers
-    _layerCount = layerCount;
-    for (uint32_t layer = 0; layer < layerCount; ++layer) {
-        if (decodeAlbedo(paths[layer], res, level)) {
-            // ok
-        } else {
-            CC_LOG_WARNING("[Landscape] MaterialLibrary: layer %u '%s' unreadable, using gray", layer, paths[layer].c_str());
-            level = fallback;
+    for (const auto &layer : layers) {
+        ccstd::vector<uint8_t> albedo, normal;
+        if (!decodeRGBA8(layer.albedoHeight, resolution, albedo) ||
+            !decodeRGBA8(layer.normalRoughnessAO, resolution, normal)) {
+            destroy();
+            return false;
         }
-        uint32_t w = res;
-        uint32_t h = res;
-        for (uint32_t mip = 0; mip < mipCount; ++mip) {
-            gfx::BufferTextureCopy region;
-            region.texExtent.width = w;
-            region.texExtent.height = h;
-            region.texExtent.depth = 1;
-            region.texSubres.mipLevel = mip;
-            region.texSubres.baseArrayLayer = layer;
-            region.texSubres.layerCount = 1;
-            const uint8_t *buffers[1]{level.data()};
-            _device->copyBuffersToTexture(buffers, _array, &region, 1);
-            if (mip + 1 < mipCount) {
-                downsampleRGBA8(level.data(), w, h, next);
-                level.swap(next);
-                w >>= 1U;
-                h >>= 1U;
-            }
-        }
+        uploadTexture(device, _albedoHeight, resolution, layer.id, std::move(albedo), true);
+        uploadTexture(device, _normalRoughnessAO, resolution, layer.id, std::move(normal), false);
     }
-    CC_LOG_INFO("[Landscape] MaterialLibrary: %u layers @ %ux%u, %u mips", layerCount, res, res, mipCount);
+    gfx::SamplerInfo info;
+    info.minFilter = gfx::Filter::LINEAR;
+    info.magFilter = gfx::Filter::LINEAR;
+    info.mipFilter = gfx::Filter::LINEAR;
+    info.addressU = gfx::Address::WRAP;
+    info.addressV = gfx::Address::WRAP;
+    _sampler = device->getSampler(info);
+    CC_LOG_INFO("[Landscape] %u material layers: paired %ux%u RGBA8 arrays with mips",
+                count, resolution, resolution);
     return true;
 }
 
 void MaterialLibrary::destroy() {
-    _array = nullptr; // IntrusivePtr releases the gfx texture
+    _albedoHeight = nullptr;
+    _normalRoughnessAO = nullptr;
     _sampler = nullptr;
-    _device = nullptr;
-    _layerCount = 0;
 }
 
 } // namespace landscape
