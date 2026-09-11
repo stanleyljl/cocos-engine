@@ -34,9 +34,9 @@ class Device;
 namespace landscape {
 
 /**
- * Builder for the single shared grid mesh used by every grid instance: an
- * n x n vertex grid on the XZ plane normalized to [0,1] x [0,1] (y = 0).
- * Each instance scales/places it into the world via the a_gridInst attribute.
+ * Builder for the shared half-size grid used by every quadrant instance.
+ * The shader maps its normalized [0,1] coordinates back into one quadrant of
+ * the parent CDLOD node before applying morph.
  */
 class GridMesh {
 public:

@@ -43,6 +43,15 @@ float distanceToAABB(const Vec3 &point, const geometry::AABB &box) {
     const float dz = std::max(0.0F, std::abs(point.z - center.z) - halfExtents.z);
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
+
+float maxDistanceToAABB(const Vec3 &point, const geometry::AABB &box) {
+    const Vec3 &center = box.getCenter();
+    const Vec3 &halfExtents = box.getHalfExtents();
+    const float dx = std::abs(point.x - center.x) + halfExtents.x;
+    const float dy = std::abs(point.y - center.y) + halfExtents.y;
+    const float dz = std::abs(point.z - center.z) + halfExtents.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
 } // namespace
 
 Quadtree::Quadtree() {
@@ -89,16 +98,6 @@ bool Quadtree::init(const LandscapeAsset &asset) {
     return true;
 }
 
-void Quadtree::setUseLevelHeightRanges(bool enabled) {
-    if (_useLevelHeightRanges == enabled) {
-        return;
-    }
-    _useLevelHeightRanges = enabled;
-    if (_data.valid()) {
-        computeRanges();
-    }
-}
-
 size_t Quadtree::nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
                                 uint32_t ix, uint32_t iz) const {
     const uint32_t nodesPerSide = 1U << (_data.maxLevel - level);
@@ -108,80 +107,34 @@ size_t Quadtree::nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t lev
 }
 
 void Quadtree::computeRanges() {
-    if (_useLevelHeightRanges) {
-        computeRangesPerLevel();
-    } else {
-        computeRangesGlobal();
-    }
-}
-
-void Quadtree::computeRangesGlobal() {
     const size_t levelCount = static_cast<size_t>(_data.maxLevel) + 1U;
     _lodRange.assign(levelCount, 0.0F);
     _lodMorphStart.assign(levelCount, 0.0F);
     _lodMorphEnd.assign(levelCount, 0.0F);
 
-    const float leaf = _data.sectorSize / static_cast<float>(1U << _data.maxLevel);
-    float rangePrev = 0.0F;
-    float diagPrev = 0.0F;
+    float totalWeight = 0.0F;
+    float currentWeight = 1.0F;
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const float size = leaf * static_cast<float>(1U << level);
-        const float height = _data.maxHeight() - _data.minHeight();
-        const float diag = std::sqrt(2.0F * size * size + height * height);
-        const float morphStart = rangePrev + diagPrev + diag;
-        const float range = rangePrev + (morphStart - rangePrev) / config::MORPH_RATIO;
-        _lodMorphStart[level] = morphStart * config::VIS_SAFETY;
-        _lodRange[level] = range * config::VIS_SAFETY;
-        _lodMorphEnd[level] = range * config::VIS_SAFETY;
-        rangePrev = range;
-        diagPrev = diag;
-    }
-}
-
-void Quadtree::computeRangesPerLevel() {
-    const size_t levelCount = static_cast<size_t>(_data.maxLevel) + 1U;
-    _lodRange.assign(levelCount, 0.0F);
-    _lodMorphStart.assign(levelCount, 0.0F);
-    _lodMorphEnd.assign(levelCount, 0.0F);
-
-    const float globalHeight = _data.maxHeight() - _data.minHeight();
-    ccstd::vector<float> levelHeight(levelCount, globalHeight);
-    for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const uint32_t nodesPerSide = 1U << (_data.maxLevel - level);
-        const size_t nodeCount = static_cast<size_t>(nodesPerSide) * nodesPerSide;
-        float maxHeight = 0.0F;
-        for (uint32_t sectorZ = 0; sectorZ < _data.sectorsZ; ++sectorZ) {
-            for (uint32_t sectorX = 0; sectorX < _data.sectorsX; ++sectorX) {
-                const size_t sectorOffset =
-                    (static_cast<size_t>(sectorZ) * _data.sectorsX + sectorX) * _nodesPerSector +
-                    _levelOffsets[level];
-                for (size_t index = 0; index < nodeCount; ++index) {
-                    const HeightRange &range = _heightRanges[sectorOffset + index];
-                    maxHeight = std::max(maxHeight, range.maxY - range.minY);
-                }
-            }
-        }
-        // Keep a valid conservative fallback if the height table is absent or
-        // contains an invalid span for a level.
-        if (maxHeight > 0.0F) {
-            levelHeight[level] = maxHeight;
-        }
+        totalWeight += currentWeight;
+        currentWeight *= config::LOD_DISTANCE_RATIO;
     }
 
-    const float leaf = _data.sectorSize / static_cast<float>(1U << _data.maxLevel);
-    float rangePrev = 0.0F;
-    float diagPrev = 0.0F;
+    const float visibilityDistance = _data.sectorSize * config::VISIBILITY_DISTANCE_IN_SECTORS;
+    const float section = visibilityDistance / totalWeight;
+    float previousRange = 0.0F;
+    currentWeight = 1.0F;
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const float size = leaf * static_cast<float>(1U << level);
-        const float height = levelHeight[level];
-        const float diag = std::sqrt(2.0F * size * size + height * height);
-        const float morphStart = rangePrev + diagPrev + diag;
-        const float range = rangePrev + (morphStart - rangePrev) / config::MORPH_RATIO;
-        _lodMorphStart[level] = morphStart * config::VIS_SAFETY;
-        _lodRange[level] = range * config::VIS_SAFETY;
-        _lodMorphEnd[level] = range * config::VIS_SAFETY;
-        rangePrev = range;
-        diagPrev = diag;
+        _lodRange[level] = previousRange + section * currentWeight;
+        previousRange = _lodRange[level];
+        currentWeight *= config::LOD_DISTANCE_RATIO;
+    }
+
+    float previousMorphStart = 0.0F;
+    for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
+        _lodMorphEnd[level] = _lodRange[level];
+        _lodMorphStart[level] = previousMorphStart +
+            (_lodMorphEnd[level] - previousMorphStart) * config::MORPH_START_RATIO;
+        previousMorphStart = _lodMorphStart[level];
     }
 }
 
@@ -210,6 +163,7 @@ const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geomet
     _sectorX = sectorX;
     _sectorZ = sectorZ;
     _selected.clear();
+    _visibilityDistanceTooSmall = false;
     if (!_data.valid() || sectorX >= _data.sectorsX || sectorZ >= _data.sectorsZ) {
         return _selected;
     }
@@ -217,7 +171,7 @@ const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geomet
     return _selected;
 }
 
-void Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
+bool Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
     const float size = _data.sectorSize / static_cast<float>(1U << (_data.maxLevel - level));
     float minY = _data.minHeight();
     float maxY = _data.maxHeight();
@@ -228,17 +182,39 @@ void Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
     _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
 
     if (!_box->aabbFrustum(*_frustum)) {
-        return;
+        return true; // Frustum-culled children must not be filled by the parent.
     }
-    if (level == 0U || distanceToAABB(_camPos, *_box) > _lodRange[level - 1U]) {
-        _selected.push_back(QuadNode{level, ix, iz, minY, maxY});
-        return;
+
+    const float minDistance = distanceToAABB(_camPos, *_box);
+    if (minDistance > _lodRange[level]) {
+        return false; // The parent must fill this child quadrant.
     }
+    const float maxDistance = maxDistanceToAABB(_camPos, *_box);
+    const auto addSelection = [&](uint8_t quadrantMask) {
+        _selected.push_back(QuadNode{level, ix, iz, minY, maxY, quadrantMask});
+        if (level < _data.maxLevel && maxDistance > _lodMorphStart[level + 1U]) {
+            _visibilityDistanceTooSmall = true;
+        }
+    };
+
+    if (level == 0U || minDistance > _lodRange[level - 1U]) {
+        addSelection(config::ALL_QUADRANTS);
+        return true;
+    }
+
+    uint8_t parentMask = 0U;
     for (uint32_t dz = 0; dz < 2U; ++dz) {
         for (uint32_t dx = 0; dx < 2U; ++dx) {
-            traverse(level - 1U, ix * 2U + dx, iz * 2U + dz);
+            const uint32_t quadrant = dz * 2U + dx;
+            if (!traverse(level - 1U, ix * 2U + dx, iz * 2U + dz)) {
+                parentMask |= static_cast<uint8_t>(1U << quadrant);
+            }
         }
     }
+    if (parentMask != 0U) {
+        addSelection(parentMask);
+    }
+    return true;
 }
 
 } // namespace landscape

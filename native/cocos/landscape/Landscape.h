@@ -87,6 +87,7 @@ private:
     std::unique_ptr<LandscapeRenderer> _renderer;
     ccstd::vector<QuadNode> _selected;
     ccstd::vector<uint32_t> _lastLodNodeCounts;
+    bool _lastVisibilityDistanceWarning{false};
 };
 
 } // namespace landscape

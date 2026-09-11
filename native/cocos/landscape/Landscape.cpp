@@ -78,13 +78,6 @@ void Landscape::initializeRenderer() {
     if (!quadtree->init(*asset)) {
         return;
     }
-#if CC_EDITOR
-    // Keep the editor's inspection behavior compatible with the original
-    // global-height CDLOD ranges. Runtime uses tighter per-level ranges.
-    quadtree->setUseLevelHeightRanges(false);
-#else
-    quadtree->setUseLevelHeightRanges(true);
-#endif
     const auto &data = asset->data();
 
     auto renderer = std::make_unique<LandscapeRenderer>();
@@ -117,6 +110,7 @@ void Landscape::onDisable() {
     _asset = nullptr;
     _selected.clear();
     _lastLodNodeCounts.clear();
+    _lastVisibilityDistanceWarning = false;
     _scene = nullptr;
     _node = nullptr;
 }
@@ -146,6 +140,7 @@ void Landscape::update() {
     const auto &data = _asset->data();
     const float halfWorldX = data.worldWidth() * 0.5F;
     const float halfWorldZ = data.worldDepth() * 0.5F;
+    bool visibilityDistanceWarning = false;
     for (uint32_t sectorZ = 0; sectorZ < data.sectorsZ; ++sectorZ) {
         for (uint32_t sectorX = 0; sectorX < data.sectorsX; ++sectorX) {
             const Vec3 origin{
@@ -155,6 +150,7 @@ void Landscape::update() {
             };
             const auto &local = _quadtree->select(camera->getPosition(), camera->getFrustum(),
                                                   origin, sectorX, sectorZ);
+            visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
             for (const auto &node : local) {
                 const uint32_t scale = 1U << (data.maxLevel - node.level);
                 _selected.push_back(QuadNode{
@@ -163,30 +159,40 @@ void Landscape::update() {
                     sectorZ * scale + node.iz,
                     node.minY,
                     node.maxY,
+                    node.quadrantMask,
                 });
             }
         }
     }
+    if (visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
+        CC_LOG_WARNING("[Landscape] CDLOD granularity check: %s",
+                       visibilityDistanceWarning ? "visibility ranges are too small for a guaranteed transition"
+                                                 : "OK");
+        _lastVisibilityDistanceWarning = visibilityDistanceWarning;
+    }
     ccstd::vector<uint32_t> lodNodeCounts(data.maxLevel + 1U, 0U);
     for (const auto &node : _selected) {
         if (node.level <= data.maxLevel) {
-            ++lodNodeCounts[node.level];
+            for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
+                lodNodeCounts[node.level] += (node.quadrantMask >> quadrant) & 1U;
+            }
         }
     }
 
     if (lodNodeCounts != _lastLodNodeCounts) {
-        constexpr uint32_t trianglesPerNode = (config::VERTS_PER_NODE_SIDE - 1U) * (config::VERTS_PER_NODE_SIDE - 1U) * 2U;
+        constexpr uint32_t quadsPerQuadrantSide = (config::VERTS_PER_NODE_SIDE - 1U) / 2U;
+        constexpr uint32_t trianglesPerQuadrant = quadsPerQuadrantSide * quadsPerQuadrantSide * 2U;
         uint32_t totalNodeCount = 0U;
         uint32_t totalTriangleCount = 0U;
         CC_LOG_INFO("[Landscape] LOD stats:");
         for (uint32_t level = 0; level <= data.maxLevel; ++level) {
-            const uint32_t triangles = lodNodeCounts[level] * trianglesPerNode;
+            const uint32_t triangles = lodNodeCounts[level] * trianglesPerQuadrant;
             totalNodeCount += lodNodeCounts[level];
             totalTriangleCount += triangles;
-            CC_LOG_INFO("[Landscape]   LOD%u: nodes=%u triangles=%u",
+            CC_LOG_INFO("[Landscape]   LOD%u: quadrantInstances=%u triangles=%u",
                         level, lodNodeCounts[level], triangles);
         }
-        CC_LOG_INFO("[Landscape]   total: nodes=%u triangles=%u",
+        CC_LOG_INFO("[Landscape]   total: quadrantInstances=%u triangles=%u",
                     totalNodeCount, totalTriangleCount);
         _lastLodNodeCounts = lodNodeCounts;
     }
@@ -270,21 +276,29 @@ void Landscape::drawDebugBounds() {
     const float halfWorldX = data.worldWidth() * 0.5F;
     const float halfWorldZ = data.worldDepth() * 0.5F;
     for (const auto &node : _selected) {
-        const float size = data.sectorSize /
-                           static_cast<float>(1U << (data.maxLevel - node.level));
-        const float x = static_cast<float>(node.ix) * size - halfWorldX;
-        const float z = static_cast<float>(node.iz) * size - halfWorldZ;
-        geometry::AABB box{
-            x + size * 0.5F,
-            (node.minY + node.maxY) * 0.5F,
-            z + size * 0.5F,
-            size * 0.5F,
-            (node.maxY - node.minY) * 0.5F,
-            size * 0.5F,
-        };
-        // Debug bounds must remain visible even where the terrain occludes or
-        // shares an edge with the box. Sector seams below remain depth-tested.
-        geometry->addBoundingBox(box, colors[node.level % 8U], true, false, false, true, world);
+        const float nodeSize = data.sectorSize /
+                               static_cast<float>(1U << (data.maxLevel - node.level));
+        const float quadrantSize = nodeSize * 0.5F;
+        const float nodeX = static_cast<float>(node.ix) * nodeSize - halfWorldX;
+        const float nodeZ = static_cast<float>(node.iz) * nodeSize - halfWorldZ;
+        for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
+            if ((node.quadrantMask & (1U << quadrant)) == 0U) {
+                continue;
+            }
+            const float x = nodeX + static_cast<float>(quadrant & 1U) * quadrantSize;
+            const float z = nodeZ + static_cast<float>(quadrant >> 1U) * quadrantSize;
+            geometry::AABB box{
+                x + quadrantSize * 0.5F,
+                (node.minY + node.maxY) * 0.5F,
+                z + quadrantSize * 0.5F,
+                quadrantSize * 0.5F,
+                (node.maxY - node.minY) * 0.5F,
+                quadrantSize * 0.5F,
+            };
+            // Debug bounds must remain visible even where the terrain occludes or
+            // shares an edge with the box. Sector seams below remain depth-tested.
+            geometry->addBoundingBox(box, colors[node.level % 8U], true, false, false, true, world);
+        }
     }
 #endif
 }

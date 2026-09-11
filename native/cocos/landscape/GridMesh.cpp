@@ -35,7 +35,9 @@ namespace cc {
 namespace landscape {
 
 RenderingSubMesh *GridMesh::create(gfx::Device *device) {
-    const int n = config::VERTS_PER_NODE_SIDE;
+    static_assert((config::VERTS_PER_NODE_SIDE - 1) % 2 == 0,
+                  "CDLOD quadrant mesh requires an even parent quad count");
+    const int n = (config::VERTS_PER_NODE_SIDE + 1) / 2;
     const float step = 1.0F / static_cast<float>(n - 1);
 
     // Vertices normalized to [0,1] x [0,1] on the XZ plane (y = 0).

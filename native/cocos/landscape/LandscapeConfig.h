@@ -31,9 +31,11 @@ namespace landscape {
 namespace config {
 
 constexpr int       VERTS_PER_NODE_SIDE = 17;
-constexpr float     VIS_SAFETY = 1.05F;
-constexpr float     MORPH_RATIO = 0.66F;
+constexpr float     VISIBILITY_DISTANCE_IN_SECTORS = 6.0F;
+constexpr float     LOD_DISTANCE_RATIO = 2.0F;
+constexpr float     MORPH_START_RATIO = 0.70F;
 constexpr uint32_t  MAX_LOD_LEVELS = 8;
+constexpr uint8_t   ALL_QUADRANTS = 0x0FU;
 
 // Active height-page cache configuration.
 constexpr uint32_t PAGE_POOL_LAYERS = 1024;
@@ -76,6 +78,7 @@ struct QuadNode {
     uint32_t iz{0};
     float minY{0.0F};
     float maxY{0.0F};
+    uint8_t quadrantMask{config::ALL_QUADRANTS};
 };
 
 constexpr uint32_t NODE_KEY_COORD_BITS = 28U;

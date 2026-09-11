@@ -89,7 +89,8 @@ CCProgram landscape-splat %{
 
 CCProgram landscape-vertex %{
   #if USE_INSTANCING
-    in vec4 a_gridInst;   // local XZ origin, node size, LOD
+    in vec4 a_gridInst; // parent local XZ origin, node size, LOD
+    in vec4 a_quadrantInst; // x = 0 TL, 1 TR, 2 BL, 3 BR
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
   #endif
   #if __VERSION__ >= 300
@@ -147,7 +148,10 @@ CCProgram landscape-vertex %{
     #endif
   #endif
   #if USE_INSTANCING
-    localXZ = a_gridInst.xy + In.position.xz * a_gridInst.z;
+    float quadrant = a_quadrantInst.x;
+    vec2 quadrantOffset = vec2(mod(quadrant, 2.0), floor(quadrant * 0.5)) * 0.5;
+    vec2 parentUV = quadrantOffset + In.position.xz * 0.5;
+    localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     v_lod = a_gridInst.w;
     // LOD depends only on base terrain. Detail height is deliberately excluded.
     mat4 matWorld;
@@ -157,7 +161,9 @@ CCProgram landscape-vertex %{
     #if __VERSION__ >= 300
       vec2 range = lodMorph[int(v_lod)].xy;
       float morph = clamp((eyeDist - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
-      vec2 odd = fract(In.position.xz * 16.0 * 0.5) * 2.0;
+      // Morph in parent-node coordinates so splitting the grid into quadrant
+      // instances preserves the original odd/even vertex phase exactly.
+      vec2 odd = fract(parentUV * 16.0 * 0.5) * 2.0;
       localXZ -= odd * (a_gridInst.z / 16.0) * morph;
     #endif
   #endif

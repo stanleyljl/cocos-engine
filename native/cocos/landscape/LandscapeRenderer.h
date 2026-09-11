@@ -58,7 +58,7 @@ class MaterialLibrary;
  * Cocos render-side implementation of the cdlod_opengl grid renderer.
  *
  * The quadtree owns visibility and LOD selection. This class only turns the
- * selected nodes into Cocos models and supplies the per-node instance data
+ * selected node quadrants into Cocos models and supplies the per-quadrant instance data
  * consumed by builtin-landscape.effect.
  */
 class LandscapeRenderer {
@@ -82,12 +82,17 @@ public:
     RenderTexture *debugAtlas() const;
 
 private:
+    struct ModelState {
+        QuadNode node;
+        uint32_t quadrant{0U};
+    };
+
     IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
     void updateMorphCameraProperty();
-    void updateInstanceData(scene::Model *model, const QuadNode &node);
-    void updateModel(scene::Model *model, const QuadNode &node);
-    void updateModelBounds(scene::Model *model, const QuadNode &node);
+    void updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant);
+    void updateModel(scene::Model *model, const QuadNode &node, uint32_t quadrant);
+    void updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant);
     int resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
                           uint32_t &sourceX, uint32_t &sourceZ);
 
@@ -101,7 +106,7 @@ private:
     std::unique_ptr<MaterialLibrary> _materialLibrary;
 
     ccstd::unordered_map<uint64_t, IntrusivePtr<scene::Model>> _active;
-    ccstd::unordered_map<scene::Model *, QuadNode> _modelNodes;
+    ccstd::unordered_map<scene::Model *, ModelState> _modelNodes;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
 
     uint32_t _maxLevel{0};

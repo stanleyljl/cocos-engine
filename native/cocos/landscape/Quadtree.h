@@ -49,17 +49,12 @@ public:
     // Copies the metadata needed for selection; does not load or retain the asset.
     bool init(const LandscapeAsset &asset);
 
-    // Selects the vertical span used to build the CDLOD distance rings. The
-    // per-level mode uses the largest local node span at each level; disabling
-    // it restores the original global height range calculation.
-    void setUseLevelHeightRanges(bool enabled);
-    bool useLevelHeightRanges() const { return _useLevelHeightRanges; }
-
     const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const geometry::Frustum &frustum,
                                           const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ);
 
     const ccstd::vector<float> &lodMorphStart() const { return _lodMorphStart; }
     const ccstd::vector<float> &lodMorphEnd() const { return _lodMorphEnd; }
+    bool visibilityDistanceTooSmall() const { return _visibilityDistanceTooSmall; }
 private:
     struct HeightRange {
         float minY{0.0F};
@@ -67,9 +62,7 @@ private:
     };
 
     void computeRanges();
-    void computeRangesGlobal();
-    void computeRangesPerLevel();
-    void traverse(uint32_t level, uint32_t ix, uint32_t iz);
+    bool traverse(uint32_t level, uint32_t ix, uint32_t iz);
     void nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
     size_t nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
                           uint32_t ix, uint32_t iz) const;
@@ -89,7 +82,7 @@ private:
     ccstd::vector<float> _lodRange;
     ccstd::vector<float> _lodMorphStart;
     ccstd::vector<float> _lodMorphEnd;
-    bool _useLevelHeightRanges{true};
+    bool _visibilityDistanceTooSmall{false};
 };
 
 } // namespace landscape

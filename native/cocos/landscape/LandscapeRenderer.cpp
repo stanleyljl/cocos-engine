@@ -70,6 +70,10 @@ Material *createLandscapeMaterial(bool wireframe) {
     material->initialize(info);
     return material;
 }
+
+uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant) {
+    return (makeNodeKey(node) << 2U) | static_cast<uint64_t>(quadrant);
+}
 } // namespace
 
 LandscapeRenderer::LandscapeRenderer() = default;
@@ -253,7 +257,7 @@ void LandscapeRenderer::updateMorphCameraProperty() {
     }
 }
 
-void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &node) {
+void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
     if (model == nullptr) {
         return;
     }
@@ -269,6 +273,13 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     instance[2] = nodeSize;
     instance[3] = static_cast<float>(node.level);
     model->setInstancedAttribute("a_gridInst", instance);
+
+    Float32Array quadrantInstance(4);
+    quadrantInstance[0] = static_cast<float>(quadrant);
+    quadrantInstance[1] = 0.0F;
+    quadrantInstance[2] = 0.0F;
+    quadrantInstance[3] = 0.0F;
+    model->setInstancedAttribute("a_quadrantInst", quadrantInstance);
 
     uint32_t sourceLevel = 0U;
     uint32_t sourceX = 0U;
@@ -324,18 +335,18 @@ int LandscapeRenderer::resolveTilePage(const QuadNode &node, uint32_t &sourceLev
     return -1; // initialization guarantees a resident root for every sector
 }
 
-void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node) {
+void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
     if (model == nullptr) {
         return;
     }
 
-    updateInstanceData(model, node);
-    _modelNodes[model] = node;
+    updateInstanceData(model, node, quadrant);
+    _modelNodes[model] = ModelState{node, quadrant};
     model->setEnabled(true);
-    updateModelBounds(model, node);
+    updateModelBounds(model, node, quadrant);
 }
 
-void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node) {
+void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
     if (_freezeLod) {
         // The frozen selection already passed the terrain frustum test. Models
         // without world bounds bypass both forward and custom pipeline culling.
@@ -350,11 +361,14 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
 
     const uint32_t shift = _maxLevel - std::min(node.level, _maxLevel);
     const float nodeSize = _sectorSize / static_cast<float>(1U << shift);
-    const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F;
-    const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F;
+    const float quadrantSize = nodeSize * 0.5F;
+    const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F +
+                    static_cast<float>(quadrant & 1U) * quadrantSize;
+    const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F +
+                    static_cast<float>(quadrant >> 1U) * quadrantSize;
 
     model->createBoundingShape(Vec3{x, node.minY, z},
-                                Vec3{x + nodeSize, node.maxY, z + nodeSize});
+                                Vec3{x + quadrantSize, node.maxY, z + quadrantSize});
     model->updateWorldBound();
     model->updateOctree();
 }
@@ -365,7 +379,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     }
 
     ccstd::unordered_map<uint64_t, bool> visible;
-    visible.reserve(selected.size());
+    visible.reserve(selected.size() * 4U);
     _tilePages->beginFrame();
     // Mark all visible pages before uploading staged tiles so LRU eviction never
     // removes a tile needed by the current view.
@@ -377,33 +391,39 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     }
     _tilePages->update(config::PAGE_UPLOAD_BUDGET);
     for (const auto &node : selected) {
-        const uint64_t key = makeNodeKey(node);
-        visible[key] = true;
-        auto iter = _active.find(key);
-        if (iter == _active.end()) {
-            IntrusivePtr<scene::Model> model;
-            if (!_pool.empty()) {
-                model = _pool.back();
-                _pool.pop_back();
-            } else {
-                model = createModel();
-            }
-            if (model == nullptr) {
+        for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
+            if ((node.quadrantMask & (1U << quadrant)) == 0U) {
                 continue;
             }
-            _active.emplace(key, model);
-            updateModel(model, node);
-        } else {
-            const auto state = _modelNodes.find(iter->second.get());
-            if (state == _modelNodes.end() ||
-                state->second.level != node.level ||
-                state->second.ix != node.ix ||
-                state->second.iz != node.iz ||
-                state->second.minY != node.minY ||
-                state->second.maxY != node.maxY) {
-                updateModel(iter->second, node);
+            const uint64_t key = makeQuadrantKey(node, quadrant);
+            visible[key] = true;
+            auto iter = _active.find(key);
+            if (iter == _active.end()) {
+                IntrusivePtr<scene::Model> model;
+                if (!_pool.empty()) {
+                    model = _pool.back();
+                    _pool.pop_back();
+                } else {
+                    model = createModel();
+                }
+                if (model == nullptr) {
+                    continue;
+                }
+                _active.emplace(key, model);
+                updateModel(model, node, quadrant);
             } else {
-                updateInstanceData(iter->second, node);
+                const auto state = _modelNodes.find(iter->second.get());
+                if (state == _modelNodes.end() ||
+                    state->second.node.level != node.level ||
+                    state->second.node.ix != node.ix ||
+                    state->second.node.iz != node.iz ||
+                    state->second.node.minY != node.minY ||
+                    state->second.node.maxY != node.maxY ||
+                    state->second.quadrant != quadrant) {
+                    updateModel(iter->second, node, quadrant);
+                } else {
+                    updateInstanceData(iter->second, node, quadrant);
+                }
             }
         }
     }
@@ -427,7 +447,7 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
     for (const auto &entry : _active) {
         const auto state = _modelNodes.find(entry.second.get());
         if (state != _modelNodes.end()) {
-            updateModelBounds(entry.second, state->second);
+            updateModelBounds(entry.second, state->second.node, state->second.quadrant);
         }
     }
 }
@@ -438,14 +458,14 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
         entry.second->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
         const auto state = _modelNodes.find(entry.second.get());
         if (state != _modelNodes.end()) {
-            updateInstanceData(entry.second, state->second);
+            updateInstanceData(entry.second, state->second.node, state->second.quadrant);
         }
     }
     for (const auto &model : _pool) {
         model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
         const auto state = _modelNodes.find(model.get());
         if (state != _modelNodes.end()) {
-            updateInstanceData(model, state->second);
+            updateInstanceData(model, state->second.node, state->second.quadrant);
         }
     }
 }
