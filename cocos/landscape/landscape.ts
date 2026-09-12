@@ -22,10 +22,11 @@
  THE SOFTWARE.
 */
 
-import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable } from 'cc.decorator';
+import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
 import { Asset } from '../asset/assets';
+import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
 
 // The native binding only exists on JSB platforms; guard native access with JSB.
@@ -37,7 +38,23 @@ declare const jsb: any;
  */
 @ccclass('cc.LandscapeAsset')
 export class LandscapeAsset extends Asset {
+    /** Resolved local library/package path, not a source-project directory. */
+    get manifestPath (): string {
+        return typeof this.nativeAsset === 'string' ? this.nativeAsset : this.nativeUrl;
+    }
 }
+
+// Resolve the native dependency without eagerly reading terrain tiles. Native
+// FileUtils reads the manifest and streams raw pages from the same package.
+downloader.register('.lsmanifest', (url, options, onComplete) => {
+    // Editor/browser previews may resolve an HTTP library URL, but do not run
+    // the native renderer. Native runtime supports packaged local assets only.
+    if (JSB && /^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+        onComplete(new Error('Landscape assets require a local native package'));
+        return;
+    }
+    onComplete(null, url.replace(/[?#].*$/, ''));
+});
 
 /**
  * @en Terrain component backed by a native `cc::landscape::Landscape` object.
@@ -53,7 +70,8 @@ export class Landscape extends Component {
     private _native: any = null;
 
     @serializable
-    private _dataDir = '';
+    @type(LandscapeAsset)
+    private _landscapeAsset: LandscapeAsset | null = null;
 
     @serializable
     private _wireframe = false;
@@ -76,24 +94,22 @@ export class Landscape extends Component {
     @serializable
     private _showSectors = false;
 
-    /**
-     * @en Tile-pyramid base directory (project-relative), e.g.
-     * `assets/landscape/heightmap-demo`. Native streams per-Node height tiles
-     * from `<dir>/nodes/L<level>/h_<x>_<y>.png`. L0 is the finest level; larger
-     * level numbers are progressively coarser.
-     * @zh tile 金字塔根目录（工程相对路径），如 `assets/landscape/heightmap-demo`。
-     * native 从 `<dir>/nodes/L<level>/h_<x>_<y>.png` 按 Node 流式加载高度 tile。
-     * L0 为最细层级，层级数值越大越粗。
-     */
+    @serializable
+    private _showVTAtlas = false;
+
+    /** Imported terrain resource; raw height/splat pages are loaded on demand. */
     @editable
-    get dataDir (): string {
-        return this._dataDir;
+    @type(LandscapeAsset)
+    @displayOrder(0)
+    get landscapeAsset (): LandscapeAsset | null {
+        return this._landscapeAsset;
     }
-    set dataDir (v: string) {
-        this._dataDir = v;
-        if (this._native) {
-            this._native.setDataDir(v);
-        }
+    set landscapeAsset (value: LandscapeAsset | null) {
+        if (this._landscapeAsset === value) return;
+        const enabled = this.enabledInHierarchy;
+        if (this._native && enabled) this.onDisable();
+        this._landscapeAsset = value;
+        if (this._native && enabled) this.onEnable();
     }
 
     /**
@@ -101,6 +117,7 @@ export class Landscape extends Component {
      * @zh 是否以线框模式绘制。
      */
     @editable
+    @displayOrder(1)
     get wireframe (): boolean {
         return this._wireframe;
     }
@@ -117,6 +134,7 @@ export class Landscape extends Component {
      * @zh 冻结地形几何、morph 和视锥剔除结果；相机仍可自由移动（调试用）。
      */
     @editable
+    @displayOrder(6)
     get freezeLod (): boolean {
         return this._freezeLod;
     }
@@ -133,6 +151,7 @@ export class Landscape extends Component {
      * @zh 为本帧渲染的每个节点绘制按 LOD 层级着色的线框包围盒（调试用）。可与 `freezeLod` 配合使用。
      */
     @editable
+    @displayOrder(4)
     get showBox (): boolean {
         return this._showBox;
     }
@@ -146,6 +165,7 @@ export class Landscape extends Component {
      * @zh 按 LOD 层级给地表着色，直观看分层（调试用）。
      */
     @editable
+    @displayOrder(2)
     get lodColor (): boolean {
         return this._lodColor;
     }
@@ -162,6 +182,7 @@ export class Landscape extends Component {
      * @zh 在地表上画出各级 CDLOD morph/range 距离环（与选层同一相机距离，调试用）。
      */
     @editable
+    @displayOrder(3)
     get showRanges (): boolean {
         return this._showRanges;
     }
@@ -178,6 +199,7 @@ export class Landscape extends Component {
      * @zh 为每个 sector 绘制线框盒，直观看世界的多 sector 划分（调试用）。
      */
     @editable
+    @displayOrder(5)
     get showSectors (): boolean {
         return this._showSectors;
     }
@@ -187,6 +209,7 @@ export class Landscape extends Component {
 
     /** Enables material vertex displacement for before/after comparison. Defaults to off. */
     @editable
+    @displayOrder(7)
     get detailHeightEnabled (): boolean {
         return this._detailHeightEnabled;
     }
@@ -197,6 +220,16 @@ export class Landscape extends Component {
         }
     }
 
+    /** F8: atlas visibility, consumed by the application's debug view. */
+    @editable
+    @displayOrder(8)
+    get showVTAtlas (): boolean {
+        return this._showVTAtlas;
+    }
+    set showVTAtlas (value: boolean) {
+        this._showVTAtlas = value;
+    }
+
     public onLoad (): void {
         if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
             this._native = new jsb.Landscape();
@@ -205,7 +238,7 @@ export class Landscape extends Component {
 
     public onEnable (): void {
         if (this._native) {
-            this._native.setDataDir(this._dataDir);
+            this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setFreezeLod(this._freezeLod);
             this._native.setDetailHeightEnabled(this._detailHeightEnabled);
             this._native.onEnable(this.node);

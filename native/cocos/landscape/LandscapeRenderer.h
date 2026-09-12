@@ -54,6 +54,7 @@ namespace landscape {
 
 class TilePagePool;
 class MaterialLibrary;
+class VTRenderer;
 
 /**
  * Cocos render-side implementation of the cdlod_opengl grid renderer.
@@ -105,6 +106,7 @@ private:
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<TilePagePool> _tilePages;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
+    std::unique_ptr<VTRenderer> _vtRenderer;
 
     ccstd::unordered_map<uint64_t, IntrusivePtr<scene::Model>> _active;
     ccstd::unordered_map<scene::Model *, ModelState> _modelNodes;

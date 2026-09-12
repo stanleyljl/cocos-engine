@@ -21,31 +21,49 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 ****************************************************************************/
-
 #pragma once
 
+#include "core/Root.h"
+#include "landscape/VirtualTexture.h"
+
 namespace cc {
-
+class Material;
 class RenderingSubMesh;
-namespace gfx {
-class Device;
-} // namespace gfx
-
 namespace landscape {
+class LandscapeAsset;
+class MaterialLibrary;
+class TilePagePool;
 
-/**
- * Builder for the shared half-size grid used by every quadrant instance.
- * The shader maps its normalized [0,1] coordinates back into one quadrant of
- * the parent CDLOD node before applying morph.
- */
-class GridMesh {
+// Owns VT pass geometry, material, instance commands and render scheduling.
+// VirtualTexture owns the independent storage/residency layer below it.
+class VTRenderer {
 public:
-    // Creates the shared grid RenderingSubMesh (position-only, triangle list).
-    // Returns a new object; the caller takes ownership (e.g. via IntrusivePtr).
-    static RenderingSubMesh *create(gfx::Device *device);
-    // A position-only [0,1] XZ quad (4 vertices, 6 indices) for VT page rendering.
-    static RenderingSubMesh *createVTQuad(gfx::Device *device);
-};
+    VTRenderer();
+    ~VTRenderer();
+    VTRenderer(const VTRenderer &) = delete;
+    VTRenderer &operator=(const VTRenderer &) = delete;
 
+    bool init(const LandscapeAsset &asset, const TilePagePool &tiles, const MaterialLibrary &materials);
+    void destroy();
+    VirtualTexture &texture() { return _texture; }
+    const VirtualTexture &texture() const { return _texture; }
+    bool valid() const;
+    void render();
+
+private:
+    VirtualTexture _texture;
+    IntrusivePtr<RenderingSubMesh> _mesh;
+    IntrusivePtr<Material> _material;
+    IntrusivePtr<gfx::Buffer> _instances;
+    IntrusivePtr<gfx::InputAssembler> _inputAssembler;
+    IntrusivePtr<gfx::CommandBuffer> _commands;
+    IntrusivePtr<gfx::PipelineState> _pipelineState;
+    IntrusivePtr<gfx::RenderPass> _initialPass;
+    ccstd::vector<uint32_t> _dirtySlots;
+    ccstd::vector<float> _instanceData;
+    Root::BeforeRender::EventID _beforeRender;
+    bool _subscribed{false};
+    bool _needsClear{true};
+};
 } // namespace landscape
 } // namespace cc

@@ -67,11 +67,11 @@ void Landscape::initializeRenderer() {
         return;
     }
 
-    if (_dataDir.empty()) {
+    if (_assetPath.empty()) {
         return;
     }
     IntrusivePtr<LandscapeAsset> asset = ccnew LandscapeAsset();
-    if (!asset->load(_dataDir)) {
+    if (!asset->load(_assetPath)) {
         return;
     }
     auto quadtree = std::make_unique<Quadtree>();
@@ -234,8 +234,8 @@ void Landscape::setShowRanges(bool enabled) {
     }
 }
 
-void Landscape::setDataDir(const ccstd::string &dir) {
-    _dataDir = dir;
+void Landscape::setAssetPath(const ccstd::string &manifestPath) {
+    _assetPath = manifestPath;
 }
 
 scene::Camera *Landscape::pickMainCamera() const {

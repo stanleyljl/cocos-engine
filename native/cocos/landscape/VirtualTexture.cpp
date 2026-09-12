@@ -21,213 +21,143 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 ****************************************************************************/
-
 #include "landscape/VirtualTexture.h"
 
+#include <limits>
 #include "base/Log.h"
-#include "core/Root.h"
-#include "core/TypedArray.h"
-#include "core/assets/Material.h"
 #include "core/assets/RenderTexture.h"
-#include "core/scene-graph/Node.h"
 #include "landscape/LandscapeConfig.h"
-#include "renderer/gfx-base/GFXDef-common.h"
-#include "scene/Camera.h"
-#include "scene/Model.h"
-#include "scene/RenderScene.h"
-#include "scene/SubModel.h"
+#include "renderer/gfx-base/GFXDevice.h"
+#include "renderer/gfx-base/GFXFramebuffer.h"
+#include "renderer/gfx-base/GFXTexture.h"
+#include "scene/RenderWindow.h"
 
 namespace cc {
 namespace landscape {
-
 namespace {
-constexpr uint64_t INVALID_KEY = ~static_cast<uint64_t>(0);
-} // namespace
+bool same(const Vec4 &a, const Vec4 &b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+}
 
 VirtualTexture::VirtualTexture() = default;
+VirtualTexture::~VirtualTexture() { destroy(); }
 
-VirtualTexture::~VirtualTexture() {
+bool VirtualTexture::init(gfx::Device *device) {
     destroy();
-}
-
-bool VirtualTexture::init(scene::RenderScene *scene, RenderingSubMesh *quadMesh) {
-    auto *root = Root::getInstance();
-    if (root == nullptr || scene == nullptr || quadMesh == nullptr) {
+    if (device == nullptr || device->getCapabilities().maxColorRenderTargets < 2 ||
+        device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
         return false;
     }
-    _scene = scene;
-
-    // 1) Physical atlas as a RenderTexture (so a 2D Sprite can display it).
+    gfx::RenderPassInfo passInfo;
+    gfx::ColorAttachment color;
+    color.format = gfx::Format::RGBA8;
+    color.loadOp = gfx::LoadOp::LOAD;
+    color.storeOp = gfx::StoreOp::STORE;
+    gfx::GeneralBarrierInfo barrier;
+    barrier.prevAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+    barrier.nextAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+    color.barrier = device->getGeneralBarrier(barrier);
+    passInfo.colorAttachments = {color, color};
+    // No depth attachment: page rectangles never overlap.
+    IRenderTextureCreateInfo info;
+    info.name = "landscape-vt-atlas";
+    info.width = config::VT_ATLAS_SIZE;
+    info.height = config::VT_ATLAS_SIZE;
+    info.passInfo = passInfo;
     _atlas = ccnew RenderTexture();
-    IRenderTextureCreateInfo rtInfo;
-    rtInfo.name = "landscape-vt-atlas";
-    rtInfo.width = config::VT_ATLAS_SIZE;
-    rtInfo.height = config::VT_ATLAS_SIZE;
-    _atlas->initialize(rtInfo);
-
-    // 2) Compose material (instanced: one quad per page slot).
-    _material = ccnew Material();
-    IMaterialInfo mi;
-    mi.effectName = ccstd::string{"builtin-landscape-vt-compose"};
-    MacroRecord defines;
-    defines["USE_INSTANCING"] = true;
-    mi.defines = IMaterialInfo::DefinesType{defines};
-    _material->initialize(mi);
-    auto passes = _material->getPasses();
-    if (!passes || passes->empty()) {
-        CC_LOG_WARNING("[Landscape] VT compose material has no passes (effect not imported?), VT disabled");
-        destroy();
-        return false;
-    }
-
-    // 3) One compose model with VT_PAGE_COUNT instanced page quads, on the
-    //    dedicated VT layer (rendered only by the compose camera).
-    _quadNode = ccnew Node("landscape-vt-compose-quad");
-    _quadNode->setLayer(config::VT_COMPOSE_LAYER);
-    _model = root->createModel<scene::Model>();
-    _model->setNode(_quadNode);
-    _model->setTransform(_quadNode);
-    for (uint32_t i = 0; i < config::VT_PAGE_COUNT; ++i) {
-        _model->initSubModel(static_cast<index_t>(i), quadMesh, _material);
-    }
-    _model->setEnabled(true);
-    _scene->addModel(_model);
-
-    // 4) Orthographic compose camera targeting the atlas, seeing only the VT layer.
-    _cameraNode = ccnew Node("landscape-vt-compose-camera");
-    _camera = root->createCamera();
-    scene::ICameraInfo ci;
-    ci.name = "landscape-vt-compose";
-    ci.node = _cameraNode;
-    ci.projection = scene::CameraProjection::ORTHO;
-    ci.window = _atlas->getWindow();
-    ci.priority = 0;
-    ci.cameraType = scene::CameraType::DEFAULT;
-    ci.trackingType = scene::TrackingType::NO_TRACKING;
-    ci.usage = scene::CameraUsage::GAME;
-    _camera->initialize(ci);
-    _camera->setVisibility(config::VT_COMPOSE_LAYER);
-    _camera->setClearFlag(gfx::ClearFlagBit::COLOR | gfx::ClearFlagBit::DEPTH);
-    _camera->setClearColor(gfx::Color{0.0F, 0.0F, 0.0F, 1.0F});
-    _camera->setClearDepth(1.0F);
-    _camera->setNearClip(0.0F);
-    _camera->setFarClip(1.0F);
-    _camera->setOrthoHeight(1.0F);
-    _scene->addCamera(_camera);
-    _camera->attachToScene(_scene);
-
-    // 5) Page-slot bookkeeping (stable per-node slots).
-    _slotKey.assign(config::VT_PAGE_COUNT, INVALID_KEY);
-    _slotParams.assign(config::VT_PAGE_COUNT, PageParams{});
-    _keyToSlot.clear();
-    _inUse.clear();
-    _warnedFull = false;
-    commit(); // all slots inactive (degenerate) until the first frame assigns pages
-
-    CC_LOG_INFO("[Landscape] VT atlas %ux%u, %u pages (%ux%u each)", config::VT_ATLAS_SIZE, config::VT_ATLAS_SIZE,
-                config::VT_PAGE_COUNT, config::VT_PAGE_RES, config::VT_PAGE_RES);
-    return true;
+    _atlas->initialize(info);
+    gfx::SamplerInfo samplerInfo;
+    samplerInfo.minFilter = gfx::Filter::LINEAR;
+    samplerInfo.magFilter = gfx::Filter::LINEAR;
+    samplerInfo.mipFilter = gfx::Filter::NONE;
+    samplerInfo.addressU = gfx::Address::CLAMP;
+    samplerInfo.addressV = gfx::Address::CLAMP;
+    _sampler = device->getSampler(samplerInfo);
+    _pages.resize(config::VT_PAGE_COUNT);
+    return valid();
 }
 
-void VirtualTexture::beginFrame() {
-    _inUse.clear();
+bool VirtualTexture::valid() const { return albedo() != nullptr && normalRoughnessAO() != nullptr; }
+RenderTexture *VirtualTexture::atlas() const { return _atlas.get(); }
+gfx::Framebuffer *VirtualTexture::framebuffer() const {
+    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getFramebuffer() : nullptr;
+}
+gfx::RenderPass *VirtualTexture::renderPass() const {
+    return framebuffer() ? framebuffer()->getRenderPass() : nullptr;
+}
+gfx::Texture *VirtualTexture::albedo() const {
+    return framebuffer() ? framebuffer()->getColorTextures()[0] : nullptr;
+}
+gfx::Texture *VirtualTexture::normalRoughnessAO() const {
+    return framebuffer() ? framebuffer()->getColorTextures()[1] : nullptr;
 }
 
-int VirtualTexture::acquireSlot() {
-    // Lowest free slot (keeps in-use pages packed toward the top of the atlas).
-    for (uint32_t slot = 0; slot < config::VT_PAGE_COUNT; ++slot) {
-        if (_slotKey[slot] == INVALID_KEY) {
-            return static_cast<int>(slot);
-        }
-    }
-    return -1;
+void VirtualTexture::beginFrame(const ccstd::vector<uint64_t> &keys) {
+    ++_frame;
+    _requested.clear();
+    _requested.insert(keys.begin(), keys.end());
 }
 
-int VirtualTexture::acquirePage(uint64_t key, int splatLayer, float uvScale, float uvOffX, float uvOffZ, float nodeWorldSize) {
-    if (_atlas == nullptr) {
-        return -1;
-    }
-    _inUse.insert(key);
-    const PageParams params{splatLayer, uvScale, uvOffX, uvOffZ, nodeWorldSize};
-
-    // Keep the node's existing slot if it already has one (stable -> no flicker).
-    const auto it = _keyToSlot.find(key);
-    int slot = (it != _keyToSlot.end()) ? it->second : acquireSlot();
+int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source) {
+    if (!valid()) return -1;
+    _requested.insert(key);
+    auto found = _lookup.find(key);
+    int slot = found != _lookup.end() ? static_cast<int>(found->second) : -1;
     if (slot < 0) {
-        if (!_warnedFull) {
-            _warnedFull = true;
-            CC_LOG_WARNING("[Landscape] VT page pool full (%u pages); extra tiles skip compose. Increase VT_ATLAS_SIZE/VT_PAGE_RES.", config::VT_PAGE_COUNT);
+        uint64_t oldest = std::numeric_limits<uint64_t>::max();
+        for (uint32_t i = 0; i < _pages.size(); ++i) {
+            const auto &p = _pages[i];
+            if (!p.occupied) { slot = static_cast<int>(i); break; }
+            if (_requested.count(p.key) == 0 && p.lastUsed < oldest) {
+                oldest = p.lastUsed;
+                slot = static_cast<int>(i);
+            }
         }
-        return -1;
+        if (slot < 0) {
+            if (!_warnedFull) {
+                CC_LOG_WARNING("[Landscape] VT cache full; excess nodes use direct material shading");
+                _warnedFull = true;
+            }
+            return -1;
+        }
+        auto &p = _pages[slot];
+        if (p.occupied) _lookup.erase(p.key);
+        p = Page{};
+        p.key = key;
+        p.occupied = true;
+        _lookup.emplace(key, static_cast<uint32_t>(slot));
     }
-    _slotKey[slot] = key;
-    _keyToSlot[key] = slot;
-    _slotParams[slot] = params;
+    auto &p = _pages[slot];
+    p.dirty |= !same(p.region, region) || !same(p.source, source);
+    p.region = region;
+    p.source = source;
+    p.lastUsed = _frame;
     return slot;
 }
 
-void VirtualTexture::commit() {
-    if (_model == nullptr) {
-        return;
-    }
-    const auto &subModels = _model->getSubModels();
-    for (uint32_t slot = 0; slot < config::VT_PAGE_COUNT; ++slot) {
-        if (slot >= subModels.size()) {
-            break;
-        }
-        // Free slots whose node was not requested this frame (it left the view).
-        const uint64_t key = _slotKey[slot];
-        if (key != INVALID_KEY && _inUse.find(key) == _inUse.end()) {
-            _keyToSlot.erase(key);
-            _slotKey[slot] = INVALID_KEY;
-        }
-        const bool active = _slotKey[slot] != INVALID_KEY;
-        const PageParams &p = _slotParams[slot];
-
-        Float32Array inst(4);
-        inst[0] = static_cast<float>(slot);
-        inst[1] = static_cast<float>(p.splatLayer);
-        inst[2] = p.uvScale;
-        inst[3] = active ? 1.0F : 0.0F;
-        subModels[slot]->setInstancedAttribute("a_composeInst", inst);
-
-        Float32Array inst2(4);
-        inst2[0] = p.uvOffX;
-        inst2[1] = p.uvOffZ;
-        inst2[2] = p.nodeWorldSize;
-        inst2[3] = 0.0F;
-        subModels[slot]->setInstancedAttribute("a_composeInst2", inst2);
+void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
+    slots.clear();
+    for (uint32_t i = 0; i < _pages.size(); ++i) {
+        const auto &p = _pages[i];
+        if (p.occupied && p.dirty && _requested.count(p.key) != 0) slots.push_back(i);
     }
 }
-
+void VirtualTexture::markRendered(const ccstd::vector<uint32_t> &slots) {
+    for (uint32_t slot : slots) _pages[slot].dirty = false;
+}
+void VirtualTexture::invalidate() {
+    for (auto &p : _pages) p.dirty = true;
+}
 void VirtualTexture::destroy() {
-    if (_scene != nullptr) {
-        if (_model) {
-            _scene->removeModel(_model);
-        }
-        if (_camera) {
-            _scene->removeCamera(_camera);
-        }
-    }
-    if (_camera) {
-        _camera->detachFromScene();
-        _camera->destroy();
-        _camera = nullptr;
-    }
-    _model = nullptr;
-    _quadNode = nullptr;
-    _cameraNode = nullptr;
-    _material = nullptr;
-    if (_atlas) {
-        _atlas->destroy();
-        _atlas = nullptr;
-    }
-    _slotKey.clear();
-    _keyToSlot.clear();
-    _inUse.clear();
-    _slotParams.clear();
-    _scene = nullptr;
+    if (_atlas) _atlas->destroy();
+    _atlas = nullptr;
+    _sampler = nullptr;
+    _pages.clear();
+    _lookup.clear();
+    _requested.clear();
+    _frame = 0;
+    _warnedFull = false;
 }
-
 } // namespace landscape
 } // namespace cc

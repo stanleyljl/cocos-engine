@@ -12,6 +12,9 @@ CCEffect %{
         heightParams: { value: [1, 129, 0, 0] }
         detailParams: { value: [0.1, 1, 0, 0] }
         materialParams: { value: [0, 0, 0, 0] }
+        vtLayout: { value: [4096, 128, 4, 0] }
+        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
+        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.
@@ -57,6 +60,7 @@ CCProgram landscape-uniforms %{
     vec4 heightParams; // height sample spacing (m), tile resolution
     vec4 detailParams[32]; // per-layer UV repeats/m, detailHeightScale, detailHeightBias
     vec4 materialParams; // any layer uses detail displacement
+    vec4 vtLayout; // atlas size, slot size, border
     vec4 lodMorph[8];
   };
 }%
@@ -92,11 +96,13 @@ CCProgram landscape-vertex %{
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
     in vec4 a_quadrantInst; // x = 0 TL, 1 TR, 2 BL, 3 BR
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
+    in vec4 a_vtInst; // node-local XZ origin, size, physical slot (-1 = direct shading)
   #endif
   #if __VERSION__ >= 300
     uniform sampler2DArray heightmap;
     flat out float v_lod;
     flat out vec4 v_tileParams;
+    flat out vec4 v_vtParams;
   #else
     out float v_lod;
   #endif
@@ -143,8 +149,10 @@ CCProgram landscape-vertex %{
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_tileParams = vec4(0.0, 0.0, 1.0, 0.0);
+    v_vtParams = vec4(0.0, 0.0, 1.0, -1.0);
     #if USE_INSTANCING
       v_tileParams = a_tileInst;
+      v_vtParams = a_vtInst;
     #endif
   #endif
   #if USE_INSTANCING
@@ -198,7 +206,10 @@ CCProgram landscape-vertex %{
 CCProgram landscape-surface %{
   #if __VERSION__ >= 300
     uniform sampler2DArray normalRoughnessAOMap;
+    uniform sampler2D vtAlbedo;
+    uniform sampler2D vtNormalRoughnessAO;
     flat in vec4 v_tileParams;
+    flat in vec4 v_vtParams;
   #endif
   #if __VERSION__ >= 300
     flat in float v_lod;
@@ -223,6 +234,19 @@ CCProgram landscape-surface %{
     float roughness = 1.0;
     float ao = 1.0;
   #if __VERSION__ >= 300
+    if (v_vtParams.w >= 0.0) {
+      vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
+      vec2 nodeUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
+      float count = vtLayout.x / vtLayout.y;
+      vec2 slot = vec2(mod(v_vtParams.w, count), floor(v_vtParams.w / count));
+      vec2 atlasUV = (slot * vtLayout.y + vtLayout.z + nodeUV * (vtLayout.y - 2.0*vtLayout.z)) / vtLayout.x;
+      albedo = texture(vtAlbedo, atlasUV).rgb;
+      vec4 nra = texture(vtNormalRoughnessAO, atlasUV);
+      vec2 xy = nra.rg * 2.0 - 1.0;
+      detailNormal = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
+      roughness = nra.b;
+      ao = nra.a;
+    } else {
     uvec4 packed;
     vec4 spatialWeights;
     vec2 uv = FSInput_texcoord;
@@ -268,6 +292,7 @@ CCProgram landscape-surface %{
       }
     }
     detailNormal = normalize(detailNormal);
+    }
   #endif
     surfaceData.baseColor = vec4(albedo * mainColor.rgb, 1.0);
     // Only RG carries the normal. B is roughness; A is linear AO.

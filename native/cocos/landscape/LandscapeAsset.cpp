@@ -57,6 +57,10 @@ bool readFloat(const rapidjson::Value &object, const char *name, float &value) {
 }
 
 ccstd::string manifestPathFor(const ccstd::string &dataDir) {
+    constexpr size_t SUFFIX_SIZE = sizeof(".lsmanifest") - 1U;
+    if (dataDir.size() >= SUFFIX_SIZE && dataDir.compare(dataDir.size() - SUFFIX_SIZE, SUFFIX_SIZE, ".lsmanifest") == 0) {
+        return dataDir;
+    }
     if (dataDir.size() >= 5U && dataDir.compare(dataDir.size() - 5U, 5U, ".json") == 0) {
         return dataDir;
     }
@@ -184,6 +188,32 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
 
     const size_t slash = manifestPath.find_last_of("/\\");
     const ccstd::string assetDir = slash == ccstd::string::npos ? "." : manifestPath.substr(0, slash);
+    ccstd::unordered_map<ccstd::string, ccstd::string> files;
+    const bool imported = manifestPath.size() >= 11U && manifestPath.compare(manifestPath.size() - 11U, 11U, ".lsmanifest") == 0;
+    if (imported) {
+        if (!document.HasMember("files") || !document["files"].IsObject() || document["files"].ObjectEmpty()) {
+            CC_LOG_WARNING("[Landscape] imported manifest has no raw file index");
+            return false;
+        }
+        // All native artifacts share the asset UUID and optional build hash.
+        // Only replace the extension; do not assume an editor/source directory.
+        const ccstd::string prefix = manifestPath.substr(0, manifestPath.size() - 11U);
+        for (auto it = document["files"].MemberBegin(); it != document["files"].MemberEnd(); ++it) {
+            if (!it->value.IsString()) return false;
+            const ccstd::string suffix = it->value.GetString();
+            if (suffix.size() <= 6U || suffix.compare(0, 6U, ".lsraw") != 0 ||
+                suffix.find_first_not_of("0123456789", 6U) != ccstd::string::npos) {
+                CC_LOG_WARNING("[Landscape] invalid raw file extension");
+                return false;
+            }
+            if (!files.emplace(it->name.GetString(), prefix + suffix).second) return false;
+        }
+    }
+    const auto resolve = [&](const ccstd::string &logicalPath) -> ccstd::string {
+        if (!imported) return assetDir + "/" + logicalPath;
+        const auto it = files.find(logicalPath);
+        return it == files.end() ? ccstd::string{} : it->second;
+    };
     ccstd::vector<MaterialLayer> materialLayers;
     uint32_t materialResolution = 0U;
     if (document.HasMember("materialLibrary")) {
@@ -198,7 +228,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
             CC_LOG_WARNING("[Landscape] invalid RGBA8 materialLibrary in '%s'", manifestPath.c_str());
             return false;
         }
-        const ccstd::string materialDir = assetDir + "/" + library["dir"].GetString() + "/";
+        const ccstd::string materialDir = ccstd::string(library["dir"].GetString()) + "/";
         for (uint32_t i = 0U; i < count; ++i) {
             const auto &value = library["layers"][i];
             MaterialLayer layer;
@@ -213,8 +243,9 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
                 return false;
             }
             layer.name = value["name"].GetString();
-            layer.albedoHeight = materialDir + value["albedoHeight"].GetString();
-            layer.normalRoughnessAO = materialDir + value["normalRoughnessAO"].GetString();
+            layer.albedoHeight = resolve(materialDir + value["albedoHeight"].GetString());
+            layer.normalRoughnessAO = resolve(materialDir + value["normalRoughnessAO"].GetString());
+            if (layer.albedoHeight.empty() || layer.normalRoughnessAO.empty()) return false;
             materialLayers.emplace_back(std::move(layer));
         }
     }
@@ -254,6 +285,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
 
     _data = parsed;
     _dataDir = assetDir;
+    _files = std::move(files);
     _materialLayers = std::move(materialLayers);
     _materialResolution = materialResolution;
     _levelOffsets = std::move(levelOffsets);
@@ -278,14 +310,20 @@ bool LandscapeAsset::decodeTilePair(const ccstd::string &heightPath, const ccstd
     return valid;
 }
 
+ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) const {
+    if (_files.empty()) return _dataDir + "/" + logicalPath;
+    const auto it = _files.find(logicalPath);
+    return it == _files.end() ? ccstd::string{} : it->second;
+}
+
 bool LandscapeAsset::loadRootTile(uint32_t x, uint32_t z, TileData &tile) const {
     if (!valid() || x >= _data.sectorsX || z >= _data.sectorsZ) {
         return false;
     }
     tile.key = makeNodeKey(_data.maxLevel, x, z);
-    const ccstd::string directory = _dataDir + "/nodes/L" + std::to_string(_data.maxLevel) + "/";
+    const ccstd::string directory = "nodes/L" + std::to_string(_data.maxLevel) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    return decodeTilePair(directory + "h_" + suffix, directory + "s_" + suffix,
+    return decodeTilePair(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
                           _data.tileResolution, static_cast<uint32_t>(_materialLayers.size()), tile);
 }
 
@@ -300,10 +338,10 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     if (!_pendingTiles.insert(key).second) {
         return false;
     }
-    const ccstd::string directory = _dataDir + "/nodes/L" + std::to_string(level) + "/";
+    const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    const ccstd::string heightPath = directory + "h_" + suffix;
-    const ccstd::string splatPath = directory + "s_" + suffix;
+    const ccstd::string heightPath = resolveFile(directory + "h_" + suffix);
+    const ccstd::string splatPath = resolveFile(directory + "s_" + suffix);
     const uint32_t resolution = _data.tileResolution;
     const uint32_t layerCount = static_cast<uint32_t>(_materialLayers.size());
     const auto async = _async;

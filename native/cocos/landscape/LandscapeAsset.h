@@ -33,6 +33,7 @@
 
 #include "base/std/container/string.h"
 #include "base/std/container/unordered_set.h"
+#include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "base/RefCounted.h"
 #include "landscape/LandscapeConfig.h"
@@ -103,8 +104,10 @@ private:
     static bool decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
                                uint32_t resolution, uint32_t layerCount, TileData &tile);
     size_t rangeOffset(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
+    ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 
     ccstd::string _dataDir;
+    ccstd::unordered_map<ccstd::string, ccstd::string> _files;
     LandscapeData _data;
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};

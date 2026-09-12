@@ -37,6 +37,7 @@
 #include "landscape/GridMesh.h"
 #include "landscape/MaterialLibrary.h"
 #include "landscape/TilePagePool.h"
+#include "landscape/VTRenderer.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
@@ -133,6 +134,7 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     if (device == nullptr) {
         return false;
     }
+    _vtRenderer.reset();
     _asset = asset;
     const auto &data = asset->data();
     _maxLevel = data.maxLevel;
@@ -154,6 +156,11 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     _materialLibrary = std::make_unique<MaterialLibrary>();
     if (!_materialLibrary->init(device, *asset)) {
         return false;
+    }
+    _vtRenderer = std::make_unique<VTRenderer>();
+    if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary)) {
+        CC_LOG_WARNING("[Landscape] VT initialization failed; using direct material shading");
+        _vtRenderer.reset();
     }
     updateMaterialProperties();
     return true;
@@ -222,6 +229,13 @@ void LandscapeRenderer::updateMaterialProperties() {
                                                         static_cast<float>(_tileResolution),
                                                         0.0F, 0.0F});
         material->setPropertyVec4Array("lodMorph", lodMorph);
+        material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
+            static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER), 0.0F});
+        if (_vtRenderer != nullptr && _vtRenderer->valid()) {
+            auto &vt = _vtRenderer->texture();
+            setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
+            setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
+        }
         if (_materialLibrary != nullptr && _materialLibrary->valid()) {
             ccstd::vector<Vec4> detailParams(config::MATERIAL_LIBRARY_MAX);
             bool hasDetailHeight = false;
@@ -308,6 +322,14 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     instance[2] = tileParams.z;
     instance[3] = tileParams.w;
     model->setInstancedAttribute("a_tileInst", _instanceAttributeScratch);
+    const int vtSlot = _vtRenderer && _vtRenderer->valid()
+        ? _vtRenderer->texture().acquirePage(makeNodeKey(node), Vec4{x, z, nodeSize, 0.0F}, tileParams)
+        : -1;
+    instance[0] = x;
+    instance[1] = z;
+    instance[2] = nodeSize;
+    instance[3] = static_cast<float>(vtSlot);
+    model->setInstancedAttribute("a_vtInst", _instanceAttributeScratch);
 }
 
 int LandscapeRenderer::resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
@@ -393,6 +415,12 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
         resolveTilePage(node, sourceLevel, sourceX, sourceZ);
     }
     _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    if (_vtRenderer && _vtRenderer->valid()) {
+        ccstd::vector<uint64_t> keys;
+        keys.reserve(selected.size());
+        for (const auto &node : selected) keys.push_back(makeNodeKey(node));
+        _vtRenderer->texture().beginFrame(keys);
+    }
     for (const auto &node : selected) {
         for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
             if ((node.quadrantMask & (1U << quadrant)) == 0U) {
@@ -466,10 +494,8 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
     }
     for (const auto &model : _pool) {
         model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
-        const auto state = _modelNodes.find(model.get());
-        if (state != _modelNodes.end()) {
-            updateInstanceData(model, state->second.node, state->second.quadrant);
-        }
+        // Inactive models get fresh instance data when reused. Do not request
+        // height/VT pages here: doing so would pin invisible nodes in the caches.
     }
 }
 
@@ -484,7 +510,7 @@ void LandscapeRenderer::setViewPos(const Vec3 &position) {
 }
 
 RenderTexture *LandscapeRenderer::debugAtlas() const {
-    return nullptr;
+    return _vtRenderer ? _vtRenderer->texture().atlas() : nullptr;
 }
 
 bool LandscapeRenderer::valid() const {
@@ -515,6 +541,7 @@ void LandscapeRenderer::destroy() {
     _modelNodes.clear();
     _pool.clear();
     _instanceAttributeScratch = ccstd::monostate{};
+    _vtRenderer.reset();
 
     if (_tilePages != nullptr) {
         _tilePages->destroy();

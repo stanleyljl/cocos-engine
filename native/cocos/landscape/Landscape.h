@@ -62,7 +62,7 @@ public:
     void setDetailHeightEnabled(bool enabled);
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
-    void setDataDir(const ccstd::string &dir);
+    void setAssetPath(const ccstd::string &manifestPath);
 
     void drawDebugBounds();
     void drawDebugSectors();
@@ -79,7 +79,7 @@ private:
     bool _detailHeightEnabled{false};
     bool _lodColor{false};
     bool _showRanges{false};
-    ccstd::string _dataDir;
+    ccstd::string _assetPath;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;

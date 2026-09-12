@@ -1,126 +1,136 @@
 // Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
-// Landscape VT page compose (M9b). A dedicated ortho "compose camera" renders
-// this material into the VT physical-atlas RenderTexture. The compose Model has
-// one instanced quad per atlas page slot; each active instance positions its quad
-// over its page rect (via a_composeInst) and the fragment shader composes that
-// Node's albedo from its splat tile + the material library (up to 8 materials via
-// 2 ids/texel x 4-neighbor blend). Unused slots output a degenerate (clipped) quad.
+// Linear material composition only: no camera, lighting, fog or tone mapping.
 CCEffect %{
   techniques:
   - name: opaque
     passes:
     - vert: vt-compose-vs:vert
-      frag: vt-compose-fs:frag
+      frag: vt-compose-fs
       depthStencilState:
         depthTest: false
         depthWrite: false
       rasterizerState:
         cullMode: none
+      blendState:
+        targets:
+        - blend: false
+        - blend: false
+      properties:
+        vtLayout: { value: [4096, 128, 4, 1] }
+        sourceParams: { value: [129, 0, 0, 0] }
+        detailParams: { value: [0.1, 0, 0, 0] }
+        splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
+        albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+        normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+}%
+
+CCProgram vt-compose-uniforms %{
+  uniform Constants {
+    vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
+    vec4 sourceParams;
+    vec4 detailParams[32];
+  };
 }%
 
 CCProgram vt-compose-vs %{
   precision highp float;
-  #include <legacy/input>
-  #include <builtin/uniforms/cc-global>
-  #include <legacy/decode-base>
-  #include <legacy/local-batch>
-
-  #if USE_INSTANCING
-    // x = page slot index, y = splat page-pool layer, z = splat UV scale (ancestor
-    // fallback), w = active (0 => unused slot, output a clipped quad).
-    in vec4 a_composeInst;
-    // x = splat UV offset X, y = splat UV offset Z.
-    in vec4 a_composeInst2;
-  #endif
-
-  out vec2 v_splatUv;
-  out vec2 v_matUv;
-  out float v_splatLayer;
-
-  const float PAGES_PER_SIDE = 32.0;  // must match config::VT_PAGES_PER_SIDE
-  const float TILING_METERS = 8.0;    // material texture repeats every N meters (world-consistent across LOD)
-
-  vec4 vert () {
-    vec4 position;
-    CCVertInput(position);
-    vec2 local = position.xz; // [0,1] within the page
-  #if USE_INSTANCING
-    if (a_composeInst.w < 0.5) {
-      return vec4(2.0, 2.0, 2.0, 1.0); // unused slot: fully clipped, composes nothing
-    }
-    float slot = a_composeInst.x;
-    float px = mod(slot, PAGES_PER_SIDE);
-    float py = (PAGES_PER_SIDE - 1.0) - floor(slot / PAGES_PER_SIDE); // slot 0 = top row (free pages stay at the bottom)
-    vec2 atlasUv = (vec2(px, py) + local) / PAGES_PER_SIDE;
-    v_splatUv = local * a_composeInst.z + vec2(a_composeInst2.x, a_composeInst2.y);
-    v_matUv = local * (a_composeInst2.z / TILING_METERS); // world-space material tiling
-    v_splatLayer = a_composeInst.y;
-    return vec4(atlasUv * 2.0 - 1.0, 0.0, 1.0);
+  #include <vt-compose-uniforms>
+  in vec3 a_position;
+  in vec4 a_vtPage;
+  in vec4 a_vtRegion;
+  in vec4 a_vtSource;
+  out vec2 v_localXZ;
+  #if __VERSION__ >= 300
+  flat out vec4 v_source;
   #else
-    v_splatUv = local;
-    v_matUv = local;
-    v_splatLayer = 0.0;
-    return vec4(local * 2.0 - 1.0, 0.0, 1.0);
+  out vec4 v_source;
   #endif
+
+  vec4 vert() {
+    float count = vtLayout.x / vtLayout.y;
+    vec2 slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    vec2 atlasUv = (slot * vtLayout.y + a_position.xz * vtLayout.y) / vtLayout.x;
+    // The border evaluates real neighboring coordinates rather than duplicating
+    // edge pixels. Interior uv=0/1 lies on the corresponding node boundary.
+    vec2 local = (a_position.xz * vtLayout.y - vtLayout.z) / (vtLayout.y - 2.0 * vtLayout.z);
+    v_localXZ = a_vtRegion.xy + local * a_vtRegion.z;
+    v_source = a_vtSource;
+    vec2 clipPos = atlasUv * 2.0 - 1.0;
+    // Texture-to-clip conversion: screenSpaceSignY * clipSpaceSignY.
+    // Vulkan/GLES use +1; Metal needs -1. A screen-space flip alone is wrong.
+    clipPos.y *= vtLayout.w;
+    return vec4(clipPos, 0.0, 1.0);
   }
 }%
 
 CCProgram vt-compose-fs %{
   precision highp float;
-  #include <builtin/uniforms/cc-global>
-  #include <legacy/output>
-
+  precision highp int;
+  #include <vt-compose-uniforms>
+  #include <common/color/gamma>
   #if __VERSION__ >= 300
-    uniform usampler2DArray splatPages;
-    uniform sampler2DArray materialAlbedo;
-  #endif
+  uniform highp usampler2DArray splatmap;
+  uniform sampler2DArray albedoHeightMap;
+  uniform sampler2DArray normalRoughnessAOMap;
+  in vec2 v_localXZ;
+  flat in vec4 v_source;
+  layout(location = 0) out vec4 albedoOut;
+  layout(location = 1) out vec4 normalOut;
 
-  in vec2 v_splatUv;
-  in vec2 v_matUv;
-  in float v_splatLayer;
-
-  const float SPLAT_RES = 129.0; // splat tile resolution (config::TILE_RESOLUTION)
-  // The atlas page (128^2) is later minified by the terrain, which samples the
-  // atlas WITHOUT mips. So bake a band-limited page here: bias the material
-  // mip up a bit (uses the material library's mipmaps) so the page has no
-  // high-frequency detail left to alias into black speckles when minified.
-  const float MATERIAL_MIP_BIAS = 1.5;
-
-  vec3 materialColor (float id, vec2 uv) {
-  #if __VERSION__ >= 300
-    return texture(materialAlbedo, vec3(uv, id), MATERIAL_MIP_BIAS).rgb;
-  #else
-    return vec3(0.5);
-  #endif
-  }
-
-  // Splat texel = two material ids (5 bits each) + upper-layer weight (6 bits).
-  // Bilinear over the 4 neighbor texels blends up to 8 materials per pixel.
-  vec3 blendSplatAlbedo (vec2 uv, vec2 matUv) {
-  #if __VERSION__ >= 300
-    vec2 texel = uv * SPLAT_RES - 0.5;
-    vec2 base = floor(texel);
-    vec2 f = texel - base;
-    vec3 albedo = vec3(0.0);
-    for (int j = 0; j < 2; ++j) {
-      for (int i = 0; i < 2; ++i) {
-        vec2 cell = (base + vec2(float(i), float(j)) + 0.5) / SPLAT_RES;
-        uint s = texture(splatPages, vec3(clamp(cell, vec2(0.0), vec2(1.0)), v_splatLayer)).r;
-        float id0 = float(s & 31u);
-        float id1 = float((s >> 5u) & 31u);
-        float w = float((s >> 10u) & 63u) / 63.0;
-        vec3 c = mix(materialColor(id0, matUv), materialColor(id1, matUv), w);
-        float bw = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-        albedo += c * bw;
+  void main() {
+    float edge = sourceParams.x - 1.0;
+    vec2 pixel = clamp((v_localXZ - v_source.xy) / v_source.z * edge, vec2(0.0), vec2(edge));
+    ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
+    vec2 f = pixel - vec2(origin);
+    int page = int(v_source.w);
+    uvec4 packed = uvec4(texelFetch(splatmap, ivec3(origin, page), 0).r,
+      texelFetch(splatmap, ivec3(origin + ivec2(1, 0), page), 0).r,
+      texelFetch(splatmap, ivec3(origin + ivec2(0, 1), page), 0).r,
+      texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
+    vec4 spatialWeights = vec4((1.0-f.x)*(1.0-f.y), f.x*(1.0-f.y), (1.0-f.x)*f.y, f.x*f.y);
+    int layers[8];
+    float weights[8];
+    for (int i = 0; i < 4; ++i) {
+      float blend = float(packed[i] >> 10u) / 63.0;
+      layers[i*2] = int(packed[i] & 31u);
+      layers[i*2+1] = int((packed[i] >> 5u) & 31u);
+      weights[i*2] = spatialWeights[i] * (1.0-blend);
+      weights[i*2+1] = spatialWeights[i] * blend;
+    }
+    for (int i = 1; i < 8; ++i) {
+      for (int j = 0; j < i; ++j) {
+        if (layers[j] == layers[i]) {
+          weights[j] += weights[i];
+          weights[i] = 0.0;
+          break;
+        }
       }
     }
-    return albedo;
+    vec2 uv = vec2(v_localXZ.x, -v_localXZ.y);
+    vec2 uvDx = dFdx(uv);
+    vec2 uvDy = dFdy(uv);
+    vec3 albedo = vec3(0.0);
+    vec3 normal = vec3(0.0);
+    float roughness = 0.0;
+    float ao = 0.0;
+    for (int i = 0; i < 8; ++i) {
+      if (weights[i] > 0.0) {
+        float scale = detailParams[layers[i]].x;
+        vec3 coord = vec3(uv * scale, float(layers[i]));
+        vec4 ah = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
+        vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
+        vec2 xy = nra.rg * 2.0 - 1.0;
+        albedo += SRGBToLinear(ah.rgb) * weights[i];
+        normal += normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0)))) * weights[i];
+        roughness += nra.b * weights[i];
+        ao += nra.a * weights[i];
+      }
+    }
+    // Color is stored in linear space; Base Pass must not apply SRGBToLinear.
+    albedoOut = vec4(albedo, 1.0);
+    normalOut = vec4(normalize(normal).xy * 0.5 + 0.5, roughness, ao);
+  }
   #else
-    return vec3(0.5);
+  void main() { gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0); }
   #endif
-  }
-
-  vec4 frag () {
-    return CCFragOutput(vec4(blendSplatAlbedo(v_splatUv, v_matUv), 1.0));
-  }
 }%

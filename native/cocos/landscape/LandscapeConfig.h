@@ -45,9 +45,12 @@ constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
 
 constexpr uint32_t VT_ATLAS_SIZE = 4096;
 constexpr uint32_t VT_PAGE_RES = 128;
+constexpr uint32_t VT_PAGE_BORDER = 4;
+constexpr uint32_t VT_PAGE_INTERIOR = VT_PAGE_RES - 2 * VT_PAGE_BORDER;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
-constexpr uint32_t VT_COMPOSE_LAYER = 1U << 19;
+static_assert(VT_PAGE_RES > 2 * VT_PAGE_BORDER && VT_ATLAS_SIZE % VT_PAGE_RES == 0,
+              "VT pages must fit the atlas and leave a non-empty interior");
 
 } // namespace config
 

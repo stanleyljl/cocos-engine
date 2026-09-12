@@ -34,10 +34,9 @@
 namespace cc {
 namespace landscape {
 
-RenderingSubMesh *GridMesh::create(gfx::Device *device) {
-    static_assert((config::VERTS_PER_NODE_SIDE - 1) % 2 == 0,
-                  "CDLOD quadrant mesh requires an even parent quad count");
-    const int n = (config::VERTS_PER_NODE_SIDE + 1) / 2;
+namespace {
+RenderingSubMesh *createGrid(gfx::Device *device, int n) {
+    if (device == nullptr) return nullptr;
     const float step = 1.0F / static_cast<float>(n - 1);
 
     // Vertices normalized to [0,1] x [0,1] on the XZ plane (y = 0).
@@ -93,6 +92,17 @@ RenderingSubMesh *GridMesh::create(gfx::Device *device) {
     auto *mesh = ccnew RenderingSubMesh(vertexBuffers, attributes, gfx::PrimitiveMode::TRIANGLE_LIST, indexBuffer);
     mesh->setSubMeshIdx(0);
     return mesh;
+}
+} // namespace
+
+RenderingSubMesh *GridMesh::create(gfx::Device *device) {
+    static_assert((config::VERTS_PER_NODE_SIDE - 1) % 2 == 0,
+                  "CDLOD quadrant mesh requires an even parent quad count");
+    return createGrid(device, (config::VERTS_PER_NODE_SIDE + 1) / 2);
+}
+
+RenderingSubMesh *GridMesh::createVTQuad(gfx::Device *device) {
+    return createGrid(device, 2);
 }
 
 } // namespace landscape
