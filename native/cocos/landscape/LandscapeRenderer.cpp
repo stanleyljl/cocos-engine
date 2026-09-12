@@ -106,6 +106,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
         destroy();
         return false;
     }
+    _instanceAttributeScratch = Float32Array(4);
     updateMaterialProperties();
     return true;
 }
@@ -267,19 +268,22 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F;
     const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F;
 
-    Float32Array instance(4);
+    // setInstancedAttribute copies into each submodel's own attribute block
+    // synchronously, so this buffer can be reused across attributes and models.
+    // Creating transient ArrayBuffers here also grows the external pointer
+    // table in the bundled V8 build even after their JS objects are collected.
+    auto &instance = ccstd::get<Float32Array>(_instanceAttributeScratch);
     instance[0] = x;
     instance[1] = z;
     instance[2] = nodeSize;
     instance[3] = static_cast<float>(node.level);
-    model->setInstancedAttribute("a_gridInst", instance);
+    model->setInstancedAttribute("a_gridInst", _instanceAttributeScratch);
 
-    Float32Array quadrantInstance(4);
-    quadrantInstance[0] = static_cast<float>(quadrant);
-    quadrantInstance[1] = 0.0F;
-    quadrantInstance[2] = 0.0F;
-    quadrantInstance[3] = 0.0F;
-    model->setInstancedAttribute("a_quadrantInst", quadrantInstance);
+    instance[0] = static_cast<float>(quadrant);
+    instance[1] = 0.0F;
+    instance[2] = 0.0F;
+    instance[3] = 0.0F;
+    model->setInstancedAttribute("a_quadrantInst", _instanceAttributeScratch);
 
     uint32_t sourceLevel = 0U;
     uint32_t sourceX = 0U;
@@ -299,12 +303,11 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     // z = source tile size in meters, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
-    Float32Array tileInstance(4);
-    tileInstance[0] = tileParams.x;
-    tileInstance[1] = tileParams.y;
-    tileInstance[2] = tileParams.z;
-    tileInstance[3] = tileParams.w;
-    model->setInstancedAttribute("a_tileInst", tileInstance);
+    instance[0] = tileParams.x;
+    instance[1] = tileParams.y;
+    instance[2] = tileParams.z;
+    instance[3] = tileParams.w;
+    model->setInstancedAttribute("a_tileInst", _instanceAttributeScratch);
 }
 
 int LandscapeRenderer::resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
@@ -511,6 +514,7 @@ void LandscapeRenderer::destroy() {
     _active.clear();
     _modelNodes.clear();
     _pool.clear();
+    _instanceAttributeScratch = ccstd::monostate{};
 
     if (_tilePages != nullptr) {
         _tilePages->destroy();
