@@ -10,18 +10,13 @@ CCEffect %{
         terrainParams: { value: [3000, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
-        detailParams: { value: [0.1, 1, 0, 0] }
-        materialParams: { value: [0, 0, 0, 0] }
         vtLayout: { value: [4096, 128, 4, 0] }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.
-        splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         heightmap: { sampler: { minFilter: linear, magFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
-        albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
-        normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
         lodMorph: { value: [0, 0, 0, 0] }
     - vert: landscape-vs
       frag: landscape-fs
@@ -61,8 +56,6 @@ CCProgram landscape-uniforms %{
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution
-    vec4 detailParams[32]; // per-layer UV repeats/m, detailHeightScale, detailHeightBias
-    vec4 materialParams; // any layer uses detail displacement
     vec4 vtLayout; // atlas size, slot size, border
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
@@ -70,29 +63,10 @@ CCProgram landscape-uniforms %{
 }%
 
 CCProgram landscape-macros %{
+  // F7: VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
+  #pragma define-meta LANDSCAPE_DEBUG_UNLIT
   #define CC_SURFACES_USE_TANGENT_SPACE 1
   #include <surfaces/effect-macros/terrain>
-}%
-
-CCProgram landscape-splat %{
-  #if __VERSION__ >= 300
-    uniform highp usampler2DArray splatmap;
-    uniform sampler2DArray albedoHeightMap;
-
-    void landscapeSplatSamples(vec2 localXZ, vec4 tile, out uvec4 packed, out vec4 weights) {
-      float edge = heightParams.y - 1.0;
-      vec2 pixel = clamp((localXZ - tile.xy) / tile.z * edge, vec2(0.0), vec2(edge));
-      ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
-      vec2 f = pixel - vec2(origin);
-      int page = int(tile.w);
-      packed = uvec4(texelFetch(splatmap, ivec3(origin, page), 0).r,
-                     texelFetch(splatmap, ivec3(origin + ivec2(1, 0), page), 0).r,
-                     texelFetch(splatmap, ivec3(origin + ivec2(0, 1), page), 0).r,
-                     texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
-      weights = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
-                     (1.0 - f.x) * f.y, f.x * f.y);
-    }
-  #endif
 }%
 
 CCProgram landscape-vertex %{
@@ -100,12 +74,11 @@ CCProgram landscape-vertex %{
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
     in vec4 a_quadrantInst; // x = 0 TL, 1 TR, 2 BL, 3 BR
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
-    in vec4 a_vtInst; // node-local XZ origin, size, physical slot (-1 = direct shading)
+    in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
   #endif
   #if __VERSION__ >= 300
     uniform sampler2DArray heightmap;
     flat out float v_lod;
-    flat out vec4 v_tileParams;
     flat out vec4 v_vtParams;
   #else
     out float v_lod;
@@ -123,30 +96,6 @@ CCProgram landscape-vertex %{
   #endif
   }
 
-  #if __VERSION__ >= 300
-    float sampleLayerHeight(int layer, vec2 localXZ) {
-      vec4 params = detailParams[layer];
-      if (params.y == 0.0) return params.z;
-      vec2 uv = vec2(localXZ.x, -localXZ.y) * params.x;
-      return textureLod(albedoHeightMap, vec3(uv, float(layer)), 0.0).a * params.y + params.z;
-    }
-
-    float sampleDetailHeight(vec2 localXZ, vec4 tile) {
-      uvec4 packed;
-      vec4 weights;
-      landscapeSplatSamples(localXZ, tile, packed, weights);
-      float height = 0.0;
-      for (int i = 0; i < 4; ++i) {
-        uint value = packed[i];
-        int layer0 = int(value & 31u);
-        int layer1 = int((value >> 5u) & 31u);
-        float weight = float(value >> 10u) / 63.0;
-        height += weights[i] * mix(sampleLayerHeight(layer0, localXZ), sampleLayerHeight(layer1, localXZ), weight);
-      }
-      return height;
-    }
-  #endif
-
   #define CC_SURFACES_VERTEX_MODIFY_LOCAL_POS
   vec3 SurfacesVertexModifyLocalPos(in SurfacesStandardVertexIntermediate In) {
     // The RG32F buffer packs terrain XZ into the first two input components.
@@ -154,10 +103,8 @@ CCProgram landscape-vertex %{
     vec2 localXZ = In.position.xy;
     v_lod = 0.0;
   #if __VERSION__ >= 300
-    v_tileParams = vec4(0.0, 0.0, 1.0, 0.0);
-    v_vtParams = vec4(0.0, 0.0, 1.0, -1.0);
+    v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
     #if USE_INSTANCING
-      v_tileParams = a_tileInst;
       v_vtParams = a_vtInst;
     #endif
   #endif
@@ -167,7 +114,7 @@ CCProgram landscape-vertex %{
     vec2 parentUV = quadrantOffset + In.position.xy * 0.5;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     v_lod = a_gridInst.w;
-    // LOD depends only on base terrain. Detail height is deliberately excluded.
+    // Evaluate LOD on the base terrain before morphing the grid.
     mat4 matWorld;
     CCGetWorldMatrix(matWorld);
     vec3 baseWorld = (matWorld * vec4(localXZ.x, sampleHeight(localXZ), localXZ.y, 1.0)).xyz;
@@ -182,13 +129,7 @@ CCProgram landscape-vertex %{
     #endif
   #endif
     float height = sampleHeight(localXZ);
-    // Sample at the final morphed coordinate so coincident edge vertices agree.
-    // Fixed mip level keeps geometry unchanged when the frozen camera moves.
-  #if __VERSION__ >= 300 && USE_INSTANCING
-    if (materialParams.x > 0.5) {
-      height += sampleDetailHeight(localXZ, a_tileInst);
-    }
-  #endif
+    // Sample base terrain at the final morphed coordinate.
     return vec3(localXZ.x, height, localXZ.y);
   }
 
@@ -211,10 +152,8 @@ CCProgram landscape-vertex %{
 
 CCProgram landscape-surface %{
   #if __VERSION__ >= 300
-    uniform sampler2DArray normalRoughnessAOMap;
     uniform sampler2D vtAlbedo;
     uniform sampler2D vtNormalRoughnessAO;
-    flat in vec4 v_tileParams;
     flat in vec4 v_vtParams;
   #endif
   #if __VERSION__ >= 300
@@ -235,75 +174,37 @@ CCProgram landscape-surface %{
     return vec3(0.90, 0.90, 0.90);
   }
 
-  #include <surfaces/data-structures/standard>
+  #if LANDSCAPE_DEBUG_UNLIT
+    #include <surfaces/data-structures/unlit>
+  #else
+    #include <surfaces/data-structures/standard>
+  #endif
   #define CC_SURFACES_FRAGMENT_MODIFY_SHARED_DATA
   void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
     vec3 albedo = vec3(0.0);
+  #if !LANDSCAPE_DEBUG_UNLIT
     vec3 detailNormal = vec3(0.0, 0.0, 1.0);
     float roughness = 1.0;
     float ao = 1.0;
+  #endif
   #if __VERSION__ >= 300
-    if (v_vtParams.w >= 0.0) {
-      vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
-      vec2 nodeUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
-      float count = vtLayout.x / vtLayout.y;
-      vec2 slot = vec2(mod(v_vtParams.w, count), floor(v_vtParams.w / count));
-      vec2 atlasUV = (slot * vtLayout.y + vtLayout.z + nodeUV * (vtLayout.y - 2.0*vtLayout.z)) / vtLayout.x;
-      albedo = texture(vtAlbedo, atlasUV).rgb;
-      vec4 nra = texture(vtNormalRoughnessAO, atlasUV);
-      vec2 xy = nra.rg * 2.0 - 1.0;
-      detailNormal = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
-      roughness = nra.b;
-      ao = nra.a;
-    } else {
-    uvec4 packed;
-    vec4 spatialWeights;
-    vec2 uv = FSInput_texcoord;
-    landscapeSplatSamples(vec2(uv.x, -uv.y), v_tileParams, packed, spatialWeights);
-    int layers[8];
-    float weights[8];
-    for (int i = 0; i < 4; ++i) {
-      uint value = packed[i];
-      float blend = float(value >> 10u) / 63.0;
-      layers[i * 2] = int(value & 31u);
-      layers[i * 2 + 1] = int((value >> 5u) & 31u);
-      weights[i * 2] = spatialWeights[i] * (1.0 - blend);
-      weights[i * 2 + 1] = spatialWeights[i] * blend;
-    }
-    // Merge repeated IDs before texture sampling (usually only 2-3 unique layers).
-    for (int i = 1; i < 8; ++i) {
-      for (int j = 0; j < i; ++j) {
-        if (layers[j] == layers[i]) {
-          weights[j] += weights[i];
-          weights[i] = 0.0;
-          break;
-        }
-      }
-    }
-    // Explicit gradients remain valid inside the per-pixel layer branches.
-    vec2 uvDx = dFdx(uv);
-    vec2 uvDy = dFdy(uv);
-    detailNormal = vec3(0.0);
-    roughness = 0.0;
-    ao = 0.0;
-    for (int i = 0; i < 8; ++i) {
-      if (weights[i] > 0.0) {
-        float tiling = detailParams[layers[i]].x;
-        vec3 coord = vec3(uv * tiling, float(layers[i]));
-        vec4 ah = textureGrad(albedoHeightMap, coord, uvDx * tiling, uvDy * tiling);
-        vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * tiling, uvDy * tiling);
-        vec2 xy = nra.rg * 2.0 - 1.0;
-        vec3 normal = normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
-        albedo += SRGBToLinear(ah.rgb) * weights[i];
-        detailNormal += normal * weights[i];
-        roughness += nra.b * weights[i];
-        ao += nra.a * weights[i];
-      }
-    }
-    detailNormal = normalize(detailNormal);
-    }
+    // Every rendered node has a valid VT mapping, possibly to an ancestor.
+    vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
+    vec2 nodeUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
+    float count = vtLayout.x / vtLayout.y;
+    vec2 slot = vec2(mod(v_vtParams.w, count), floor(v_vtParams.w / count));
+    vec2 atlasUV = (slot * vtLayout.y + vtLayout.z + nodeUV * (vtLayout.y - 2.0*vtLayout.z)) / vtLayout.x;
+    albedo = texture(vtAlbedo, atlasUV).rgb;
+    #if !LANDSCAPE_DEBUG_UNLIT
+    vec4 nra = texture(vtNormalRoughnessAO, atlasUV);
+    vec2 xy = nra.rg * 2.0 - 1.0;
+    detailNormal = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
+    roughness = nra.b;
+    ao = nra.a;
+    #endif
   #endif
     surfaceData.baseColor = vec4(albedo * mainColor.rgb, 1.0);
+  #if !LANDSCAPE_DEBUG_UNLIT
     // Only RG carries the normal. B is roughness; A is linear AO.
     vec3 normal = normalize(FSInput_worldNormal);
     vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
@@ -314,6 +215,7 @@ CCProgram landscape-surface %{
     surfaceData.metallic = 0.0;
     surfaceData.specularIntensity = 0.5;
     surfaceData.emissive = vec3(0.0);
+  #endif
 
     if (terrainParams.z > 0.5) {
       surfaceData.baseColor.rgb = lodPalette(int(v_lod));
@@ -336,7 +238,6 @@ CCProgram landscape-vs %{
   #include <landscape-macros>
   #include <surfaces/includes/common-vs>
   #include <landscape-uniforms>
-  #include <landscape-splat>
   #include <landscape-vertex>
   #include <surfaces/includes/standard-vs>
   #include <shading-entries/main-functions/render-to-scene/vs>
@@ -348,10 +249,19 @@ CCProgram landscape-fs %{
   #include <landscape-macros>
   #include <surfaces/includes/common-fs>
   #include <landscape-uniforms>
-  #include <landscape-splat>
   #include <landscape-surface>
-  #include <lighting-models/includes/standard>
-  #include <surfaces/includes/standard-fs>
+  // Effect chunks are included only once, even across conditional branches.
+  // Hoist shared dependencies so both PBR and unlit variants receive them.
+  #include <lighting-models/includes/common>
+  #include <common/lighting/brdf>
+  #include <surfaces/module-functions/debug-view>
+  #if LANDSCAPE_DEBUG_UNLIT
+    #include <lighting-models/includes/unlit>
+    #include <surfaces/includes/unlit-fs>
+  #else
+    #include <lighting-models/includes/standard>
+    #include <surfaces/includes/standard-fs>
+  #endif
   #include <shading-entries/main-functions/render-to-scene/fs>
 }%
 
@@ -362,7 +272,6 @@ CCProgram landscape-shadow-vs %{
   #include <surfaces/effect-macros/render-to-shadowmap>
   #include <surfaces/includes/common-vs>
   #include <landscape-uniforms>
-  #include <landscape-splat>
   #include <landscape-vertex>
   #include <shading-entries/main-functions/render-to-shadowmap/vs>
 }%

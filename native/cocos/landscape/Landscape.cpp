@@ -90,9 +90,9 @@ void Landscape::initializeRenderer() {
     }
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
     renderer->setDebugFlags(_lodColor, _showRanges);
+    renderer->setUnlit(_unlit);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
-    renderer->setDetailHeightEnabled(_detailHeightEnabled);
 
 #if CC_LANDSCAPE_DEBUG
     const auto &data = asset->data();
@@ -212,13 +212,6 @@ void Landscape::update() {
     _renderer->sync(_selected);
 }
 
-void Landscape::setDetailHeightEnabled(bool enabled) {
-    _detailHeightEnabled = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setDetailHeightEnabled(enabled);
-    }
-}
-
 void Landscape::setFreezeLod(bool frozen) {
     _freezeLod = frozen;
     if (_renderer != nullptr) {
@@ -249,6 +242,13 @@ void Landscape::setShowRanges(bool enabled) {
 
 void Landscape::setAssetPath(const ccstd::string &manifestPath) {
     _assetPath = manifestPath;
+}
+
+void Landscape::setUnlit(bool enabled) {
+    _unlit = enabled;
+    if (_renderer != nullptr) {
+        _renderer->setUnlit(enabled);
+    }
 }
 
 scene::Camera *Landscape::pickMainCamera() const {

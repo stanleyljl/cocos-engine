@@ -77,8 +77,8 @@ public:
     void setDebugFlags(bool lodColor, bool showRanges);
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
+    void setUnlit(bool enabled);
     void setFreezeLod(bool frozen);
-    void setDetailHeightEnabled(bool enabled);
     void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
 
@@ -104,6 +104,7 @@ private:
     void updateModel(ModelState &state, const QuadNode &node, uint32_t quadrant);
     void updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant);
     TilePage resolveTilePage(const QuadNode &node);
+    int resolveVTPage(const QuadNode &node, const Vec4 &region, const Vec4 &source);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -130,8 +131,8 @@ private:
     bool _lodColor{false};
     bool _showRanges{false};
     bool _wireframe{false};
+    bool _unlit{false};
     bool _freezeLod{false};
-    bool _detailHeightEnabled{false};
 };
 
 } // namespace landscape

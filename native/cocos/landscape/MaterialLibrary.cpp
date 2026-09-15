@@ -161,7 +161,7 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         destroy();
         return false;
     }
-    _detailParams.resize(config::MATERIAL_LIBRARY_MAX);
+    _tilingParams.resize(config::MATERIAL_LIBRARY_MAX);
     for (const auto &layer : layers) {
         ccstd::vector<uint8_t> albedo, normal;
         if (!decodeRGBA8(layer.albedoHeight, resolution, albedo) ||
@@ -171,8 +171,7 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         }
         uploadTexture(device, _albedoHeight, resolution, layer.id, std::move(albedo), true);
         uploadTexture(device, _normalRoughnessAO, resolution, layer.id, std::move(normal), false);
-        _detailParams[layer.id] = Vec4{layer.uvScale, layer.detailHeightScale, layer.detailHeightBias, 0.0F};
-        _hasDetailHeight |= layer.detailHeightScale != 0.0F || layer.detailHeightBias != 0.0F;
+        _tilingParams[layer.id] = Vec4{layer.uvScale, 0.0F, 0.0F, 0.0F};
     }
     gfx::SamplerInfo info;
     info.minFilter = gfx::Filter::LINEAR;
@@ -192,8 +191,7 @@ void MaterialLibrary::destroy() {
     _albedoHeight = nullptr;
     _normalRoughnessAO = nullptr;
     _sampler = nullptr;
-    _detailParams.clear();
-    _hasDetailHeight = false;
+    _tilingParams.clear();
 }
 
 } // namespace landscape

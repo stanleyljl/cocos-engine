@@ -58,6 +58,7 @@ Material *createLandscapeMaterial(bool wireframe) {
     info.effectName = ccstd::string{"builtin-landscape"};
     MacroRecord defines;
     defines["USE_INSTANCING"] = true;
+    defines["LANDSCAPE_DEBUG_UNLIT"] = false;
     info.defines = IMaterialInfo::DefinesType{defines};
 
     if (wireframe) {
@@ -148,16 +149,31 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     }
     _vtRenderer = std::make_unique<VTRenderer>();
     if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary)) {
-        CC_LOG_WARNING("[Landscape] VT initialization failed; using direct material shading");
+        CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
         _vtRenderer.reset();
+        return false;
+    }
+    // Resource initialization succeeded. Bind the textures once; subsequent
+    // parameter updates do not change these textures or their samplers.
+    auto &vt = _vtRenderer->texture();
+    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+        const auto setRuntimeTexture = [material](const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
+            CC_ASSERT(texture != nullptr);
+            material->setPropertyGFXTexture(name, texture);
+            for (const auto &pass : *material->getPasses()) {
+                const uint32_t handle = pass->getHandle(name);
+                if (handle != 0U) {
+                    const uint32_t binding = scene::Pass::getBindingFromHandle(handle);
+                    pass->bindSampler(binding, sampler);
+                }
+            }
+        };
+        setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
+        setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
+        setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
     updateMaterialProperties();
     return true;
-}
-
-void LandscapeRenderer::setDetailHeightEnabled(bool enabled) {
-    _detailHeightEnabled = enabled;
-    updateMaterialProperties();
 }
 
 void LandscapeRenderer::setDebugFlags(bool lodColor, bool showRanges) {
@@ -202,17 +218,6 @@ void LandscapeRenderer::updateMaterialProperties() {
     }
 
     for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
-        const auto setRuntimeTexture = [material](const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
-            CC_ASSERT(texture != nullptr);
-            material->setPropertyGFXTexture(name, texture);
-            for (const auto &pass : *material->getPasses()) {
-                const uint32_t handle = pass->getHandle(name);
-                if (handle != 0U) {
-                    const uint32_t binding = scene::Pass::getBindingFromHandle(handle);
-                    pass->bindSampler(binding, sampler);
-                }
-            }
-        };
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
                                                         static_cast<float>(_data.tileResolution),
@@ -220,21 +225,6 @@ void LandscapeRenderer::updateMaterialProperties() {
         material->setPropertyVec4Array("lodMorph", lodMorph);
         material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
             static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER), 0.0F});
-        if (_vtRenderer != nullptr && _vtRenderer->valid()) {
-            auto &vt = _vtRenderer->texture();
-            setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
-            setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
-        }
-        if (_materialLibrary != nullptr && _materialLibrary->valid()) {
-            material->setPropertyVec4Array("detailParams", _materialLibrary->detailParams());
-            material->setPropertyVec4("materialParams", Vec4{(_detailHeightEnabled && _materialLibrary->hasDetailHeight()) ? 1.0F : 0.0F, 0.0F, 0.0F, 0.0F});
-            setRuntimeTexture("albedoHeightMap", _materialLibrary->albedoHeight(), _materialLibrary->sampler());
-            setRuntimeTexture("normalRoughnessAOMap", _materialLibrary->normalRoughnessAO(), _materialLibrary->sampler());
-        }
-        if (_tilePages != nullptr && _tilePages->valid()) {
-            setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
-            setRuntimeTexture("splatmap", _tilePages->splatArray(), _tilePages->splatSampler());
-        }
     }
     updateMorphCameraProperty();
 }
@@ -295,10 +285,30 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     setInstanceAttribute(model, "a_tileInst", tileParams);
-    const int vtSlot = _vtRenderer && _vtRenderer->valid()
-        ? _vtRenderer->texture().acquirePage(makeNodeKey(node), Vec4{x, z, nodeSize, 0.0F}, tileParams)
-        : -1;
-    setInstanceAttribute(model, "a_vtInst", Vec4{x, z, nodeSize, static_cast<float>(vtSlot)});
+    const int vtSlot = resolveVTPage(node, Vec4{x, z, nodeSize, 0.0F}, tileParams);
+    CC_ASSERTF(vtSlot >= 0, "[Landscape] missing permanent root VT page");
+    const auto &vtRegion = _vtRenderer->texture().page(static_cast<uint32_t>(vtSlot)).region;
+    // A fallback covers an ancestor's region, not the fine node's region.
+    setInstanceAttribute(model, "a_vtInst", Vec4{vtRegion.x, vtRegion.y, vtRegion.z, static_cast<float>(vtSlot)});
+}
+
+int LandscapeRenderer::resolveVTPage(const QuadNode &node, const Vec4 &region, const Vec4 &source) {
+    auto &vt = _vtRenderer->texture();
+    const int slot = vt.acquirePage(makeNodeKey(node), region, source);
+    if (slot >= 0 && !vt.page(static_cast<uint32_t>(slot)).dirty) return slot;
+
+    uint32_t x = node.ix;
+    uint32_t z = node.iz;
+    for (uint32_t level = node.level; level < _data.maxLevel;) {
+        ++level;
+        x >>= 1U;
+        z >>= 1U;
+        const int ancestor = vt.findReadyPage(makeNodeKey(level, x, z));
+        if (ancestor >= 0) return ancestor;
+    }
+    // Roots are pinned. On startup/invalidation their writes are guaranteed by
+    // VTRenderer::render before the Base Pass; no unrendered fine page is sampled.
+    return vt.findPage(makeNodeKey(_data.maxLevel, x, z));
 }
 
 LandscapeRenderer::TilePage LandscapeRenderer::resolveTilePage(const QuadNode &node) {
@@ -371,12 +381,20 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
         resolveTilePage(node);
     }
     _tilePages->update(config::PAGE_UPLOAD_BUDGET);
-    if (_vtRenderer && _vtRenderer->valid()) {
-        ccstd::vector<uint64_t> keys;
-        keys.reserve(selected.size());
-        for (const auto &node : selected) keys.push_back(makeNodeKey(node));
-        _vtRenderer->texture().beginFrame(keys);
+    ccstd::vector<uint64_t> keys;
+    keys.reserve(selected.size() * (_data.maxLevel + 1U));
+    for (const auto &node : selected) {
+        uint32_t x = node.ix;
+        uint32_t z = node.iz;
+        // Protect every possible fallback before allocation starts, including
+        // ancestors that another selected node also updates this frame.
+        for (uint32_t level = node.level; level <= _data.maxLevel; ++level) {
+            keys.push_back(makeNodeKey(level, x, z));
+            x >>= 1U;
+            z >>= 1U;
+        }
     }
+    _vtRenderer->texture().beginFrame(keys);
     for (const auto &node : selected) {
         for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
             if ((node.quadrantMask & (1U << quadrant)) == 0U) {
@@ -464,11 +482,37 @@ RenderTexture *LandscapeRenderer::debugAtlas() const {
     return _vtRenderer ? _vtRenderer->texture().atlas() : nullptr;
 }
 
+void LandscapeRenderer::setUnlit(bool enabled) {
+    if (_unlit == enabled || !valid()) return;
+    // These passes belong exclusively to this renderer. Update their shader
+    // variants in place, preserving texture bindings and instanced batching.
+    const auto compile = [this](bool unlit) {
+        bool success = true;
+        for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+            for (const auto &pass : *material->getPasses()) {
+                pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = unlit;
+                success = pass->tryCompile() && success;
+            }
+        }
+        return success;
+    };
+    if (compile(enabled)) {
+        _unlit = enabled;
+    } else {
+        compile(_unlit);
+        CC_LOG_ERROR("[Landscape] failed to switch unlit shader variant");
+    }
+    // Refresh cached submodel shaders and instance attributes, including pooled
+    // models. This is also required while the LOD selection is frozen.
+    setWireframe(_wireframe);
+}
+
 bool LandscapeRenderer::valid() const {
     return _scene != nullptr && _node != nullptr && _mesh != nullptr &&
            _materialSolid != nullptr && _materialWire != nullptr &&
            _tilePages != nullptr && _tilePages->valid() && _asset != nullptr &&
-           _materialLibrary != nullptr && _materialLibrary->valid();
+           _materialLibrary != nullptr && _materialLibrary->valid() &&
+           _vtRenderer != nullptr && _vtRenderer->valid();
 }
 
 void LandscapeRenderer::destroy() {
@@ -504,6 +548,7 @@ void LandscapeRenderer::destroy() {
     _materialLibrary.reset();
     _node = nullptr;
     _scene = nullptr;
+    _unlit = false;
 }
 
 } // namespace landscape

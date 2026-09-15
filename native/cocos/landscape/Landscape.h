@@ -60,9 +60,9 @@ public:
 
     void setWireframe(bool wireframe);
     void setFreezeLod(bool frozen);
-    void setDetailHeightEnabled(bool enabled);
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
+    void setUnlit(bool enabled);
     void setAssetPath(const ccstd::string &manifestPath);
 
     void drawDebugBounds();
@@ -77,9 +77,9 @@ private:
 
     bool _wireframe{false};
     bool _freezeLod{false};
-    bool _detailHeightEnabled{false};
     bool _lodColor{false};
     bool _showRanges{false};
+    bool _unlit{false};
     float _lodQualityScale{1.0F};
     ccstd::string _assetPath;
     IntrusivePtr<Node> _node;

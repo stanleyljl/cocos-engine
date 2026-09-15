@@ -51,6 +51,7 @@ public:
         Vec4 source; // source tile XZ origin, size, splat array layer
         bool occupied{false};
         bool dirty{true};
+        bool permanent{false}; // Sector roots never enter the eviction candidates.
     };
 
     VirtualTexture();
@@ -71,7 +72,9 @@ public:
     // Protect ALL requested keys before allocating anything, so selection order
     // cannot evict pages that another visible node requests later this frame.
     void beginFrame(const ccstd::vector<uint64_t> &keys);
-    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source);
+    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent = false);
+    int findPage(uint64_t key) const;
+    int findReadyPage(uint64_t key) const;
     void collectDirtyPages(ccstd::vector<uint32_t> &slots) const;
     void markRendered(const ccstd::vector<uint32_t> &slots);
     void invalidate();
@@ -83,6 +86,7 @@ private:
     ccstd::vector<Page> _pages;
     ccstd::unordered_map<uint64_t, uint32_t> _lookup;
     ccstd::unordered_set<uint64_t> _requested;
+    ccstd::unordered_set<uint64_t> _updates; // Sources refreshed by acquirePage this frame.
     uint64_t _frame{0};
     bool _warnedFull{false};
 };

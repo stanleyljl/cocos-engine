@@ -83,9 +83,6 @@ export class Landscape extends Component {
     private _freezeLod = false;
 
     @serializable
-    private _detailHeightEnabled = false;
-
-    @serializable
     private _showBox = false;
 
     @serializable
@@ -99,6 +96,9 @@ export class Landscape extends Component {
 
     @serializable
     private _showVTAtlas = false;
+
+    @serializable
+    private _unlit = false;
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
     @editable
@@ -210,16 +210,16 @@ export class Landscape extends Component {
         this._showSectors = v;
     }
 
-    /** Enables material vertex displacement for before/after comparison. Defaults to off. */
+    /** F7: show VT albedo without lighting, normal mapping or AO (debug). */
     @editable
     @displayOrder(7)
-    get detailHeightEnabled (): boolean {
-        return this._detailHeightEnabled;
+    get unlit (): boolean {
+        return this._unlit;
     }
-    set detailHeightEnabled (v: boolean) {
-        this._detailHeightEnabled = v;
+    set unlit (value: boolean) {
+        this._unlit = value;
         if (this._native) {
-            this._native.setDetailHeightEnabled(v);
+            this._native.setUnlit(value);
         }
     }
 
@@ -259,11 +259,11 @@ export class Landscape extends Component {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setFreezeLod(this._freezeLod);
-            this._native.setDetailHeightEnabled(this._detailHeightEnabled);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);
             this._native.setShowRanges(this._showRanges);
+            this._native.setUnlit(this._unlit);
             // Wait for camera controllers in update/lateUpdate and systems to finish.
             director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         }

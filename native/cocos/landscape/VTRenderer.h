@@ -43,7 +43,7 @@ public:
     VTRenderer(const VTRenderer &) = delete;
     VTRenderer &operator=(const VTRenderer &) = delete;
 
-    bool init(const LandscapeAsset &asset, const TilePagePool &tiles, const MaterialLibrary &materials);
+    bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials);
     void destroy();
     VirtualTexture &texture() { return _texture; }
     const VirtualTexture &texture() const { return _texture; }

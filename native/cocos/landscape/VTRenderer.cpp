@@ -45,8 +45,14 @@ namespace landscape {
 VTRenderer::VTRenderer() = default;
 VTRenderer::~VTRenderer() { destroy(); }
 
-bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, const MaterialLibrary &materials) {
+bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials) {
     destroy();
+    const auto &data = asset.data();
+    const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
+    if (rootCount > config::VT_PAGE_COUNT) {
+        CC_LOG_ERROR("[Landscape] VT needs %zu permanent root pages, capacity is %u", rootCount, config::VT_PAGE_COUNT);
+        return false;
+    }
     auto *root = Root::getInstance();
     auto *device = root ? root->getDevice() : nullptr;
     if (!device || !tiles.valid() || !materials.valid() || !_texture.init(device)) return false;
@@ -63,7 +69,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, co
     auto *pass = _material->getPasses()->front().get();
     if (pass->getHandle("sourceParams") == 0U || pass->getHandle("vtLayout") == 0U ||
         pass->getHandle("splatmap") == 0U || pass->getHandle("albedoHeightMap") == 0U ||
-        pass->getHandle("normalRoughnessAOMap") == 0U) {
+        pass->getHandle("normalRoughnessAOMap") == 0U || pass->getHandle("tilingParams") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -76,7 +82,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, co
     bind("splatmap", tiles.splatArray(), tiles.splatSampler());
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
-    _material->setPropertyVec4Array("detailParams", materials.detailParams());
+    _material->setPropertyVec4Array("tilingParams", materials.tilingParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
         static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
         device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
@@ -112,6 +118,28 @@ bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, co
             gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE});
     }
     _initialPass = device->createRenderPass(initialInfo);
+    if (!valid() || !_initialPass || !_instances || !_inputAssembler) {
+        destroy();
+        return false;
+    }
+    // Every sector has a real material fallback, independent of the visible set.
+    // These dirty roots are always composed by BeforeRender, including the first
+    // frame, before any terrain draw is submitted on the same graphics queue.
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            const uint64_t key = makeNodeKey(data.maxLevel, x, z);
+            const int layer = tiles.peekResident(key);
+            const Vec4 region{static_cast<float>(x) * data.sectorSize - data.worldWidth() * 0.5F,
+                              static_cast<float>(z) * data.sectorSize - data.worldDepth() * 0.5F,
+                              data.sectorSize, 0.0F};
+            const Vec4 source{region.x, region.y, region.z, static_cast<float>(layer)};
+            if (layer < 0 || _texture.acquirePage(key, region, source, true) < 0) {
+                CC_LOG_ERROR("[Landscape] failed to prepare root VT page (%u,%u)", x, z);
+                destroy();
+                return false;
+            }
+        }
+    }
     _dirtySlots.reserve(config::VT_PAGE_COUNT);
     _instanceData.reserve(config::VT_PAGE_COUNT * 12);
     // After device acquire / scene updates, before ANY camera's Base Pass.
@@ -131,6 +159,9 @@ bool VTRenderer::valid() const {
 
 void VTRenderer::render() {
     if (!valid()) return;
+    // No update budget here: all requested dirty pages and permanent roots must
+    // finish this submission before the Base Pass. Fine pages become eligible
+    // for selection on the next update; roots also bootstrap the first frame.
     _texture.collectDirtyPages(_dirtySlots);
     if (_dirtySlots.empty()) return;
     _instanceData.clear();

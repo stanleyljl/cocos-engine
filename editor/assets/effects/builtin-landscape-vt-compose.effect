@@ -18,7 +18,7 @@ CCEffect %{
       properties:
         vtLayout: { value: [4096, 128, 4, 1] }
         sourceParams: { value: [129, 0, 0, 0] }
-        detailParams: { value: [0.1, 0, 0, 0] }
+        tilingParams: { value: [0.1, 0, 0, 0] }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
         normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
@@ -28,7 +28,7 @@ CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
     vec4 sourceParams;
-    vec4 detailParams[32];
+    vec4 tilingParams[32];
   };
 }%
 
@@ -115,7 +115,7 @@ CCProgram vt-compose-fs %{
     float ao = 0.0;
     for (int i = 0; i < 8; ++i) {
       if (weights[i] > 0.0) {
-        float scale = detailParams[layers[i]].x;
+        float scale = tilingParams[layers[i]].x;
         vec3 coord = vec3(uv * scale, float(layers[i]));
         vec4 ah = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
         vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);

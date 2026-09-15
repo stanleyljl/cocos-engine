@@ -49,15 +49,13 @@ public:
     gfx::Texture *normalRoughnessAO() const { return _normalRoughnessAO; }
     gfx::Sampler *sampler() const { return _sampler; }
     // Shared shader layout, built once from the loaded material layers.
-    const ccstd::vector<Vec4> &detailParams() const { return _detailParams; }
-    bool hasDetailHeight() const { return _hasDetailHeight; }
+    const ccstd::vector<Vec4> &tilingParams() const { return _tilingParams; }
 
 private:
     IntrusivePtr<gfx::Texture> _albedoHeight;
     IntrusivePtr<gfx::Texture> _normalRoughnessAO;
     gfx::Sampler *_sampler{nullptr}; // cached by device
-    ccstd::vector<Vec4> _detailParams;
-    bool _hasDetailHeight{false};
+    ccstd::vector<Vec4> _tilingParams;
 };
 
 } // namespace landscape
