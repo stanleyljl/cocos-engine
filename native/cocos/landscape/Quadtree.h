@@ -47,7 +47,7 @@ public:
     ~Quadtree();
 
     // Copies the metadata needed for selection; does not load or retain the asset.
-    bool init(const LandscapeAsset &asset);
+    bool init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
 
     const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const geometry::Frustum &frustum,
                                           const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ);
@@ -56,16 +56,20 @@ public:
     const ccstd::vector<float> &lodMorphEnd() const { return _lodMorphEnd; }
     bool visibilityDistanceTooSmall() const { return _visibilityDistanceTooSmall; }
 private:
+    enum class SelectResult {
+        CULLED,       // Outside the frustum; the parent must not fill this area.
+        OUT_OF_RANGE, // The parent must draw this quadrant instead.
+        SELECTED,     // Covered by this node or its descendants.
+    };
+
     struct HeightRange {
         float minY{0.0F};
         float maxY{0.0F};
     };
 
-    void computeRanges();
-    bool traverse(uint32_t level, uint32_t ix, uint32_t iz);
+    void computeRanges(float lodQualityScale);
+    SelectResult traverse(uint32_t level, uint32_t ix, uint32_t iz);
     void nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const;
-    size_t nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                          uint32_t ix, uint32_t iz) const;
 
     LandscapeData _data;
 

@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder } from 'cc.decorator';
+import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
 import { Asset } from '../asset/assets';
@@ -72,6 +72,9 @@ export class Landscape extends Component {
     @serializable
     @type(LandscapeAsset)
     private _landscapeAsset: LandscapeAsset | null = null;
+
+    @serializable
+    private _lodQualityScale = 1.0;
 
     @serializable
     private _wireframe = false;
@@ -230,6 +233,22 @@ export class Landscape extends Component {
         this._showVTAtlas = value;
     }
 
+    /**
+     * @en LOD quality multiplier, applied only when loading terrain. Larger values retain finer geometry farther away.
+     * @zh LOD 精度倍率，默认 1，最小值为 1。值越大，网格越精细；仅可在地形加载前设置。
+     */
+    @editable
+    @displayOrder(9)
+    @rangeMin(1.0)
+    get lodQualityScale (): number {
+        return this._lodQualityScale;
+    }
+    set lodQualityScale (value: number) {
+        if (this._native?.isInitialized()) return;
+        if (!Number.isFinite(value) || value < 1.0) return;
+        this._lodQualityScale = value;
+    }
+
     public onLoad (): void {
         if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
             this._native = new jsb.Landscape();
@@ -241,7 +260,7 @@ export class Landscape extends Component {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setFreezeLod(this._freezeLod);
             this._native.setDetailHeightEnabled(this._detailHeightEnabled);
-            this._native.onEnable(this.node);
+            this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);
             this._native.setShowRanges(this._showRanges);

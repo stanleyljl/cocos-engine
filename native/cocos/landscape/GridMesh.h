@@ -40,10 +40,10 @@ namespace landscape {
  */
 class GridMesh {
 public:
-    // Creates the shared grid RenderingSubMesh (position-only, triangle list).
+    // Creates the shared grid RenderingSubMesh (RG32F XZ position, triangle list).
     // Returns a new object; the caller takes ownership (e.g. via IntrusivePtr).
     static RenderingSubMesh *create(gfx::Device *device);
-    // A position-only [0,1] XZ quad (4 vertices, 6 indices) for VT page rendering.
+    // An RG32F [0,1] XZ quad (4 vertices, 6 indices) for VT page rendering.
     static RenderingSubMesh *createVTQuad(gfx::Device *device);
 };
 

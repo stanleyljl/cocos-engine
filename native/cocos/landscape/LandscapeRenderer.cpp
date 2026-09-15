@@ -29,6 +29,7 @@
 
 #include "base/Log.h"
 #include "base/Macros.h"
+#include "base/std/container/unordered_set.h"
 #include "core/Root.h"
 #include "core/assets/Material.h"
 #include "core/assets/RenderingSubMesh.h"
@@ -72,9 +73,6 @@ Material *createLandscapeMaterial(bool wireframe) {
     return material;
 }
 
-uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant) {
-    return (makeNodeKey(node) << 2U) | static_cast<uint64_t>(quadrant);
-}
 } // namespace
 
 LandscapeRenderer::LandscapeRenderer() = default;
@@ -136,18 +134,9 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     }
     _vtRenderer.reset();
     _asset = asset;
-    const auto &data = asset->data();
-    _maxLevel = data.maxLevel;
-    _minTileLevel = data.minTileLevel;
-    _tileResolution = data.tileResolution;
-    _sectorSize = data.sectorSize;
-    _worldWidth = data.worldWidth();
-    _worldDepth = data.worldDepth();
-    _heightScale = data.heightScale;
-    _heightBias = data.heightBias;
-    const uint32_t tileNodeDivisions = 1U << (_maxLevel - _minTileLevel);
-    _heightSampleSpacing = (_sectorSize / static_cast<float>(tileNodeDivisions)) /
-                           static_cast<float>(_tileResolution - 1U);
+    _data = asset->data();
+    _heightSampleSpacing = computeNodeSize(_data.sectorSize, _data.maxLevel, _data.minTileLevel) /
+                           static_cast<float>(_data.tileResolution - 1U);
     _tilePages = std::make_unique<TilePagePool>();
     if (!_tilePages->init(device, asset, config::PAGE_POOL_LAYERS)) {
         _tilePages.reset();
@@ -200,8 +189,8 @@ void LandscapeRenderer::updateMaterialProperties() {
     }
 
     const Vec4 terrainParams{
-        _heightScale,
-        _heightBias,
+        _data.heightScale,
+        _data.heightBias,
         _lodColor ? 1.0F : 0.0F,
         _showRanges ? 1.0F : 0.0F,
     };
@@ -226,7 +215,7 @@ void LandscapeRenderer::updateMaterialProperties() {
         };
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
-                                                        static_cast<float>(_tileResolution),
+                                                        static_cast<float>(_data.tileResolution),
                                                         0.0F, 0.0F});
         material->setPropertyVec4Array("lodMorph", lodMorph);
         material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
@@ -237,14 +226,8 @@ void LandscapeRenderer::updateMaterialProperties() {
             setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
         }
         if (_materialLibrary != nullptr && _materialLibrary->valid()) {
-            ccstd::vector<Vec4> detailParams(config::MATERIAL_LIBRARY_MAX);
-            bool hasDetailHeight = false;
-            for (const auto &layer : _asset->materialLayers()) {
-                detailParams[layer.id] = Vec4{layer.uvScale, layer.detailHeightScale, layer.detailHeightBias, 0.0F};
-                hasDetailHeight |= layer.detailHeightScale != 0.0F || layer.detailHeightBias != 0.0F;
-            }
-            material->setPropertyVec4Array("detailParams", detailParams);
-            material->setPropertyVec4("materialParams", Vec4{(_detailHeightEnabled && hasDetailHeight) ? 1.0F : 0.0F, 0.0F, 0.0F, 0.0F});
+            material->setPropertyVec4Array("detailParams", _materialLibrary->detailParams());
+            material->setPropertyVec4("materialParams", Vec4{(_detailHeightEnabled && _materialLibrary->hasDetailHeight()) ? 1.0F : 0.0F, 0.0F, 0.0F, 0.0F});
             setRuntimeTexture("albedoHeightMap", _materialLibrary->albedoHeight(), _materialLibrary->sampler());
             setRuntimeTexture("normalRoughnessAOMap", _materialLibrary->normalRoughnessAO(), _materialLibrary->sampler());
         }
@@ -272,101 +255,78 @@ void LandscapeRenderer::updateMorphCameraProperty() {
     }
 }
 
-void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
-    if (model == nullptr) {
-        return;
-    }
-
-    const uint32_t shift = _maxLevel - std::min(node.level, _maxLevel);
-    const float nodeSize = _sectorSize / static_cast<float>(1U << shift);
-    const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F;
-    const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F;
-
+void LandscapeRenderer::setInstanceAttribute(scene::Model *model, const char *name, const Vec4 &value) {
     // setInstancedAttribute copies into each submodel's own attribute block
     // synchronously, so this buffer can be reused across attributes and models.
     // Creating transient ArrayBuffers here also grows the external pointer
     // table in the bundled V8 build even after their JS objects are collected.
     auto &instance = ccstd::get<Float32Array>(_instanceAttributeScratch);
-    instance[0] = x;
-    instance[1] = z;
-    instance[2] = nodeSize;
-    instance[3] = static_cast<float>(node.level);
-    model->setInstancedAttribute("a_gridInst", _instanceAttributeScratch);
+    instance[0] = value.x;
+    instance[1] = value.y;
+    instance[2] = value.z;
+    instance[3] = value.w;
+    model->setInstancedAttribute(name, _instanceAttributeScratch);
+}
 
-    instance[0] = static_cast<float>(quadrant);
-    instance[1] = 0.0F;
-    instance[2] = 0.0F;
-    instance[3] = 0.0F;
-    model->setInstancedAttribute("a_quadrantInst", _instanceAttributeScratch);
+void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
+    if (model == nullptr) {
+        return;
+    }
 
-    uint32_t sourceLevel = 0U;
-    uint32_t sourceX = 0U;
-    uint32_t sourceZ = 0U;
-    const int layer = resolveTilePage(node, sourceLevel, sourceX, sourceZ);
-    CC_ASSERTF(layer >= 0,
+    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, std::min(node.level, _data.maxLevel));
+    const float x = static_cast<float>(node.ix) * nodeSize - _data.worldWidth() * 0.5F;
+    const float z = static_cast<float>(node.iz) * nodeSize - _data.worldDepth() * 0.5F;
+    setInstanceAttribute(model, "a_gridInst", Vec4{x, z, nodeSize, static_cast<float>(node.level)});
+    setInstanceAttribute(model, "a_quadrantInst", Vec4{static_cast<float>(quadrant), 0.0F, 0.0F, 0.0F});
+
+    const TilePage tile = resolveTilePage(node);
+    CC_ASSERTF(tile.layer >= 0,
                "[Landscape] missing resident root: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
-               node.level, node.ix, node.iz, sourceLevel, sourceX, sourceZ, layer);
-    const float sourceNodeSize = _sectorSize / static_cast<float>(1U << (_maxLevel - sourceLevel));
+               node.level, node.ix, node.iz, tile.level, tile.x, tile.z, tile.layer);
+    const float sourceNodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, tile.level);
     const Vec4 tileParams{
-        static_cast<float>(sourceX) * sourceNodeSize - _worldWidth * 0.5F,
-        static_cast<float>(sourceZ) * sourceNodeSize - _worldDepth * 0.5F,
+        static_cast<float>(tile.x) * sourceNodeSize - _data.worldWidth() * 0.5F,
+        static_cast<float>(tile.z) * sourceNodeSize - _data.worldDepth() * 0.5F,
         sourceNodeSize,
-        static_cast<float>(layer),
+        static_cast<float>(tile.layer),
     };
     // a_tileInst.xy = source tile origin in landscape-local meters,
     // z = source tile size in meters, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
-    instance[0] = tileParams.x;
-    instance[1] = tileParams.y;
-    instance[2] = tileParams.z;
-    instance[3] = tileParams.w;
-    model->setInstancedAttribute("a_tileInst", _instanceAttributeScratch);
+    setInstanceAttribute(model, "a_tileInst", tileParams);
     const int vtSlot = _vtRenderer && _vtRenderer->valid()
         ? _vtRenderer->texture().acquirePage(makeNodeKey(node), Vec4{x, z, nodeSize, 0.0F}, tileParams)
         : -1;
-    instance[0] = x;
-    instance[1] = z;
-    instance[2] = nodeSize;
-    instance[3] = static_cast<float>(vtSlot);
-    model->setInstancedAttribute("a_vtInst", _instanceAttributeScratch);
+    setInstanceAttribute(model, "a_vtInst", Vec4{x, z, nodeSize, static_cast<float>(vtSlot)});
 }
 
-int LandscapeRenderer::resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
-                                         uint32_t &sourceX, uint32_t &sourceZ) {
+LandscapeRenderer::TilePage LandscapeRenderer::resolveTilePage(const QuadNode &node) {
     if (_tilePages == nullptr || _asset == nullptr) {
-        return -1;
+        return {};
     }
-    sourceLevel = std::max(node.level, _minTileLevel);
-    const uint32_t shift = sourceLevel > node.level ? sourceLevel - node.level : 0U;
-    sourceX = node.ix >> shift;
-    sourceZ = node.iz >> shift;
-    int layer = _tilePages->query(sourceLevel, sourceX, sourceZ);
-    if (layer >= 0) {
-        return layer;
+    TilePage tile;
+    tile.level = std::max(node.level, _data.minTileLevel);
+    const uint32_t shift = tile.level - node.level;
+    tile.x = node.ix >> shift;
+    tile.z = node.iz >> shift;
+    // Only the desired tile starts an asynchronous request. Ancestors are
+    // queried without loading and remain protected while used as fallbacks.
+    tile.layer = _tilePages->query(tile.level, tile.x, tile.z);
+    while (tile.layer < 0 && tile.level < _data.maxLevel) {
+        ++tile.level;
+        tile.x >>= 1U;
+        tile.z >>= 1U;
+        tile.layer = _tilePages->peekResident(makeNodeKey(tile.level, tile.x, tile.z));
     }
-    for (uint32_t level = sourceLevel + 1U; level <= _maxLevel; ++level) {
-        const uint32_t ancestorShift = level - sourceLevel;
-        const uint32_t ancestorX = sourceX >> ancestorShift;
-        const uint32_t ancestorZ = sourceZ >> ancestorShift;
-        layer = _tilePages->peekResident(makeNodeKey(level, ancestorX, ancestorZ));
-        if (layer >= 0) {
-            sourceLevel = level;
-            sourceX = ancestorX;
-            sourceZ = ancestorZ;
-            return layer;
-        }
-    }
-    return -1; // initialization guarantees a resident root for every sector
+    return tile; // initialization guarantees a resident root for every sector
 }
 
-void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
-    if (model == nullptr) {
-        return;
-    }
-
+void LandscapeRenderer::updateModel(ModelState &state, const QuadNode &node, uint32_t quadrant) {
+    auto *model = state.model.get();
     updateInstanceData(model, node, quadrant);
-    _modelNodes[model] = ModelState{node, quadrant};
+    state.node = node;
+    state.quadrant = quadrant;
     model->setEnabled(true);
     updateModelBounds(model, node, quadrant);
 }
@@ -384,12 +344,11 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
         return;
     }
 
-    const uint32_t shift = _maxLevel - std::min(node.level, _maxLevel);
-    const float nodeSize = _sectorSize / static_cast<float>(1U << shift);
+    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, std::min(node.level, _data.maxLevel));
     const float quadrantSize = nodeSize * 0.5F;
-    const float x = static_cast<float>(node.ix) * nodeSize - _worldWidth * 0.5F +
+    const float x = static_cast<float>(node.ix) * nodeSize - _data.worldWidth() * 0.5F +
                     static_cast<float>(quadrant & 1U) * quadrantSize;
-    const float z = static_cast<float>(node.iz) * nodeSize - _worldDepth * 0.5F +
+    const float z = static_cast<float>(node.iz) * nodeSize - _data.worldDepth() * 0.5F +
                     static_cast<float>(quadrant >> 1U) * quadrantSize;
 
     model->createBoundingShape(Vec3{x, node.minY, z},
@@ -403,16 +362,13 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
         return;
     }
 
-    ccstd::unordered_map<uint64_t, bool> visible;
+    ccstd::unordered_set<uint64_t> visible;
     visible.reserve(selected.size() * 4U);
     _tilePages->beginFrame();
     // Mark all visible pages before uploading staged tiles so LRU eviction never
     // removes a tile needed by the current view.
     for (const auto &node : selected) {
-        uint32_t sourceLevel = 0U;
-        uint32_t sourceX = 0U;
-        uint32_t sourceZ = 0U;
-        resolveTilePage(node, sourceLevel, sourceX, sourceZ);
+        resolveTilePage(node);
     }
     _tilePages->update(config::PAGE_UPLOAD_BUDGET);
     if (_vtRenderer && _vtRenderer->valid()) {
@@ -427,7 +383,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
                 continue;
             }
             const uint64_t key = makeQuadrantKey(node, quadrant);
-            visible[key] = true;
+            visible.insert(key);
             auto iter = _active.find(key);
             if (iter == _active.end()) {
                 IntrusivePtr<scene::Model> model;
@@ -440,20 +396,19 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
                 if (model == nullptr) {
                     continue;
                 }
-                _active.emplace(key, model);
-                updateModel(model, node, quadrant);
+                auto inserted = _active.emplace(key, ModelState{model, node, quadrant});
+                updateModel(inserted.first->second, node, quadrant);
             } else {
-                const auto state = _modelNodes.find(iter->second.get());
-                if (state == _modelNodes.end() ||
-                    state->second.node.level != node.level ||
-                    state->second.node.ix != node.ix ||
-                    state->second.node.iz != node.iz ||
-                    state->second.node.minY != node.minY ||
-                    state->second.node.maxY != node.maxY ||
-                    state->second.quadrant != quadrant) {
-                    updateModel(iter->second, node, quadrant);
+                auto &state = iter->second;
+                if (state.node.level != node.level ||
+                    state.node.ix != node.ix ||
+                    state.node.iz != node.iz ||
+                    state.node.minY != node.minY ||
+                    state.node.maxY != node.maxY ||
+                    state.quadrant != quadrant) {
+                    updateModel(state, node, quadrant);
                 } else {
-                    updateInstanceData(iter->second, node, quadrant);
+                    updateInstanceData(state.model, node, quadrant);
                 }
             }
         }
@@ -461,8 +416,8 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
 
     for (auto iter = _active.begin(); iter != _active.end();) {
         if (visible.find(iter->first) == visible.end()) {
-            iter->second->setEnabled(false);
-            _pool.emplace_back(iter->second);
+            iter->second.model->setEnabled(false);
+            _pool.emplace_back(iter->second.model);
             iter = _active.erase(iter);
         } else {
             ++iter;
@@ -476,21 +431,17 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
     }
     _freezeLod = frozen;
     for (const auto &entry : _active) {
-        const auto state = _modelNodes.find(entry.second.get());
-        if (state != _modelNodes.end()) {
-            updateModelBounds(entry.second, state->second.node, state->second.quadrant);
-        }
+        const auto &state = entry.second;
+        updateModelBounds(state.model, state.node, state.quadrant);
     }
 }
 
 void LandscapeRenderer::setWireframe(bool wireframe) {
     _wireframe = wireframe;
     for (const auto &entry : _active) {
-        entry.second->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
-        const auto state = _modelNodes.find(entry.second.get());
-        if (state != _modelNodes.end()) {
-            updateInstanceData(entry.second, state->second.node, state->second.quadrant);
-        }
+        const auto &state = entry.second;
+        state.model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
+        updateInstanceData(state.model, state.node, state.quadrant);
     }
     for (const auto &model : _pool) {
         model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
@@ -532,13 +483,12 @@ void LandscapeRenderer::destroy() {
     };
 
     for (const auto &entry : _active) {
-        removeModel(entry.second);
+        removeModel(entry.second.model);
     }
     for (const auto &model : _pool) {
         removeModel(model);
     }
     _active.clear();
-    _modelNodes.clear();
     _pool.clear();
     _instanceAttributeScratch = ccstd::monostate{};
     _vtRenderer.reset();

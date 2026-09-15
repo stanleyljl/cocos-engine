@@ -53,7 +53,8 @@ public:
     Landscape();
     ~Landscape() override;
 
-    void onEnable(Node *node);
+    // LOD quality is fixed for the lifetime of the loaded terrain.
+    void onEnable(Node *node, float lodQualityScale = 1.0F);
     void onDisable();
     void update();
 
@@ -79,6 +80,7 @@ private:
     bool _detailHeightEnabled{false};
     bool _lodColor{false};
     bool _showRanges{false};
+    float _lodQualityScale{1.0F};
     ccstd::string _assetPath;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -86,7 +88,9 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     ccstd::vector<QuadNode> _selected;
+#if CC_LANDSCAPE_DEBUG
     ccstd::vector<uint32_t> _lastLodNodeCounts;
+#endif
     bool _lastVisibilityDistanceWarning{false};
 };
 

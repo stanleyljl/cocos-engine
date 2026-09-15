@@ -76,11 +76,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, co
     bind("splatmap", tiles.splatArray(), tiles.splatSampler());
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
-    ccstd::vector<Vec4> detailParams(config::MATERIAL_LIBRARY_MAX);
-    for (const auto &layer : asset.materialLayers()) {
-        detailParams[layer.id] = Vec4{layer.uvScale, layer.detailHeightScale, layer.detailHeightBias, 0.0F};
-    }
-    _material->setPropertyVec4Array("detailParams", detailParams);
+    _material->setPropertyVec4Array("detailParams", materials.detailParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
         static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
         device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
@@ -122,8 +118,10 @@ bool VTRenderer::init(const LandscapeAsset &asset, const TilePagePool &tiles, co
     // No extra camera, visibility layer, scene models or forward-pipeline fork.
     _beforeRender = root->on<Root::BeforeRender>([this](Root *) { render(); });
     _subscribed = true;
+#if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] VT enabled: %u cached pages, %u interior texels, two RGBA8 atlases",
         config::VT_PAGE_COUNT, config::VT_PAGE_INTERIOR);
+#endif
     return true;
 }
 

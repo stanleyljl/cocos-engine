@@ -53,6 +53,9 @@ CCEffect %{
 }%
 
 CCProgram landscape-uniforms %{
+  // L0-L8; maximum sector size = 4096 m at 1 m finest-grid spacing.
+  // Must match config::MAX_LOD_LEVELS in LandscapeConfig.h.
+  #define LANDSCAPE_MAX_LOD_LEVELS 9
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
@@ -61,7 +64,8 @@ CCProgram landscape-uniforms %{
     vec4 detailParams[32]; // per-layer UV repeats/m, detailHeightScale, detailHeightBias
     vec4 materialParams; // any layer uses detail displacement
     vec4 vtLayout; // atlas size, slot size, border
-    vec4 lodMorph[8];
+    // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
+    vec4 lodMorph[9];
   };
 }%
 
@@ -145,7 +149,9 @@ CCProgram landscape-vertex %{
 
   #define CC_SURFACES_VERTEX_MODIFY_LOCAL_POS
   vec3 SurfacesVertexModifyLocalPos(in SurfacesStandardVertexIntermediate In) {
-    vec2 localXZ = In.position.xz;
+    // The RG32F buffer packs terrain XZ into the first two input components.
+    // Keep the shared surface input unchanged; reconstruct XYZ on return.
+    vec2 localXZ = In.position.xy;
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_tileParams = vec4(0.0, 0.0, 1.0, 0.0);
@@ -158,7 +164,7 @@ CCProgram landscape-vertex %{
   #if USE_INSTANCING
     float quadrant = a_quadrantInst.x;
     vec2 quadrantOffset = vec2(mod(quadrant, 2.0), floor(quadrant * 0.5)) * 0.5;
-    vec2 parentUV = quadrantOffset + In.position.xz * 0.5;
+    vec2 parentUV = quadrantOffset + In.position.xy * 0.5;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     v_lod = a_gridInst.w;
     // LOD depends only on base terrain. Detail height is deliberately excluded.
@@ -223,7 +229,10 @@ CCProgram landscape-surface %{
     if (lod == 2) return vec3(0.20, 0.45, 1.00);
     if (lod == 3) return vec3(1.00, 0.90, 0.10);
     if (lod == 4) return vec3(1.00, 0.15, 0.90);
-    return vec3(0.10, 0.90, 0.95);
+    if (lod == 5) return vec3(0.10, 0.90, 0.95);
+    if (lod == 6) return vec3(0.65, 0.35, 0.85);
+    if (lod == 7) return vec3(0.95, 0.55, 0.20);
+    return vec3(0.90, 0.90, 0.90);
   }
 
   #include <surfaces/data-structures/standard>
@@ -307,12 +316,13 @@ CCProgram landscape-surface %{
     surfaceData.emissive = vec3(0.0);
 
     if (terrainParams.z > 0.5) {
-      surfaceData.baseColor.rgb = lodPalette(int(mod(v_lod, 6.0)));
+      surfaceData.baseColor.rgb = lodPalette(int(v_lod));
     }
     if (terrainParams.w > 0.5) {
       float d = distance(morphCameraPos.xyz, FSInput_worldPos);
       float width = fwidth(d) * 1.5;
-      for (int i = 0; i < 6; ++i) {
+      for (int i = 0; i < LANDSCAPE_MAX_LOD_LEVELS; ++i) {
+        if (lodMorph[i].y <= lodMorph[i].x) continue; // Unused resource levels.
         if (abs(d - lodMorph[i].x) < width) surfaceData.baseColor.rgb = mix(lodPalette(i), vec3(0.95), 0.62);
         if (abs(d - lodMorph[i].y) < width) surfaceData.baseColor.rgb = lodPalette(i) * 0.45;
       }

@@ -21,6 +21,7 @@ Thumbs.db
 *.vspscc
 *_i.c
 *.i
+!/tools/swig-config/landscape.i
 *.icf
 *_p.c
 *.ncb

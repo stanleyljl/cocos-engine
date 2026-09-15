@@ -33,6 +33,7 @@
 #include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeAsset.h"
 #include "math/Vec3.h"
+#include "math/Vec4.h"
 #include "scene/Model.h"
 
 namespace cc {
@@ -57,8 +58,6 @@ class MaterialLibrary;
 class VTRenderer;
 
 /**
- * Cocos render-side implementation of the cdlod_opengl grid renderer.
- *
  * The quadtree owns visibility and LOD selection. This class only turns the
  * selected node quadrants into Cocos models and supplies the per-quadrant instance data
  * consumed by builtin-landscape.effect.
@@ -84,7 +83,15 @@ public:
     RenderTexture *debugAtlas() const;
 
 private:
+    struct TilePage {
+        uint32_t level{0};
+        uint32_t x{0};
+        uint32_t z{0};
+        int layer{-1};
+    };
+
     struct ModelState {
+        IntrusivePtr<scene::Model> model;
         QuadNode node;
         uint32_t quadrant{0U};
     };
@@ -92,11 +99,11 @@ private:
     IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
     void updateMorphCameraProperty();
+    void setInstanceAttribute(scene::Model *model, const char *name, const Vec4 &value);
     void updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant);
-    void updateModel(scene::Model *model, const QuadNode &node, uint32_t quadrant);
+    void updateModel(ModelState &state, const QuadNode &node, uint32_t quadrant);
     void updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant);
-    int resolveTilePage(const QuadNode &node, uint32_t &sourceLevel,
-                          uint32_t &sourceX, uint32_t &sourceZ);
+    TilePage resolveTilePage(const QuadNode &node);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -108,22 +115,14 @@ private:
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
 
-    ccstd::unordered_map<uint64_t, IntrusivePtr<scene::Model>> _active;
-    ccstd::unordered_map<scene::Model *, ModelState> _modelNodes;
+    ccstd::unordered_map<uint64_t, ModelState> _active;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
     // Float32Array-to-TypedArray copies when setting instance attributes.
     TypedArray _instanceAttributeScratch;
 
-    uint32_t _maxLevel{0};
-    uint32_t _minTileLevel{0};
-    uint32_t _tileResolution{0};
-    float _sectorSize{0.0F};
-    float _worldWidth{0.0F};
-    float _worldDepth{0.0F};
-    float _heightScale{0.0F};
-    float _heightBias{0.0F};
+    LandscapeData _data;
     float _heightSampleSpacing{1.0F};
     Vec3 _viewPosition;
     ccstd::vector<float> _morphStart;

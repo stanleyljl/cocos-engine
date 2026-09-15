@@ -66,10 +66,8 @@ public:
     ~LandscapeAsset() override;
 
     bool load(const ccstd::string &dataDir);
-#ifndef SWIGCOCOS
     // Synchronously loads a sector root pair before terrain rendering starts.
     bool loadRootTile(uint32_t x, uint32_t z, TileData &tile) const;
-#endif
     // Requests a height/splat pair as one job. Only complete pairs are made
     // available through takeReadyTile() on the main thread.
     bool requestTile(uint32_t level, uint32_t x, uint32_t z);
@@ -102,8 +100,7 @@ private:
 
     void resetAsyncState();
     static bool decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
-                               uint32_t resolution, uint32_t layerCount, TileData &tile);
-    size_t rangeOffset(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
+                               uint32_t resolution, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 
     ccstd::string _dataDir;

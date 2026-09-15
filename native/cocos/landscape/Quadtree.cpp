@@ -60,25 +60,23 @@ Quadtree::Quadtree() {
 
 Quadtree::~Quadtree() = default;
 
-bool Quadtree::init(const LandscapeAsset &asset) {
+bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
     if (!asset.valid()) {
         return false;
     }
     _data = asset.data();
-    _selected.clear();
-    _levelOffsets.assign(static_cast<size_t>(_data.maxLevel) + 1U, 0U);
-    _nodesPerSector = 0U;
-    for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        _levelOffsets[level] = _nodesPerSector;
-        const uint32_t side = 1U << (_data.maxLevel - level);
-        _nodesPerSector += static_cast<size_t>(side) * side;
+    if (!std::isfinite(lodQualityScale) || lodQualityScale <= 0.0F ||
+        !std::isfinite(std::hypot(_data.worldWidth(), _data.worldDepth()) * lodQualityScale)) {
+        return false;
     }
+    _selected.clear();
+    _nodesPerSector = computeSectorNodeLayout(_data.maxLevel, _levelOffsets);
 
     const size_t sectorCount = static_cast<size_t>(_data.sectorsX) * _data.sectorsZ;
     _heightRanges.assign(sectorCount * _nodesPerSector,
                          HeightRange{_data.minHeight(), _data.maxHeight()});
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const uint32_t side = 1U << (_data.maxLevel - level);
+        const uint32_t side = computeNodesPerSide(_data.maxLevel, level);
         for (uint32_t globalZ = 0; globalZ < _data.sectorsZ * side; ++globalZ) {
             for (uint32_t globalX = 0; globalX < _data.sectorsX * side; ++globalX) {
                 float minY = _data.minHeight();
@@ -86,27 +84,17 @@ bool Quadtree::init(const LandscapeAsset &asset) {
                 if (!asset.getHeightRange(level, globalX, globalZ, minY, maxY)) {
                     return false;
                 }
-                const uint32_t sectorX = globalX / side;
-                const uint32_t sectorZ = globalZ / side;
-                const uint32_t localX = globalX % side;
-                const uint32_t localZ = globalZ % side;
-                _heightRanges[nodeRangeIndex(sectorX, sectorZ, level, localX, localZ)] = HeightRange{minY, maxY};
+                const size_t index = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector,
+                                                          level, globalX, globalZ);
+                _heightRanges[index] = HeightRange{minY, maxY};
             }
         }
     }
-    computeRanges();
+    computeRanges(lodQualityScale);
     return true;
 }
 
-size_t Quadtree::nodeRangeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                                uint32_t ix, uint32_t iz) const {
-    const uint32_t nodesPerSide = 1U << (_data.maxLevel - level);
-    const size_t sectorIndex = static_cast<size_t>(sectorZ) * _data.sectorsX + sectorX;
-    return sectorIndex * _nodesPerSector + _levelOffsets[level] +
-           static_cast<size_t>(iz) * nodesPerSide + ix;
-}
-
-void Quadtree::computeRanges() {
+void Quadtree::computeRanges(float lodQualityScale) {
     const size_t levelCount = static_cast<size_t>(_data.maxLevel) + 1U;
     _lodRange.assign(levelCount, 0.0F);
     _lodMorphStart.assign(levelCount, 0.0F);
@@ -119,7 +107,9 @@ void Quadtree::computeRanges() {
         currentWeight *= config::LOD_DISTANCE_RATIO;
     }
 
-    const float visibilityDistance = _data.sectorSize * config::VISIBILITY_DISTANCE_IN_SECTORS;
+    // Horizontal terrain diagonal, independent of height range and camera far clip.
+    // A larger scale keeps finer LODs visible farther away.
+    const float visibilityDistance = std::hypot(_data.worldWidth(), _data.worldDepth()) * lodQualityScale;
     const float section = visibilityDistance / totalWeight;
     float previousRange = 0.0F;
     currentWeight = 1.0F;
@@ -146,11 +136,9 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
         level > _data.maxLevel) {
         return;
     }
-    const uint32_t nodesPerSide = 1U << (_data.maxLevel - level);
-    if (ix >= nodesPerSide || iz >= nodesPerSide) {
-        return;
-    }
-    const HeightRange &range = _heightRanges[nodeRangeIndex(_sectorX, _sectorZ, level, ix, iz)];
+    const size_t index = nodeRangeIndex(_data, _levelOffsets, _nodesPerSector, _sectorX, _sectorZ, level, ix, iz);
+    if (index >= _heightRanges.size()) return;
+    const HeightRange &range = _heightRanges[index];
     minY = range.minY;
     maxY = range.maxY;
 }
@@ -171,8 +159,8 @@ const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geomet
     return _selected;
 }
 
-bool Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
-    const float size = _data.sectorSize / static_cast<float>(1U << (_data.maxLevel - level));
+Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
+    const float size = computeNodeSize(_data.sectorSize, _data.maxLevel, level);
     float minY = _data.minHeight();
     float maxY = _data.maxHeight();
     nodeHeightRange(level, ix, iz, minY, maxY);
@@ -182,12 +170,12 @@ bool Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
     _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
 
     if (!_box->aabbFrustum(*_frustum)) {
-        return true; // Frustum-culled children must not be filled by the parent.
+        return SelectResult::CULLED;
     }
 
     const float minDistance = distanceToAABB(_camPos, *_box);
     if (minDistance > _lodRange[level]) {
-        return false; // The parent must fill this child quadrant.
+        return SelectResult::OUT_OF_RANGE;
     }
     const float maxDistance = maxDistanceToAABB(_camPos, *_box);
     const auto addSelection = [&](uint8_t quadrantMask) {
@@ -199,14 +187,15 @@ bool Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
 
     if (level == 0U || minDistance > _lodRange[level - 1U]) {
         addSelection(config::ALL_QUADRANTS);
-        return true;
+        return SelectResult::SELECTED;
     }
 
     uint8_t parentMask = 0U;
     for (uint32_t dz = 0; dz < 2U; ++dz) {
         for (uint32_t dx = 0; dx < 2U; ++dx) {
             const uint32_t quadrant = dz * 2U + dx;
-            if (!traverse(level - 1U, ix * 2U + dx, iz * 2U + dz)) {
+            const auto childResult = traverse(level - 1U, ix * 2U + dx, iz * 2U + dz);
+            if (childResult == SelectResult::OUT_OF_RANGE) {
                 parentMask |= static_cast<uint8_t>(1U << quadrant);
             }
         }
@@ -214,7 +203,7 @@ bool Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
     if (parentMask != 0U) {
         addSelection(parentMask);
     }
-    return true;
+    return SelectResult::SELECTED;
 }
 
 } // namespace landscape

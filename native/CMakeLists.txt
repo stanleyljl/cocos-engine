@@ -1625,6 +1625,7 @@ endif()
 ##### landscape
 cocos_source_files(
                  cocos/landscape/LandscapeConfig.h
+                 cocos/landscape/LandscapeConfig.cpp
                  cocos/landscape/GridMesh.h
                  cocos/landscape/GridMesh.cpp
                  cocos/landscape/TilePagePool.h

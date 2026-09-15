@@ -26,6 +26,7 @@
 
 #include "base/Ptr.h"
 #include "landscape/LandscapeAsset.h"
+#include "math/Vec4.h"
 
 namespace cc {
 namespace gfx {
@@ -47,11 +48,16 @@ public:
     gfx::Texture *albedoHeight() const { return _albedoHeight; }
     gfx::Texture *normalRoughnessAO() const { return _normalRoughnessAO; }
     gfx::Sampler *sampler() const { return _sampler; }
+    // Shared shader layout, built once from the loaded material layers.
+    const ccstd::vector<Vec4> &detailParams() const { return _detailParams; }
+    bool hasDetailHeight() const { return _hasDetailHeight; }
 
 private:
     IntrusivePtr<gfx::Texture> _albedoHeight;
     IntrusivePtr<gfx::Texture> _normalRoughnessAO;
     gfx::Sampler *_sampler{nullptr}; // cached by device
+    ccstd::vector<Vec4> _detailParams;
+    bool _hasDetailHeight{false};
 };
 
 } // namespace landscape

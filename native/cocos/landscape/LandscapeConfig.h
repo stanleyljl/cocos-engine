@@ -24,17 +24,29 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+
+#include "base/std/container/vector.h"
+
+// Landscape diagnostics are independent of the engine's global debug mode.
+// Override with CC_LANDSCAPE_DEBUG=0 to remove informational logs and LOD stats.
+// Errors, operational warnings and visual debug controls remain available.
+#ifndef CC_LANDSCAPE_DEBUG
+    #define CC_LANDSCAPE_DEBUG 1
+#endif
 
 namespace cc {
 namespace landscape {
 namespace config {
 
 constexpr int       VERTS_PER_NODE_SIDE = 17;
-constexpr float     VISIBILITY_DISTANCE_IN_SECTORS = 6.0F;
 constexpr float     LOD_DISTANCE_RATIO = 2.0F;
 constexpr float     MORPH_START_RATIO = 0.70F;
-constexpr uint32_t  MAX_LOD_LEVELS = 8;
+// L0-L8: maximum sector size = 4096 m at 1 m finest-grid spacing
+// (16 cells per node side * 2^8). Keep the shader/importer limits in sync.
+constexpr uint32_t  MAX_LOD_LEVELS = 9;
 constexpr uint8_t   ALL_QUADRANTS = 0x0FU;
 
 // Active height-page cache configuration.
@@ -68,12 +80,26 @@ struct LandscapeData {
     float worldDepth() const { return sectorSize * static_cast<float>(sectorsZ); }
     float minHeight() const { return heightBias; }
     float maxHeight() const { return heightBias + heightScale; }
-    bool valid() const {
-        return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
-               minTileLevel <= maxLevel && tileResolution > 1U && sectorSize > 0.0F &&
-               heightScale > 0.0F;
-    }
+    bool valid() const;
 };
+
+
+// Fills per-level offsets (L0 first) and returns the total node count per sector.
+// Invalid maxLevel values clear the offsets and return zero.
+size_t computeSectorNodeLayout(uint32_t maxLevel, ccstd::vector<size_t> &levelOffsets);
+// Invalid levels return zero. L0 is finest; maxLevel is the sector root.
+uint32_t computeNodesPerSide(uint32_t maxLevel, uint32_t level);
+float computeNodeSize(float sectorSize, uint32_t maxLevel, uint32_t level);
+
+constexpr size_t INVALID_NODE_INDEX = std::numeric_limits<size_t>::max();
+// Offsets/count must come from computeSectorNodeLayout(data.maxLevel).
+// The layout is sector-major, then level-major, then row-major (Z, X).
+// Invalid coordinates/levels return INVALID_NODE_INDEX.
+size_t nodeRangeIndex(const LandscapeData &data, const ccstd::vector<size_t> &levelOffsets,
+                      size_t nodesPerSector, uint32_t sectorX, uint32_t sectorZ,
+                      uint32_t level, uint32_t localX, uint32_t localZ);
+size_t globalNodeRangeIndex(const LandscapeData &data, const ccstd::vector<size_t> &levelOffsets,
+                            size_t nodesPerSector, uint32_t level, uint32_t globalX, uint32_t globalZ);
 
 struct QuadNode {
     uint32_t level{0};
@@ -88,15 +114,9 @@ constexpr uint32_t NODE_KEY_COORD_BITS = 28U;
 constexpr uint64_t NODE_KEY_COORD_MASK = (1ULL << NODE_KEY_COORD_BITS) - 1ULL;
 constexpr uint32_t NODE_KEY_LEVEL_SHIFT = NODE_KEY_COORD_BITS * 2U;
 
-inline uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz) {
-    return (static_cast<uint64_t>(level) << NODE_KEY_LEVEL_SHIFT) |
-           ((static_cast<uint64_t>(ix) & NODE_KEY_COORD_MASK) << NODE_KEY_COORD_BITS) |
-           (static_cast<uint64_t>(iz) & NODE_KEY_COORD_MASK);
-}
-
-inline uint64_t makeNodeKey(const QuadNode &node) {
-    return makeNodeKey(node.level, node.ix, node.iz);
-}
+uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
+uint64_t makeNodeKey(const QuadNode &node);
+uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant);
 
 } // namespace landscape
 } // namespace cc

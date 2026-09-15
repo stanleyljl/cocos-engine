@@ -35,7 +35,7 @@ CCProgram vt-compose-uniforms %{
 CCProgram vt-compose-vs %{
   precision highp float;
   #include <vt-compose-uniforms>
-  in vec3 a_position;
+  in vec2 a_position; // Packed XZ.
   in vec4 a_vtPage;
   in vec4 a_vtRegion;
   in vec4 a_vtSource;
@@ -49,10 +49,10 @@ CCProgram vt-compose-vs %{
   vec4 vert() {
     float count = vtLayout.x / vtLayout.y;
     vec2 slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
-    vec2 atlasUv = (slot * vtLayout.y + a_position.xz * vtLayout.y) / vtLayout.x;
+    vec2 atlasUv = (slot * vtLayout.y + a_position * vtLayout.y) / vtLayout.x;
     // The border evaluates real neighboring coordinates rather than duplicating
     // edge pixels. Interior uv=0/1 lies on the corresponding node boundary.
-    vec2 local = (a_position.xz * vtLayout.y - vtLayout.z) / (vtLayout.y - 2.0 * vtLayout.z);
+    vec2 local = (a_position * vtLayout.y - vtLayout.z) / (vtLayout.y - 2.0 * vtLayout.z);
     v_localXZ = a_vtRegion.xy + local * a_vtRegion.z;
     v_source = a_vtSource;
     vec2 clipPos = atlasUv * 2.0 - 1.0;

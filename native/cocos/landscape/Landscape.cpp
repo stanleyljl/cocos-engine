@@ -24,6 +24,7 @@
 
 #include "landscape/Landscape.h"
 
+#include <cmath>
 #include <cstdio>
 
 #include "base/Log.h"
@@ -49,10 +50,12 @@ Landscape::~Landscape() {
     onDisable();
 }
 
-void Landscape::onEnable(Node *node) {
-    if (node == nullptr) {
+void Landscape::onEnable(Node *node, float lodQualityScale) {
+    if (node == nullptr || _renderer != nullptr ||
+        !std::isfinite(lodQualityScale) || lodQualityScale <= 0.0F) {
         return;
     }
+    _lodQualityScale = lodQualityScale;
     _node = node;
     initializeRenderer();
 }
@@ -75,11 +78,9 @@ void Landscape::initializeRenderer() {
         return;
     }
     auto quadtree = std::make_unique<Quadtree>();
-    if (!quadtree->init(*asset)) {
+    if (!quadtree->init(*asset, _lodQualityScale)) {
         return;
     }
-    const auto &data = asset->data();
-
     auto renderer = std::make_unique<LandscapeRenderer>();
     if (!renderer->init(_node.get(), _scene)) {
         return;
@@ -93,11 +94,14 @@ void Landscape::initializeRenderer() {
     renderer->setFreezeLod(_freezeLod);
     renderer->setDetailHeightEnabled(_detailHeightEnabled);
 
+#if CC_LANDSCAPE_DEBUG
+    const auto &data = asset->data();
     CC_LOG_INFO("[Landscape] LOD ranges:");
     for (uint32_t level = 0; level <= data.maxLevel; ++level) {
         CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
                     level, quadtree->lodMorphStart()[level], quadtree->lodMorphEnd()[level]);
     }
+#endif
 
     _asset = std::move(asset);
     _quadtree = std::move(quadtree);
@@ -109,7 +113,9 @@ void Landscape::onDisable() {
     _quadtree = nullptr;
     _asset = nullptr;
     _selected.clear();
+#if CC_LANDSCAPE_DEBUG
     _lastLodNodeCounts.clear();
+#endif
     _lastVisibilityDistanceWarning = false;
     _scene = nullptr;
     _node = nullptr;
@@ -152,7 +158,7 @@ void Landscape::update() {
                                                   origin, sectorX, sectorZ);
             visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
             for (const auto &node : local) {
-                const uint32_t scale = 1U << (data.maxLevel - node.level);
+                const uint32_t scale = computeNodesPerSide(data.maxLevel, node.level);
                 _selected.push_back(QuadNode{
                     node.level,
                     sectorX * scale + node.ix,
@@ -165,11 +171,17 @@ void Landscape::update() {
         }
     }
     if (visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
-        CC_LOG_WARNING("[Landscape] CDLOD granularity check: %s",
-                       visibilityDistanceWarning ? "visibility ranges are too small for a guaranteed transition"
-                                                 : "OK");
+        if (visibilityDistanceWarning) {
+            CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
+        }
+#if CC_LANDSCAPE_DEBUG
+        else {
+            CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
+        }
+#endif
         _lastVisibilityDistanceWarning = visibilityDistanceWarning;
     }
+#if CC_LANDSCAPE_DEBUG
     ccstd::vector<uint32_t> lodNodeCounts(data.maxLevel + 1U, 0U);
     for (const auto &node : _selected) {
         if (node.level <= data.maxLevel) {
@@ -196,6 +208,7 @@ void Landscape::update() {
                     totalNodeCount, totalTriangleCount);
         _lastLodNodeCounts = lodNodeCounts;
     }
+#endif
     _renderer->sync(_selected);
 }
 
@@ -270,14 +283,16 @@ void Landscape::drawDebugBounds() {
         {0.20F, 0.45F, 1.00F, 1.0F}, {1.0F, 0.90F, 0.10F, 1.0F},
         {1.0F, 0.15F, 0.90F, 1.0F}, {0.10F, 0.90F, 0.95F, 1.0F},
         {0.65F, 0.35F, 0.85F, 1.0F}, {0.95F, 0.55F, 0.20F, 1.0F},
+        {0.90F, 0.90F, 0.90F, 1.0F},
     };
+    static_assert(sizeof(colors) / sizeof(colors[0]) == config::MAX_LOD_LEVELS,
+                  "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
     const auto &data = _asset->data();
     const float halfWorldX = data.worldWidth() * 0.5F;
     const float halfWorldZ = data.worldDepth() * 0.5F;
     for (const auto &node : _selected) {
-        const float nodeSize = data.sectorSize /
-                               static_cast<float>(1U << (data.maxLevel - node.level));
+        const float nodeSize = computeNodeSize(data.sectorSize, data.maxLevel, node.level);
         const float quadrantSize = nodeSize * 0.5F;
         const float nodeX = static_cast<float>(node.ix) * nodeSize - halfWorldX;
         const float nodeZ = static_cast<float>(node.iz) * nodeSize - halfWorldZ;
@@ -297,7 +312,7 @@ void Landscape::drawDebugBounds() {
             };
             // Debug bounds must remain visible even where the terrain occludes or
             // shares an edge with the box. Sector seams below remain depth-tested.
-            geometry->addBoundingBox(box, colors[node.level % 8U], true, false, false, true, world);
+            geometry->addBoundingBox(box, colors[node.level], true, false, false, true, world);
         }
     }
 #endif

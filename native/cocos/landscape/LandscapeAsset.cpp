@@ -131,13 +131,8 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         return false;
     }
 
-    ccstd::vector<size_t> levelOffsets(static_cast<size_t>(parsed.maxLevel) + 1U, 0U);
-    size_t nodesPerSector = 0U;
-    for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
-        levelOffsets[level] = nodesPerSector;
-        const uint32_t side = 1U << (parsed.maxLevel - level);
-        nodesPerSector += static_cast<size_t>(side) * side;
-    }
+    ccstd::vector<size_t> levelOffsets;
+    const size_t nodesPerSector = computeSectorNodeLayout(parsed.maxLevel, levelOffsets);
     ccstd::vector<HeightRange> ranges(static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * nodesPerSector,
                                       HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
@@ -157,7 +152,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         }
         const auto &mins = range["min"];
         const auto &maxs = range["max"];
-        const uint32_t side = 1U << (parsed.maxLevel - level);
+        const uint32_t side = computeNodesPerSide(parsed.maxLevel, level);
         const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
         if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected) {
             CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
@@ -172,12 +167,8 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
                     CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
                     return false;
                 }
-                const uint32_t sectorX = globalX / side;
-                const uint32_t sectorZ = globalZ / side;
-                const uint32_t localX = globalX % side;
-                const uint32_t localZ = globalZ % side;
-                const size_t dst = static_cast<size_t>(sectorZ * parsed.sectorsX + sectorX) * nodesPerSector +
-                                   levelOffsets[level] + static_cast<size_t>(localZ) * side + localX;
+                const size_t dst = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
+                                                        level, globalX, globalZ);
                 ranges[dst] = HeightRange{
                     parsed.heightBias + mins[index].GetFloat() * scale,
                     parsed.heightBias + maxs[index].GetFloat() * scale,
@@ -295,14 +286,9 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
 }
 
 bool LandscapeAsset::decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
-                                    uint32_t resolution, uint32_t layerCount, TileData &tile) {
-    bool valid = loadTile(heightPath, gfx::Format::RG8, resolution, tile.height) &&
-                 loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat);
-    for (size_t i = 0; valid && i < tile.splat.size(); i += sizeof(uint16_t)) {
-        uint16_t packed = 0;
-        std::memcpy(&packed, tile.splat.data() + i, sizeof(packed));
-        valid = (packed & 31U) < layerCount && ((packed >> 5U) & 31U) < layerCount;
-    }
+                                    uint32_t resolution, TileData &tile) {
+    const bool valid = loadTile(heightPath, gfx::Format::RG8, resolution, tile.height) &&
+                       loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat);
     if (!valid) {
         CC_LOG_WARNING("[Landscape] failed to load height/splat pair: %s, %s",
                        heightPath.c_str(), splatPath.c_str());
@@ -324,7 +310,7 @@ bool LandscapeAsset::loadRootTile(uint32_t x, uint32_t z, TileData &tile) const 
     const ccstd::string directory = "nodes/L" + std::to_string(_data.maxLevel) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
     return decodeTilePair(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
-                          _data.tileResolution, static_cast<uint32_t>(_materialLayers.size()), tile);
+                          _data.tileResolution, tile);
 }
 
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
@@ -343,16 +329,15 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     const ccstd::string heightPath = resolveFile(directory + "h_" + suffix);
     const ccstd::string splatPath = resolveFile(directory + "s_" + suffix);
     const uint32_t resolution = _data.tileResolution;
-    const uint32_t layerCount = static_cast<uint32_t>(_materialLayers.size());
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, heightPath, splatPath, resolution, layerCount](int /*threadId*/) {
+        [async, key, heightPath, splatPath, resolution](int /*threadId*/) {
             if (async->cancelled.load()) {
                 return;
             }
             TileData tile;
             tile.key = key;
-            const bool valid = decodeTilePair(heightPath, splatPath, resolution, layerCount, tile);
+            const bool valid = decodeTilePair(heightPath, splatPath, resolution, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
             if (async->cancelled.load()) {
                 return;
@@ -395,29 +380,12 @@ bool LandscapeAsset::takeFailedTile(uint64_t &key) {
     return true;
 }
 
-size_t LandscapeAsset::rangeOffset(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
-    if (level > _data.maxLevel) {
-        return _heightRanges.size();
-    }
-    const uint32_t side = 1U << (_data.maxLevel - level);
-    const uint32_t globalSide = _data.sectorsX * side;
-    if (globalX >= globalSide || globalZ >= _data.sectorsZ * side) {
-        return _heightRanges.size();
-    }
-    const uint32_t sectorX = globalX / side;
-    const uint32_t sectorZ = globalZ / side;
-    const uint32_t localX = globalX % side;
-    const uint32_t localZ = globalZ % side;
-    return static_cast<size_t>(sectorZ * _data.sectorsX + sectorX) * _nodesPerSector +
-           _levelOffsets[level] + static_cast<size_t>(localZ) * side + localX;
-}
-
 bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                                     float &minY, float &maxY) const {
     if (!_data.valid() || level > _data.maxLevel) {
         return false;
     }
-    const size_t offset = rangeOffset(level, globalX, globalZ);
+    const size_t offset = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector, level, globalX, globalZ);
     if (offset >= _heightRanges.size()) {
         return false;
     }

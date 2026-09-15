@@ -29,6 +29,7 @@
 
 #include "base/Log.h"
 #include "landscape/LandscapeAsset.h"
+#include "landscape/LandscapeConfig.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDef.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -111,7 +112,9 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     for (uint32_t layer = _layerCount; layer > rootCount; --layer) {
         _freeLayers.push_back(layer - 1);
     }
+#if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] %zu root height/splat pages loaded and permanently resident", rootCount);
+#endif
     return true;
 }
 
@@ -210,7 +213,9 @@ void TilePagePool::touchLRU(uint64_t key) {
     }
     const auto it = _lruIter.find(key);
     if (it != _lruIter.end()) {
-        _lru.erase(it->second);
+        // Move the existing entry without allocating; its iterator stays valid.
+        _lru.splice(_lru.end(), _lru, it->second);
+        return;
     }
     _lru.push_back(key); // most-recently-used at the back
     _lruIter[key] = std::prev(_lru.end());

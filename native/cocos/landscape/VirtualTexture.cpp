@@ -105,15 +105,22 @@ int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &so
     auto found = _lookup.find(key);
     int slot = found != _lookup.end() ? static_cast<int>(found->second) : -1;
     if (slot < 0) {
+        int emptySlot = -1;
         uint64_t oldest = std::numeric_limits<uint64_t>::max();
         for (uint32_t i = 0; i < _pages.size(); ++i) {
             const auto &p = _pages[i];
-            if (!p.occupied) { slot = static_cast<int>(i); break; }
+            if (!p.occupied) {
+                if (emptySlot < 0) emptySlot = static_cast<int>(i);
+                continue;
+            }
             if (_requested.count(p.key) == 0 && p.lastUsed < oldest) {
                 oldest = p.lastUsed;
                 slot = static_cast<int>(i);
             }
         }
+        // Recycle the least recently used, unrequested page before growing into
+        // an unused slot. All pages requested this frame remain protected.
+        if (slot < 0) slot = emptySlot;
         if (slot < 0) {
             if (!_warnedFull) {
                 CC_LOG_WARNING("[Landscape] VT cache full; excess nodes use direct material shading");

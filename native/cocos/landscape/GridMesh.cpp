@@ -39,13 +39,13 @@ RenderingSubMesh *createGrid(gfx::Device *device, int n) {
     if (device == nullptr) return nullptr;
     const float step = 1.0F / static_cast<float>(n - 1);
 
-    // Vertices normalized to [0,1] x [0,1] on the XZ plane (y = 0).
+    // Store normalized XZ only; the shader reconstructs the height.
+    constexpr uint32_t POSITION_COMPONENTS = 2;
     ccstd::vector<float> verts;
-    verts.reserve(static_cast<size_t>(n) * n * 3);
+    verts.reserve(static_cast<size_t>(n) * n * POSITION_COMPONENTS);
     for (int z = 0; z < n; ++z) {
         for (int x = 0; x < n; ++x) {
             verts.push_back(static_cast<float>(x) * step);
-            verts.push_back(0.0F);
             verts.push_back(static_cast<float>(z) * step);
         }
     }
@@ -54,7 +54,7 @@ RenderingSubMesh *createGrid(gfx::Device *device, int n) {
         gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
         gfx::MemoryUsageBit::DEVICE,
         vbSize,
-        static_cast<uint32_t>(3 * sizeof(float)),
+        static_cast<uint32_t>(POSITION_COMPONENTS * sizeof(float)),
     });
     vertexBuffer->update(verts.data(), vbSize);
 
@@ -87,7 +87,7 @@ RenderingSubMesh *createGrid(gfx::Device *device, int n) {
     gfx::BufferList vertexBuffers;
     vertexBuffers.emplace_back(vertexBuffer);
     ccstd::vector<gfx::Attribute> attributes{
-        gfx::Attribute{gfx::ATTR_NAME_POSITION, gfx::Format::RGB32F},
+        gfx::Attribute{gfx::ATTR_NAME_POSITION, gfx::Format::RG32F},
     };
     auto *mesh = ccnew RenderingSubMesh(vertexBuffers, attributes, gfx::PrimitiveMode::TRIANGLE_LIST, indexBuffer);
     mesh->setSubMeshIdx(0);
