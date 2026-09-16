@@ -56,6 +56,19 @@ bool readFloat(const rapidjson::Value &object, const char *name, float &value) {
     return std::isfinite(value);
 }
 
+bool readPixelsPerMeter(const rapidjson::Value &object, uint32_t resolution, float &value) {
+    if (object.HasMember("pixelsPerMeter")) {
+        return readFloat(object, "pixelsPerMeter", value) && value > 0.0F;
+    }
+    // Preserve the appearance of manifests authored before density was in pixels/m.
+    float legacyScale = 0.1F;
+    if (object.HasMember("uvScale") && !readFloat(object, "uvScale", legacyScale)) {
+        return false;
+    }
+    value = legacyScale * static_cast<float>(resolution);
+    return std::isfinite(value) && value > 0.0F;
+}
+
 ccstd::string manifestPathFor(const ccstd::string &dataDir) {
     constexpr size_t SUFFIX_SIZE = sizeof(".lsmanifest") - 1U;
     if (dataDir.size() >= SUFFIX_SIZE && dataDir.compare(dataDir.size() - SUFFIX_SIZE, SUFFIX_SIZE, ".lsmanifest") == 0) {
@@ -205,6 +218,25 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         const auto it = files.find(logicalPath);
         return it == files.end() ? ccstd::string{} : it->second;
     };
+    GlobalColorMap globalColorMap;
+    if (document.HasMember("globalColorMap")) {
+        const auto &map = document["globalColorMap"];
+        if (!map.IsObject() || !map.HasMember("file") || !map["file"].IsString() ||
+            !readUnsigned(map, "resolution", globalColorMap.resolution) ||
+            globalColorMap.resolution == 0U || globalColorMap.resolution > 4096U ||
+            !readFloat(map, "strength", globalColorMap.strength) ||
+            globalColorMap.strength < 0.0F || globalColorMap.strength > 1.0F) {
+            CC_LOG_WARNING("[Landscape] invalid globalColorMap in '%s'", manifestPath.c_str());
+            return false;
+        }
+        globalColorMap.file = resolve(map["file"].GetString());
+        if (globalColorMap.file.empty()) {
+            CC_LOG_WARNING("[Landscape] global color map '%s' is missing from the imported file index in '%s'; "
+                           "using layer colors. Reload the landscape-assets extension, reimport the terrain and rebuild assets.",
+                           map["file"].GetString(), manifestPath.c_str());
+            globalColorMap = GlobalColorMap{};
+        }
+    }
     ccstd::vector<MaterialLayer> materialLayers;
     uint32_t materialResolution = 0U;
     if (document.HasMember("materialLibrary")) {
@@ -229,7 +261,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
                 !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
                 !readFloat(value, "detailHeightScale", layer.detailHeightScale) ||
                 !readFloat(value, "detailHeightBias", layer.detailHeightBias) ||
-                (value.HasMember("uvScale") && (!readFloat(value, "uvScale", layer.uvScale) || layer.uvScale <= 0.0F))) {
+                !readPixelsPerMeter(value, materialResolution, layer.pixelsPerMeter)) {
                 CC_LOG_WARNING("[Landscape] invalid material layer %u in '%s'", i, manifestPath.c_str());
                 return false;
             }
@@ -279,6 +311,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     _files = std::move(files);
     _materialLayers = std::move(materialLayers);
     _materialResolution = materialResolution;
+    _globalColorMap = std::move(globalColorMap);
     _levelOffsets = std::move(levelOffsets);
     _heightRanges = std::move(ranges);
     _nodesPerSector = nodesPerSector;

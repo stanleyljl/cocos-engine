@@ -95,10 +95,10 @@ RenderingSubMesh *createGrid(gfx::Device *device, int n) {
 }
 } // namespace
 
-RenderingSubMesh *GridMesh::create(gfx::Device *device) {
+RenderingSubMesh *GridMesh::create(gfx::Device *device, uint32_t cells) {
     static_assert((config::VERTS_PER_NODE_SIDE - 1) % 2 == 0,
                   "CDLOD quadrant mesh requires an even parent quad count");
-    return createGrid(device, (config::VERTS_PER_NODE_SIDE + 1) / 2);
+    return createGrid(device, static_cast<int>(cells + 1U));
 }
 
 RenderingSubMesh *GridMesh::createVTQuad(gfx::Device *device) {

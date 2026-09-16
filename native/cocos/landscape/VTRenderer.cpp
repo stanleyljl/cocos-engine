@@ -23,6 +23,9 @@
 ****************************************************************************/
 #include "landscape/VTRenderer.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "base/Log.h"
 #include "core/assets/Material.h"
 #include "core/assets/RenderingSubMesh.h"
@@ -31,6 +34,7 @@
 #include "landscape/LandscapeConfig.h"
 #include "landscape/MaterialLibrary.h"
 #include "landscape/TilePagePool.h"
+#include "landscape/VTPaging.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -69,7 +73,8 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     auto *pass = _material->getPasses()->front().get();
     if (pass->getHandle("sourceParams") == 0U || pass->getHandle("vtLayout") == 0U ||
         pass->getHandle("splatmap") == 0U || pass->getHandle("albedoHeightMap") == 0U ||
-        pass->getHandle("normalRoughnessAOMap") == 0U || pass->getHandle("tilingParams") == 0U) {
+        pass->getHandle("normalRoughnessAOMap") == 0U || pass->getHandle("tilingParams") == 0U ||
+        pass->getHandle("globalColorMap") == 0U || pass->getHandle("globalColorParams") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -82,6 +87,11 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     bind("splatmap", tiles.splatArray(), tiles.splatSampler());
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
+    bind("globalColorMap", materials.globalColorMap(), materials.globalColorSampler());
+    _hasGlobalColorMap = materials.hasGlobalColorMap();
+    _globalColorParams = Vec4{1.0F / data.worldWidth(),
+        1.0F / data.worldDepth(), materials.globalColorStrength(), 0.0F};
+    _material->setPropertyVec4("globalColorParams", _globalColorParams);
     _material->setPropertyVec4Array("tilingParams", materials.tilingParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
         static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
@@ -127,8 +137,8 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     // frame, before any terrain draw is submitted on the same graphics queue.
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            const uint64_t key = makeNodeKey(data.maxLevel, x, z);
-            const int layer = tiles.peekResident(key);
+            const uint64_t key = makeNodeKey(vtRootLevel(data.sectorSize), x, z);
+            const int layer = tiles.peekResident(makeNodeKey(data.maxLevel, x, z));
             const Vec4 region{static_cast<float>(x) * data.sectorSize - data.worldWidth() * 0.5F,
                               static_cast<float>(z) * data.sectorSize - data.worldDepth() * 0.5F,
                               data.sectorSize, 0.0F};
@@ -153,15 +163,37 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     return true;
 }
 
+void VTRenderer::setGlobalColorStrength(float strength) {
+    if (!_material || !std::isfinite(strength)) return;
+    const float effectiveStrength = _hasGlobalColorMap ? std::clamp(strength, 0.0F, 1.0F) : 0.0F;
+    if (_globalColorParams.z == effectiveStrength) return;
+    _globalColorParams.z = effectiveStrength;
+    _material->setPropertyVec4("globalColorParams", _globalColorParams);
+    // Preserve the cached image while frozen; apply edits when updates resume.
+    if (_frozen) {
+        _pendingInvalidation = true;
+    } else {
+        _texture.invalidate();
+    }
+}
+
+void VTRenderer::setFrozen(bool frozen) {
+    _frozen = frozen;
+    if (!frozen && _pendingInvalidation) {
+        _texture.invalidate();
+        _pendingInvalidation = false;
+    }
+}
+
 bool VTRenderer::valid() const {
     return _texture.valid() && _pipelineState && _commands;
 }
 
 void VTRenderer::render() {
-    if (!valid()) return;
-    // No update budget here: all requested dirty pages and permanent roots must
-    // finish this submission before the Base Pass. Fine pages become eligible
-    // for selection on the next update; roots also bootstrap the first frame.
+    if (_frozen || !valid()) return;
+    // The residency layer budgets fine updates and always includes dirty roots.
+    // Fine pages become eligible for selection after this submission; roots
+    // also bootstrap the first frame before any Base Pass can sample them.
     _texture.collectDirtyPages(_dirtySlots);
     if (_dirtySlots.empty()) return;
     _instanceData.clear();
@@ -196,6 +228,10 @@ void VTRenderer::render() {
 }
 
 void VTRenderer::destroy() {
+    _frozen = false;
+    _pendingInvalidation = false;
+    _hasGlobalColorMap = false;
+    _globalColorParams = Vec4{};
     if (_subscribed && Root::getInstance()) Root::getInstance()->off(_beforeRender);
     _subscribed = false;
     _commands = nullptr;

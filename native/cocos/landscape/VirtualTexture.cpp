@@ -24,6 +24,7 @@
 #include "landscape/VirtualTexture.h"
 
 #include <limits>
+#include <algorithm>
 #include "base/Log.h"
 #include "core/assets/RenderTexture.h"
 #include "landscape/LandscapeConfig.h"
@@ -110,7 +111,7 @@ int VirtualTexture::findReadyPage(uint64_t key) const {
     return slot >= 0 && !_pages[slot].dirty ? slot : -1;
 }
 
-int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent) {
+int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent, float priority) {
     if (!valid()) return -1;
     _requested.insert(key);
     auto found = _lookup.find(key);
@@ -148,6 +149,7 @@ int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &so
     }
     auto &p = _pages[slot];
     p.permanent |= permanent;
+    p.priority = priority;
     p.dirty |= !same(p.region, region) || !same(p.source, source);
     p.region = region;
     p.source = source;
@@ -164,6 +166,17 @@ void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
         // recycled. Only roots or pages with a freshly resolved source can bake.
         if (p.occupied && p.dirty && (p.permanent || _updates.count(p.key) != 0)) slots.push_back(i);
     }
+    std::sort(slots.begin(), slots.end(), [this](uint32_t a, uint32_t b) {
+        const auto &pa = _pages[a];
+        const auto &pb = _pages[b];
+        if (pa.permanent != pb.permanent) return pa.permanent;
+        return pa.priority != pb.priority ? pa.priority > pb.priority : pa.key < pb.key;
+    });
+    const size_t roots = static_cast<size_t>(std::count_if(slots.begin(), slots.end(),
+        [this](uint32_t slot) { return _pages[slot].permanent; }));
+    // Roots bootstrap the first frame and invalidation. Fine pages only become
+    // sampleable after composition, so deferring them cannot expose empty data.
+    if (slots.size() > roots + config::VT_PAGE_UPDATE_BUDGET) slots.resize(roots + config::VT_PAGE_UPDATE_BUDGET);
 }
 void VirtualTexture::markRendered(const ccstd::vector<uint32_t> &slots) {
     for (uint32_t slot : slots) _pages[slot].dirty = false;

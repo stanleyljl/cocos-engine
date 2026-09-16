@@ -41,13 +41,14 @@ class RenderPass;
 namespace landscape {
 
 // Owns VT storage and residency only. No cameras, models, materials or draws.
-// A page caches a complete CDLOD node; quadrant instances share its mapping.
+// Pages use a material quadtree independent of the selected geometry LOD.
 class VirtualTexture {
 public:
     struct Page {
         uint64_t key{0};
         uint64_t lastUsed{0};
-        Vec4 region; // node-local XZ origin, size, unused
+        float priority{0.0F};
+        Vec4 region; // landscape-local XZ origin, size, unused
         Vec4 source; // source tile XZ origin, size, splat array layer
         bool occupied{false};
         bool dirty{true};
@@ -72,7 +73,8 @@ public:
     // Protect ALL requested keys before allocating anything, so selection order
     // cannot evict pages that another visible node requests later this frame.
     void beginFrame(const ccstd::vector<uint64_t> &keys);
-    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent = false);
+    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent = false, float priority = 0.0F);
+    bool requested(uint64_t key) const { return _requested.count(key) != 0; }
     int findPage(uint64_t key) const;
     int findReadyPage(uint64_t key) const;
     void collectDirtyPages(ccstd::vector<uint32_t> &slots) const;

@@ -48,13 +48,21 @@ public:
     gfx::Texture *albedoHeight() const { return _albedoHeight; }
     gfx::Texture *normalRoughnessAO() const { return _normalRoughnessAO; }
     gfx::Sampler *sampler() const { return _sampler; }
+    gfx::Texture *globalColorMap() const { return _globalColorMap; }
+    gfx::Sampler *globalColorSampler() const { return _globalColorSampler; }
+    float globalColorStrength() const { return _globalColorStrength; }
+    bool hasGlobalColorMap() const { return _hasGlobalColorMap; }
     // Shared shader layout, built once from the loaded material layers.
     const ccstd::vector<Vec4> &tilingParams() const { return _tilingParams; }
 
 private:
     IntrusivePtr<gfx::Texture> _albedoHeight;
     IntrusivePtr<gfx::Texture> _normalRoughnessAO;
+    IntrusivePtr<gfx::Texture> _globalColorMap;
     gfx::Sampler *_sampler{nullptr}; // cached by device
+    gfx::Sampler *_globalColorSampler{nullptr}; // cached by device
+    float _globalColorStrength{0.0F};
+    bool _hasGlobalColorMap{false};
     ccstd::vector<Vec4> _tilingParams;
 };
 

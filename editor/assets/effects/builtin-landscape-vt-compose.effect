@@ -16,9 +16,11 @@ CCEffect %{
         - blend: false
         - blend: false
       properties:
-        vtLayout: { value: [4096, 128, 4, 1] }
+        vtLayout: { value: [4224, 264, 4, 1] }
         sourceParams: { value: [129, 0, 0, 0] }
         tilingParams: { value: [0.1, 0, 0, 0] }
+        globalColorParams: { value: [1, 1, 0, 0] }
+        globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
         normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
@@ -28,7 +30,8 @@ CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
     vec4 sourceParams;
-    vec4 tilingParams[32];
+    vec4 tilingParams[32]; // repeats/m, linear mean albedo RGB
+    vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
   };
 }%
 
@@ -72,6 +75,7 @@ CCProgram vt-compose-fs %{
   uniform highp usampler2DArray splatmap;
   uniform sampler2DArray albedoHeightMap;
   uniform sampler2DArray normalRoughnessAOMap;
+  uniform sampler2D globalColorMap;
   in vec2 v_localXZ;
   flat in vec4 v_source;
   layout(location = 0) out vec4 albedoOut;
@@ -110,6 +114,7 @@ CCProgram vt-compose-fs %{
     vec2 uvDx = dFdx(uv);
     vec2 uvDy = dFdy(uv);
     vec3 albedo = vec3(0.0);
+    vec3 meanAlbedo = vec3(0.0);
     vec3 normal = vec3(0.0);
     float roughness = 0.0;
     float ao = 0.0;
@@ -121,10 +126,19 @@ CCProgram vt-compose-fs %{
         vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
         vec2 xy = nra.rg * 2.0 - 1.0;
         albedo += SRGBToLinear(ah.rgb) * weights[i];
+        meanAlbedo += tilingParams[layers[i]].yzw * weights[i];
         normal += normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0)))) * weights[i];
         roughness += nra.b * weights[i];
         ao += nra.a * weights[i];
       }
+    }
+    // Source image rows run along +Z, just like height/splat tiles. This map
+    // covers the whole landscape once, including all VT pages and their borders.
+    if (globalColorParams.z > 0.0) {
+      vec2 globalUV = v_localXZ * globalColorParams.xy + vec2(0.5);
+      vec3 globalColor = SRGBToLinear(texture(globalColorMap, globalUV).rgb);
+      vec3 detail = clamp(albedo / max(meanAlbedo, vec3(0.02)), vec3(0.25), vec3(4.0));
+      albedo = mix(albedo, globalColor * detail, globalColorParams.z);
     }
     // Color is stored in linear space; Base Pass must not apply SRGBToLinear.
     albedoOut = vec4(albedo, 1.0);

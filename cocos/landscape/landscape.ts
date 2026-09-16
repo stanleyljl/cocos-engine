@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin } from 'cc.decorator';
+import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin, range, slide, tooltip } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
 import { Asset } from '../asset/assets';
@@ -75,6 +75,9 @@ export class Landscape extends Component {
 
     @serializable
     private _lodQualityScale = 1.0;
+
+    @serializable
+    private _globalColorStrength = 0.1;
 
     @serializable
     private _wireframe = false;
@@ -249,6 +252,25 @@ export class Landscape extends Component {
         this._lodQualityScale = value;
     }
 
+    /** Blend the global map's broad colors with the tiled materials; overrides the manifest strength. */
+    @editable
+    @displayOrder(10)
+    @range([0, 1, 0.01])
+    @slide
+    @tooltip('全局颜色混合强度：0 使用原图层颜色，1 完全采用全局图的大范围颜色并保留材质细节。默认 0.1，以原图层颜色为主；不改变 tiling、法线或粗糙度。覆盖地形清单中的 strength。')
+    get globalColorStrength (): number {
+        return this._globalColorStrength;
+    }
+    set globalColorStrength (value: number) {
+        if (!Number.isFinite(value)) return;
+        const strength = Math.min(1, Math.max(0, value));
+        if (this._globalColorStrength === strength) return;
+        this._globalColorStrength = strength;
+        if (this._native) {
+            this._native.setGlobalColorStrength(strength);
+        }
+    }
+
     public onLoad (): void {
         if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
             this._native = new jsb.Landscape();
@@ -259,6 +281,7 @@ export class Landscape extends Component {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setFreezeLod(this._freezeLod);
+            this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);

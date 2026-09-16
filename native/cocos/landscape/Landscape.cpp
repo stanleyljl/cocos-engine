@@ -24,6 +24,7 @@
 
 #include "landscape/Landscape.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -91,6 +92,7 @@ void Landscape::initializeRenderer() {
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
     renderer->setDebugFlags(_lodColor, _showRanges);
     renderer->setUnlit(_unlit);
+    renderer->setGlobalColorStrength(_globalColorStrength);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
 
@@ -106,6 +108,12 @@ void Landscape::initializeRenderer() {
     _asset = std::move(asset);
     _quadtree = std::move(quadtree);
     _renderer = std::move(renderer);
+}
+
+void Landscape::setGlobalColorStrength(float strength) {
+    if (!std::isfinite(strength)) return;
+    _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
+    if (_renderer) _renderer->setGlobalColorStrength(_globalColorStrength);
 }
 
 void Landscape::onDisable() {
@@ -129,9 +137,8 @@ void Landscape::update() {
         return;
     }
     if (_freezeLod) {
-        return;
+        return; // Keep both geometry selection and VT residency unchanged.
     }
-
     auto *camera = pickMainCamera();
     if (camera == nullptr) {
         return;

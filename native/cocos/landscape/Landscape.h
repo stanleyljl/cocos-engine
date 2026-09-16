@@ -63,6 +63,7 @@ public:
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
     void setUnlit(bool enabled);
+    void setGlobalColorStrength(float strength);
     void setAssetPath(const ccstd::string &manifestPath);
 
     void drawDebugBounds();
@@ -81,6 +82,7 @@ private:
     bool _showRanges{false};
     bool _unlit{false};
     float _lodQualityScale{1.0F};
+    float _globalColorStrength{0.1F};
     ccstd::string _assetPath;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};

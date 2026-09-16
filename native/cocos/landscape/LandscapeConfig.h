@@ -55,10 +55,12 @@ constexpr uint32_t PAGE_UPLOAD_BUDGET = 8;
 // Retained for the material library and virtual texture implementation.
 constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
 
-constexpr uint32_t VT_ATLAS_SIZE = 4096;
-constexpr uint32_t VT_PAGE_RES = 128;
+// 256 usable texels + filtering gutters. Keep 16 x 16 physical slots.
+constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_PAGE_BORDER = 4;
-constexpr uint32_t VT_PAGE_INTERIOR = VT_PAGE_RES - 2 * VT_PAGE_BORDER;
+constexpr uint32_t VT_PAGE_RES = VT_PAGE_INTERIOR + 2 * VT_PAGE_BORDER;
+constexpr uint32_t VT_ATLAS_SIZE = VT_PAGE_RES * 16;
+constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 static_assert(VT_PAGE_RES > 2 * VT_PAGE_BORDER && VT_ATLAS_SIZE % VT_PAGE_RES == 0,

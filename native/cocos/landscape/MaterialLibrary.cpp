@@ -106,9 +106,10 @@ void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, c
     }
 }
 
-IntrusivePtr<gfx::Texture> createTexture(gfx::Device *device, uint32_t resolution, uint32_t layerCount) {
+IntrusivePtr<gfx::Texture> createTexture(gfx::Device *device, uint32_t resolution, uint32_t layerCount,
+                                       gfx::TextureType type = gfx::TextureType::TEX2D_ARRAY) {
     gfx::TextureInfo info;
-    info.type = gfx::TextureType::TEX2D_ARRAY;
+    info.type = type;
     info.layerCount = layerCount;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     // Match builtin-standard: RGBA8 sampling, followed by shader RGB decoding.
@@ -169,10 +170,47 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
             destroy();
             return false;
         }
+        // A layer's mean lets the global color replace its broad color while
+        // retaining the tiled texture's fine contrast.
+        double mean[3]{};
+        const size_t pixelCount = albedo.size() / 4U;
+        for (size_t pixel = 0U; pixel < pixelCount; ++pixel) {
+            for (size_t c = 0U; c < 3U; ++c) {
+                mean[c] += srgbToLinear(static_cast<float>(albedo[pixel * 4U + c]) / 255.0F);
+            }
+        }
         uploadTexture(device, _albedoHeight, resolution, layer.id, std::move(albedo), true);
         uploadTexture(device, _normalRoughnessAO, resolution, layer.id, std::move(normal), false);
-        _tilingParams[layer.id] = Vec4{layer.uvScale, 0.0F, 0.0F, 0.0F};
+        // The shader samples normalized UVs, so convert source pixels/m to repeats/m.
+        const float uvScale = std::min(layer.pixelsPerMeter, static_cast<float>(config::VT_PAGE_INTERIOR)) /
+                              static_cast<float>(resolution);
+        float shaderMean[3];
+        for (size_t c = 0U; c < 3U; ++c) {
+            // Mips encode the linear average as sRGB; common/color/gamma uses
+            // gamma * gamma when decoding. Match that shader convention here.
+            const float encodedMean = linearToSrgb(static_cast<float>(mean[c] / pixelCount));
+            shaderMean[c] = encodedMean * encodedMean;
+        }
+        _tilingParams[layer.id] = Vec4{uvScale, shaderMean[0], shaderMean[1], shaderMean[2]};
     }
+    const auto &global = asset.globalColorMap();
+    uint32_t globalResolution = 1U;
+    ccstd::vector<uint8_t> globalPixels{255, 255, 255, 255};
+    if (!global.file.empty()) {
+        if (decodeRGBA8(global.file, global.resolution, globalPixels)) {
+            globalResolution = global.resolution;
+            _globalColorStrength = global.strength;
+            _hasGlobalColorMap = true;
+        } else {
+            CC_LOG_WARNING("[Landscape] global color map '%s' could not be loaded; using layer colors", global.file.c_str());
+        }
+    }
+    _globalColorMap = createTexture(device, globalResolution, 1U, gfx::TextureType::TEX2D);
+    if (!_globalColorMap) {
+        destroy();
+        return false;
+    }
+    uploadTexture(device, _globalColorMap, globalResolution, 0U, std::move(globalPixels), true);
     gfx::SamplerInfo info;
     info.minFilter = gfx::Filter::LINEAR;
     info.magFilter = gfx::Filter::LINEAR;
@@ -180,6 +218,9 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     info.addressU = gfx::Address::WRAP;
     info.addressV = gfx::Address::WRAP;
     _sampler = device->getSampler(info);
+    info.addressU = gfx::Address::CLAMP;
+    info.addressV = gfx::Address::CLAMP;
+    _globalColorSampler = device->getSampler(info);
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] %u material layers: paired %ux%u RGBA8 arrays with mips",
                 count, resolution, resolution);
@@ -190,7 +231,11 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
 void MaterialLibrary::destroy() {
     _albedoHeight = nullptr;
     _normalRoughnessAO = nullptr;
+    _globalColorMap = nullptr;
     _sampler = nullptr;
+    _globalColorSampler = nullptr;
+    _globalColorStrength = 0.0F;
+    _hasGlobalColorMap = false;
     _tilingParams.clear();
 }
 

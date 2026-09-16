@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(LandscapeVTPagingTests LANGUAGES CXX)
+enable_testing()
+add_executable(landscape_vt_paging_test paging_test.cpp)
+target_compile_features(landscape_vt_paging_test PRIVATE cxx_std_17)
+target_include_directories(landscape_vt_paging_test PRIVATE ../../cocos)
+add_test(NAME landscape_vt_paging COMMAND landscape_vt_paging_test)

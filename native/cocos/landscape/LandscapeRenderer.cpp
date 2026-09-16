@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 
 #include "base/Log.h"
 #include "base/Macros.h"
@@ -92,10 +93,11 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     destroy();
     _node = node;
     _scene = scene;
-    _mesh = GridMesh::create(device);
+    for (uint32_t i = 0; i < _meshes.size(); ++i) _meshes[i] = GridMesh::create(device, 1U << i);
     _materialSolid = createLandscapeMaterial(false);
     _materialWire = createLandscapeMaterial(true);
-    if (_mesh == nullptr || _materialSolid == nullptr || _materialWire == nullptr) {
+    if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
+        _materialSolid == nullptr || _materialWire == nullptr) {
         destroy();
         return false;
     }
@@ -136,6 +138,7 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     _vtRenderer.reset();
     _asset = asset;
     _data = asset->data();
+    _vtRootLevel = vtRootLevel(_data.sectorSize);
     _heightSampleSpacing = computeNodeSize(_data.sectorSize, _data.maxLevel, _data.minTileLevel) /
                            static_cast<float>(_data.tileResolution - 1U);
     _tilePages = std::make_unique<TilePagePool>();
@@ -153,6 +156,7 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
         _vtRenderer.reset();
         return false;
     }
+    _vtRenderer->setFrozen(_freezeLod);
     // Resource initialization succeeded. Bind the textures once; subsequent
     // parameter updates do not change these textures or their samplers.
     auto &vt = _vtRenderer->texture();
@@ -176,13 +180,17 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     return true;
 }
 
+void LandscapeRenderer::setGlobalColorStrength(float strength) {
+    if (_vtRenderer) _vtRenderer->setGlobalColorStrength(strength);
+}
+
 void LandscapeRenderer::setDebugFlags(bool lodColor, bool showRanges) {
     _lodColor = lodColor;
     _showRanges = showRanges;
     updateMaterialProperties();
 }
 
-IntrusivePtr<scene::Model> LandscapeRenderer::createModel() {
+IntrusivePtr<scene::Model> LandscapeRenderer::createModel(uint32_t meshIndex) {
     if (Root::getInstance() == nullptr || _node == nullptr || _scene == nullptr) {
         return nullptr;
     }
@@ -193,7 +201,7 @@ IntrusivePtr<scene::Model> LandscapeRenderer::createModel() {
     }
     model->setNode(_node);
     model->setTransform(_node);
-    model->initSubModel(0, _mesh, _wireframe ? _materialWire.get() : _materialSolid.get());
+    model->initSubModel(0, _meshes[meshIndex], _wireframe ? _materialWire.get() : _materialSolid.get());
     model->setEnabled(false);
     _scene->addModel(model);
     return model;
@@ -258,16 +266,18 @@ void LandscapeRenderer::setInstanceAttribute(scene::Model *model, const char *na
     model->setInstancedAttribute(name, _instanceAttributeScratch);
 }
 
-void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
+void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &patch) {
     if (model == nullptr) {
         return;
     }
 
+    const auto &node = patch.node;
     const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, std::min(node.level, _data.maxLevel));
     const float x = static_cast<float>(node.ix) * nodeSize - _data.worldWidth() * 0.5F;
     const float z = static_cast<float>(node.iz) * nodeSize - _data.worldDepth() * 0.5F;
     setInstanceAttribute(model, "a_gridInst", Vec4{x, z, nodeSize, static_cast<float>(node.level)});
-    setInstanceAttribute(model, "a_quadrantInst", Vec4{static_cast<float>(quadrant), 0.0F, 0.0F, 0.0F});
+    setInstanceAttribute(model, "a_quadrantInst", Vec4{patch.x / 16.0F, patch.z / 16.0F,
+        static_cast<float>(1U << patch.meshIndex) / 16.0F, 0.0F});
 
     const TilePage tile = resolveTilePage(node);
     CC_ASSERTF(tile.layer >= 0,
@@ -285,30 +295,81 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const QuadNode &
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     setInstanceAttribute(model, "a_tileInst", tileParams);
-    const int vtSlot = resolveVTPage(node, Vec4{x, z, nodeSize, 0.0F}, tileParams);
+    const int vtSlot = resolveVTPage(patch.page);
     CC_ASSERTF(vtSlot >= 0, "[Landscape] missing permanent root VT page");
     const auto &vtRegion = _vtRenderer->texture().page(static_cast<uint32_t>(vtSlot)).region;
     // A fallback covers an ancestor's region, not the fine node's region.
     setInstanceAttribute(model, "a_vtInst", Vec4{vtRegion.x, vtRegion.y, vtRegion.z, static_cast<float>(vtSlot)});
 }
 
-int LandscapeRenderer::resolveVTPage(const QuadNode &node, const Vec4 &region, const Vec4 &source) {
+int LandscapeRenderer::resolveVTPage(VTPageAddress page) const {
     auto &vt = _vtRenderer->texture();
-    const int slot = vt.acquirePage(makeNodeKey(node), region, source);
-    if (slot >= 0 && !vt.page(static_cast<uint32_t>(slot)).dirty) return slot;
-
-    uint32_t x = node.ix;
-    uint32_t z = node.iz;
-    for (uint32_t level = node.level; level < _data.maxLevel;) {
-        ++level;
-        x >>= 1U;
-        z >>= 1U;
-        const int ancestor = vt.findReadyPage(makeNodeKey(level, x, z));
-        if (ancestor >= 0) return ancestor;
+    for (; page.level < _vtRootLevel; ++page.level, page.x >>= 1U, page.z >>= 1U) {
+        const int slot = vt.findReadyPage(makeNodeKey(page.level, page.x, page.z));
+        if (slot >= 0 && vt.requested(makeNodeKey(page.level, page.x, page.z))) return slot;
     }
     // Roots are pinned. On startup/invalidation their writes are guaranteed by
     // VTRenderer::render before the Base Pass; no unrendered fine page is sampled.
-    return vt.findPage(makeNodeKey(_data.maxLevel, x, z));
+    return vt.findPage(makeNodeKey(_vtRootLevel, page.x, page.z));
+}
+
+Vec4 LandscapeRenderer::tileParams(const TilePage &tile) const {
+    const float size = computeNodeSize(_data.sectorSize, _data.maxLevel, tile.level);
+    return Vec4{tile.x * size - _data.worldWidth() * 0.5F,
+                tile.z * size - _data.worldDepth() * 0.5F, size, static_cast<float>(tile.layer)};
+}
+
+LandscapeRenderer::TilePage LandscapeRenderer::resolveVTSource(const VTPageAddress &page) {
+    // A material page can be finer than every height/splat tile. Choose the
+    // containing source independently of the selected geometry node's LOD.
+    const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
+    uint32_t level = _data.minTileLevel;
+    while (level < _data.maxLevel && computeNodeSize(_data.sectorSize, _data.maxLevel, level) < size) ++level;
+    const float sourceSize = computeNodeSize(_data.sectorSize, _data.maxLevel, level);
+    return resolveTilePage(QuadNode{level, static_cast<uint32_t>((page.x + 0.5F) * size / sourceSize),
+                                   static_cast<uint32_t>((page.z + 0.5F) * size / sourceSize)});
+}
+
+float LandscapeRenderer::patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const {
+    // Match the translation-only terrain placement used by quadtree selection.
+    const Vec3 camera = (farthest ? _viewPosition : _vtViewPosition) - _node->getWorldPosition();
+    const auto axisDistance = [farthest](float p, float lo, float hi) {
+        return farthest ? std::max(std::abs(p - lo), std::abs(p - hi)) : std::max({lo - p, p - hi, 0.0F});
+    };
+    const float dx = axisDistance(camera.x, x, x + size);
+    const float dy = axisDistance(camera.y, node.minY, node.maxY);
+    const float dz = axisDistance(camera.z, z, z + size);
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
+                                      ccstd::vector<Patch> &patches) {
+    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
+    const float cellSize = nodeSize / 16.0F;
+    const uint32_t cells = 1U << meshIndex;
+    const float size = cells * cellSize;
+    const float minX = node.ix * nodeSize + x * cellSize;
+    const float minZ = node.iz * nodeSize + z * cellSize;
+    const float localX = minX - _data.worldWidth() * 0.5F;
+    const float localZ = minZ - _data.worldDepth() * 0.5F;
+    const float distance = patchDistance(node, localX, localZ, size, false);
+    const uint32_t desired = vtDesiredLevel(_data.sectorSize, _vtRootLevel, distance);
+    if (meshIndex > 0 && vtPageWorldSize(_data.sectorSize, _vtRootLevel, desired) < size) {
+        const uint32_t half = cells / 2U;
+        for (uint32_t q = 0; q < 4; ++q) {
+            selectPatches(node, x + (q & 1U) * half, z + (q >> 1U) * half, meshIndex - 1U, patches);
+        }
+        return;
+    }
+    // An odd boundary vertex slides toward the previous even vertex. A page
+    // must contain that entire trajectory, not just the unmorphed grid cell.
+    const bool canMorph = node.level < _morphStart.size() &&
+        patchDistance(node, localX, localZ, size, true) >= _morphStart[node.level];
+    const float safeMinX = minX - (canMorph ? (x & 1U) * cellSize : 0.0F);
+    const float safeMinZ = minZ - (canMorph ? (z & 1U) * cellSize : 0.0F);
+    const auto page = vtCoveringPage(_data.sectorSize, _vtRootLevel, desired,
+                                     safeMinX, safeMinZ, minX + size, minZ + size);
+    patches.push_back(Patch{node, x, z, meshIndex, page});
 }
 
 LandscapeRenderer::TilePage LandscapeRenderer::resolveTilePage(const QuadNode &node) {
@@ -332,16 +393,15 @@ LandscapeRenderer::TilePage LandscapeRenderer::resolveTilePage(const QuadNode &n
     return tile; // initialization guarantees a resident root for every sector
 }
 
-void LandscapeRenderer::updateModel(ModelState &state, const QuadNode &node, uint32_t quadrant) {
+void LandscapeRenderer::updateModel(ModelState &state, const Patch &patch) {
     auto *model = state.model.get();
-    updateInstanceData(model, node, quadrant);
-    state.node = node;
-    state.quadrant = quadrant;
+    updateInstanceData(model, patch);
+    state.patch = patch;
     model->setEnabled(true);
-    updateModelBounds(model, node, quadrant);
+    updateModelBounds(model, patch);
 }
 
-void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant) {
+void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patch) {
     if (_freezeLod) {
         // The frozen selection already passed the terrain frustum test. Models
         // without world bounds bypass both forward and custom pipeline culling.
@@ -354,91 +414,112 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
         return;
     }
 
-    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, std::min(node.level, _data.maxLevel));
-    const float quadrantSize = nodeSize * 0.5F;
-    const float x = static_cast<float>(node.ix) * nodeSize - _data.worldWidth() * 0.5F +
-                    static_cast<float>(quadrant & 1U) * quadrantSize;
-    const float z = static_cast<float>(node.iz) * nodeSize - _data.worldDepth() * 0.5F +
-                    static_cast<float>(quadrant >> 1U) * quadrantSize;
-
-    model->createBoundingShape(Vec3{x, node.minY, z},
-                                Vec3{x + quadrantSize, node.maxY, z + quadrantSize});
+    const auto &node = patch.node;
+    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
+    const float cellSize = nodeSize / 16.0F;
+    const float size = (1U << patch.meshIndex) * cellSize;
+    const float x = node.ix * nodeSize - _data.worldWidth() * 0.5F + patch.x * cellSize;
+    const float z = node.iz * nodeSize - _data.worldDepth() * 0.5F + patch.z * cellSize;
+    model->createBoundingShape(Vec3{x - (patch.x & 1U) * cellSize, node.minY, z - (patch.z & 1U) * cellSize},
+                                Vec3{x + size, node.maxY, z + size});
     model->updateWorldBound();
     model->updateOctree();
 }
 
 void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
-    if (!valid()) {
+    if (_freezeLod || !valid()) {
         return;
     }
 
-    ccstd::unordered_set<uint64_t> visible;
-    visible.reserve(selected.size() * 4U);
-    _tilePages->beginFrame();
-    // Mark all visible pages before uploading staged tiles so LRU eviction never
-    // removes a tile needed by the current view.
+    ccstd::vector<Patch> patches;
+    patches.reserve(selected.size() * 4U);
     for (const auto &node : selected) {
-        resolveTilePage(node);
-    }
-    _tilePages->update(config::PAGE_UPLOAD_BUDGET);
-    ccstd::vector<uint64_t> keys;
-    keys.reserve(selected.size() * (_data.maxLevel + 1U));
-    for (const auto &node : selected) {
-        uint32_t x = node.ix;
-        uint32_t z = node.iz;
-        // Protect every possible fallback before allocation starts, including
-        // ancestors that another selected node also updates this frame.
-        for (uint32_t level = node.level; level <= _data.maxLevel; ++level) {
-            keys.push_back(makeNodeKey(level, x, z));
-            x >>= 1U;
-            z >>= 1U;
-        }
-    }
-    _vtRenderer->texture().beginFrame(keys);
-    for (const auto &node : selected) {
-        for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
-            if ((node.quadrantMask & (1U << quadrant)) == 0U) {
-                continue;
-            }
-            const uint64_t key = makeQuadrantKey(node, quadrant);
-            visible.insert(key);
-            auto iter = _active.find(key);
-            if (iter == _active.end()) {
-                IntrusivePtr<scene::Model> model;
-                if (!_pool.empty()) {
-                    model = _pool.back();
-                    _pool.pop_back();
-                } else {
-                    model = createModel();
-                }
-                if (model == nullptr) {
-                    continue;
-                }
-                auto inserted = _active.emplace(key, ModelState{model, node, quadrant});
-                updateModel(inserted.first->second, node, quadrant);
-            } else {
-                auto &state = iter->second;
-                if (state.node.level != node.level ||
-                    state.node.ix != node.ix ||
-                    state.node.iz != node.iz ||
-                    state.node.minY != node.minY ||
-                    state.node.maxY != node.maxY ||
-                    state.quadrant != quadrant) {
-                    updateModel(state, node, quadrant);
-                } else {
-                    updateInstanceData(state.model, node, quadrant);
-                }
-            }
+        for (uint32_t q = 0; q < 4; ++q) {
+            if ((node.quadrantMask & (1U << q)) != 0) selectPatches(node, (q & 1U) * 8U, (q >> 1U) * 8U, 3U, patches);
         }
     }
 
+    struct Request { VTPageAddress page; float priority; uint64_t key; };
+    ccstd::unordered_map<uint64_t, Request> unique;
+    for (const auto &patch : patches) {
+        auto page = patch.page;
+        for (; page.level < _vtRootLevel; ++page.level, page.x >>= 1U, page.z >>= 1U) {
+            const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
+            const float distance = patchDistance(patch.node, page.x * size - _data.worldWidth() * 0.5F,
+                                                page.z * size - _data.worldDepth() * 0.5F, size, false);
+            const float priority = size / std::max(distance, 1.0F);
+            const uint64_t key = makeNodeKey(page.level, page.x, page.z);
+            auto inserted = unique.emplace(key, Request{page, priority, key});
+            inserted.first->second.priority = std::max(inserted.first->second.priority, priority);
+        }
+    }
+    ccstd::vector<Request> requests;
+    requests.reserve(unique.size());
+    for (const auto &entry : unique) requests.push_back(entry.second);
+    std::sort(requests.begin(), requests.end(), [](const Request &a, const Request &b) {
+        return a.priority != b.priority ? a.priority > b.priority : a.key < b.key;
+    });
+    // Bound the working set BEFORE protecting pages. Keeping all desired keys
+    // pinned would prevent near pages from replacing distant pages after moving.
+    const size_t capacity = config::VT_PAGE_COUNT - static_cast<size_t>(_data.sectorsX) * _data.sectorsZ;
+    if (requests.size() > capacity) requests.resize(capacity);
+    ccstd::vector<uint64_t> keys;
+    keys.reserve(requests.size());
+    for (const auto &request : requests) keys.push_back(request.key);
+    auto &vt = _vtRenderer->texture();
+    vt.beginFrame(keys);
+    _tilePages->beginFrame();
+    for (const auto &node : selected) resolveTilePage(node);
+    for (const auto &request : requests) resolveVTSource(request.page);
+    _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    for (const auto &request : requests) {
+        const auto &page = request.page;
+        const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
+        const Vec4 region{page.x * size - _data.worldWidth() * 0.5F,
+                          page.z * size - _data.worldDepth() * 0.5F, size, 0.0F};
+        vt.acquirePage(request.key, region, tileParams(resolveVTSource(page)), false, request.priority);
+    }
+
+    ccstd::unordered_set<uint64_t> visible;
+    visible.reserve(patches.size());
+    for (const auto &patch : patches) {
+        const uint64_t key = makeNodeKey(patch.node.level * 4U + patch.meshIndex,
+                                        patch.node.ix * 16U + patch.x, patch.node.iz * 16U + patch.z);
+        visible.insert(key);
+    }
+    // Retire old patches before creating replacements so zooming does not
+    // unnecessarily grow the model pools.
     for (auto iter = _active.begin(); iter != _active.end();) {
-        if (visible.find(iter->first) == visible.end()) {
+        if (visible.count(iter->first) == 0) {
             iter->second.model->setEnabled(false);
-            _pool.emplace_back(iter->second.model);
+            _pool[iter->second.patch.meshIndex].emplace_back(iter->second.model);
             iter = _active.erase(iter);
         } else {
             ++iter;
+        }
+    }
+    for (const auto &patch : patches) {
+        const uint64_t key = makeNodeKey(patch.node.level * 4U + patch.meshIndex,
+                                        patch.node.ix * 16U + patch.x, patch.node.iz * 16U + patch.z);
+        auto iter = _active.find(key);
+        if (iter == _active.end()) {
+            auto &pool = _pool[patch.meshIndex];
+            IntrusivePtr<scene::Model> model;
+            if (!pool.empty()) {
+                model = pool.back();
+                pool.pop_back();
+            } else {
+                model = createModel(patch.meshIndex);
+            }
+            if (model == nullptr) continue;
+            iter = _active.emplace(key, ModelState{model, patch}).first;
+            updateModel(iter->second, patch);
+        } else {
+            auto &state = iter->second;
+            const bool boundsChanged = state.patch.node.minY != patch.node.minY || state.patch.node.maxY != patch.node.maxY;
+            state.patch = patch;
+            updateInstanceData(state.model, patch);
+            if (boundsChanged) updateModelBounds(state.model, patch);
         }
     }
 }
@@ -448,9 +529,10 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
         return;
     }
     _freezeLod = frozen;
+    if (_vtRenderer) _vtRenderer->setFrozen(frozen);
     for (const auto &entry : _active) {
         const auto &state = entry.second;
-        updateModelBounds(state.model, state.node, state.quadrant);
+        updateModelBounds(state.model, state.patch);
     }
 }
 
@@ -459,16 +541,18 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         state.model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
-        updateInstanceData(state.model, state.node, state.quadrant);
+        updateInstanceData(state.model, state.patch);
     }
-    for (const auto &model : _pool) {
-        model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
+    for (const auto &pool : _pool) {
+        for (const auto &model : pool) model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
         // Inactive models get fresh instance data when reused. Do not request
         // height/VT pages here: doing so would pin invisible nodes in the caches.
     }
 }
 
 void LandscapeRenderer::setViewPos(const Vec3 &position) {
+    if (_freezeLod) return;
+    _vtViewPosition = position;
     if (_viewPosition.x == position.x &&
         _viewPosition.y == position.y &&
         _viewPosition.z == position.z) {
@@ -508,7 +592,7 @@ void LandscapeRenderer::setUnlit(bool enabled) {
 }
 
 bool LandscapeRenderer::valid() const {
-    return _scene != nullptr && _node != nullptr && _mesh != nullptr &&
+    return _scene != nullptr && _node != nullptr && _meshes[0] != nullptr &&
            _materialSolid != nullptr && _materialWire != nullptr &&
            _tilePages != nullptr && _tilePages->valid() && _asset != nullptr &&
            _materialLibrary != nullptr && _materialLibrary->valid() &&
@@ -529,11 +613,11 @@ void LandscapeRenderer::destroy() {
     for (const auto &entry : _active) {
         removeModel(entry.second.model);
     }
-    for (const auto &model : _pool) {
-        removeModel(model);
+    for (auto &pool : _pool) {
+        for (const auto &model : pool) removeModel(model);
+        pool.clear();
     }
     _active.clear();
-    _pool.clear();
     _instanceAttributeScratch = ccstd::monostate{};
     _vtRenderer.reset();
 
@@ -542,7 +626,7 @@ void LandscapeRenderer::destroy() {
     }
     _tilePages.reset();
     _asset = nullptr;
-    _mesh = nullptr;
+    for (auto &mesh : _meshes) mesh = nullptr;
     _materialSolid = nullptr;
     _materialWire = nullptr;
     _materialLibrary.reset();

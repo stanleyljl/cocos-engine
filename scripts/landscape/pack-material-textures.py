@@ -23,6 +23,33 @@ from PIL import Image
 import png
 
 
+def default_pixels_per_meter(name):
+    """Choose source texture density in pixels/m, with a highest preset of 512."""
+    # Fine grass/leaves repeat more often than broad rock formations. Numbered
+    # variants share their material type's density; authored values win below.
+    material_type = re.sub(r"_\d+$", "", name.lower())
+    return {
+        "rocky_trail": 128,
+        "grass_path": 256,
+        "rocky_terrain": 64,
+        "gray_rocks": 32,
+        "rocks_ground": 128,
+        "concrete_rock_path": 256,
+        "coral_ground": 256,
+        "brown_mud_leaves": 512,
+    }.get(material_type, 128)
+
+
+def migrate_layer_density(layer, resolution):
+    """Convert legacy repeats/m using the original texture resolution."""
+    result = layer.copy()
+    if "pixelsPerMeter" not in result:
+        result["pixelsPerMeter"] = (result["uvScale"] * resolution if "uvScale" in result
+                                    else default_pixels_per_meter(result.get("name", "")))
+    result.pop("uvScale", None)
+    return result
+
+
 def decode(data, suffix, scratch):
     if suffix == ".exr":
         path = scratch / "source.exr"
@@ -104,7 +131,8 @@ def main():
         raise ValueError(f"Expected 1..32 material archives, got {len(archives)}")
     manifest_text = args.manifest.read_bytes().decode("utf-8")
     original = json.loads(manifest_text)
-    previous = {layer.get("name", Path(layer.get("file", "")).stem): layer
+    previous = {layer.get("name", Path(layer.get("file", "")).stem):
+                migrate_layer_density(layer, original["materialLibrary"]["resolution"])
                 for layer in original.get("materialLibrary", {}).get("layers", [])}
     previous_by_id = {layer["id"]: layer for layer in previous.values()}
     archive_names = []
@@ -187,7 +215,7 @@ def main():
             old = previous.get(name, {})
             library["layers"].append({"id": index, "name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
-                                      "uvScale": old.get("uvScale", previous_by_id.get(0, {}).get("uvScale", 0.1)),
+                                      "pixelsPerMeter": old.get("pixelsPerMeter", default_pixels_per_meter(name)),
                                       "detailHeightScale": old.get("detailHeightScale", 1.0),
                                       "detailHeightBias": old.get("detailHeightBias", 0.0)})
             report.append({"id": index, "name": name, "sourceArchive": archive.name,

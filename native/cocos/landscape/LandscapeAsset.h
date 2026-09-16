@@ -53,13 +53,20 @@ public:
         ccstd::string normalRoughnessAO;
         float detailHeightScale{1.0F};
         float detailHeightBias{0.0F};
-        float uvScale{0.1F}; // texture repeats per landscape-local meter
+        float pixelsPerMeter{128.0F}; // source texture pixels per landscape-local meter
     };
 
     struct TileData {
         uint64_t key{0};
         ccstd::vector<uint8_t> height;
         ccstd::vector<uint8_t> splat;
+    };
+
+    // One non-repeating, sRGB color map covering the complete landscape XZ extent.
+    struct GlobalColorMap {
+        ccstd::string file;
+        uint32_t resolution{0};
+        float strength{0.0F};
     };
 
     LandscapeAsset();
@@ -84,6 +91,7 @@ public:
     bool valid() const { return _data.valid(); }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
+    const GlobalColorMap &globalColorMap() const { return _globalColorMap; }
 
 private:
     struct AsyncState {
@@ -108,6 +116,7 @@ private:
     LandscapeData _data;
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
+    GlobalColorMap _globalColorMap;
     ccstd::vector<size_t> _levelOffsets;
     ccstd::vector<HeightRange> _heightRanges;
     size_t _nodesPerSector{0U};

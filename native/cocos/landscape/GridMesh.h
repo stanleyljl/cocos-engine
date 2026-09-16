@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace cc {
 
 class RenderingSubMesh;
@@ -34,15 +36,15 @@ class Device;
 namespace landscape {
 
 /**
- * Builder for the shared half-size grid used by every quadrant instance.
- * The shader maps its normalized [0,1] coordinates back into one quadrant of
- * the parent CDLOD node before applying morph.
+ * Shared grids with 1, 2, 4 or 8 cells per side. Material-page patches retain
+ * the original CDLOD cell spacing and triangles while batching by grid size.
+ * The shader restores parent-node coordinates before applying morph.
  */
 class GridMesh {
 public:
     // Creates the shared grid RenderingSubMesh (RG32F XZ position, triangle list).
     // Returns a new object; the caller takes ownership (e.g. via IntrusivePtr).
-    static RenderingSubMesh *create(gfx::Device *device);
+    static RenderingSubMesh *create(gfx::Device *device, uint32_t cells = 8);
     // An RG32F [0,1] XZ quad (4 vertices, 6 indices) for VT page rendering.
     static RenderingSubMesh *createVTQuad(gfx::Device *device);
 };

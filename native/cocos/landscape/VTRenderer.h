@@ -49,6 +49,8 @@ public:
     const VirtualTexture &texture() const { return _texture; }
     bool valid() const;
     void render();
+    void setFrozen(bool frozen);
+    void setGlobalColorStrength(float strength);
 
 private:
     VirtualTexture _texture;
@@ -64,6 +66,10 @@ private:
     Root::BeforeRender::EventID _beforeRender;
     bool _subscribed{false};
     bool _needsClear{true};
+    bool _frozen{false};
+    bool _pendingInvalidation{false};
+    bool _hasGlobalColorMap{false};
+    Vec4 _globalColorParams;
 };
 } // namespace landscape
 } // namespace cc

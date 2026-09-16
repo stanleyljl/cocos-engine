@@ -10,7 +10,7 @@ CCEffect %{
         terrainParams: { value: [3000, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
-        vtLayout: { value: [4096, 128, 4, 0] }
+        vtLayout: { value: [4224, 264, 4, 0] }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -72,7 +72,7 @@ CCProgram landscape-macros %{
 CCProgram landscape-vertex %{
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_quadrantInst; // x = 0 TL, 1 TR, 2 BL, 3 BR
+    in vec4 a_quadrantInst; // parent UV offset XY, patch UV size Z
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
     in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
   #endif
@@ -109,9 +109,7 @@ CCProgram landscape-vertex %{
     #endif
   #endif
   #if USE_INSTANCING
-    float quadrant = a_quadrantInst.x;
-    vec2 quadrantOffset = vec2(mod(quadrant, 2.0), floor(quadrant * 0.5)) * 0.5;
-    vec2 parentUV = quadrantOffset + In.position.xy * 0.5;
+    vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     v_lod = a_gridInst.w;
     // Evaluate LOD on the base terrain before morphing the grid.

@@ -25,6 +25,7 @@
 #pragma once
 
 #include <memory>
+#include <array>
 
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
@@ -32,6 +33,7 @@
 #include "core/TypedArray.h"
 #include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeAsset.h"
+#include "landscape/VTPaging.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
 #include "scene/Model.h"
@@ -59,8 +61,8 @@ class VTRenderer;
 
 /**
  * The quadtree owns visibility and LOD selection. This class only turns the
- * selected node quadrants into Cocos models and supplies the per-quadrant instance data
- * consumed by builtin-landscape.effect.
+ * selected node quadrants into material-page patches without adding triangles.
+ * Four shared grids batch patches while VT residency follows its own hierarchy.
  */
 class LandscapeRenderer {
 public:
@@ -78,6 +80,7 @@ public:
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
     void setUnlit(bool enabled);
+    void setGlobalColorStrength(float strength);
     void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
@@ -90,25 +93,37 @@ private:
         int layer{-1};
     };
 
-    struct ModelState {
-        IntrusivePtr<scene::Model> model;
+    struct Patch {
         QuadNode node;
-        uint32_t quadrant{0U};
+        uint32_t x{0}; // cell offset inside the original 16 x 16 node
+        uint32_t z{0};
+        uint32_t meshIndex{0}; // 1, 2, 4 or 8 cells per side
+        VTPageAddress page;
     };
 
-    IntrusivePtr<scene::Model> createModel();
+    struct ModelState {
+        IntrusivePtr<scene::Model> model;
+        Patch patch;
+    };
+
+    IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
     void updateMaterialProperties();
     void updateMorphCameraProperty();
     void setInstanceAttribute(scene::Model *model, const char *name, const Vec4 &value);
-    void updateInstanceData(scene::Model *model, const QuadNode &node, uint32_t quadrant);
-    void updateModel(ModelState &state, const QuadNode &node, uint32_t quadrant);
-    void updateModelBounds(scene::Model *model, const QuadNode &node, uint32_t quadrant);
+    void updateInstanceData(scene::Model *model, const Patch &patch);
+    void updateModel(ModelState &state, const Patch &patch);
+    void updateModelBounds(scene::Model *model, const Patch &patch);
+    void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
+                       ccstd::vector<Patch> &patches);
+    float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
     TilePage resolveTilePage(const QuadNode &node);
-    int resolveVTPage(const QuadNode &node, const Vec4 &region, const Vec4 &source);
+    TilePage resolveVTSource(const VTPageAddress &page);
+    Vec4 tileParams(const TilePage &tile) const;
+    int resolveVTPage(VTPageAddress page) const;
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
-    IntrusivePtr<RenderingSubMesh> _mesh;
+    std::array<IntrusivePtr<RenderingSubMesh>, 4> _meshes;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
     IntrusivePtr<LandscapeAsset> _asset;
@@ -117,7 +132,8 @@ private:
     std::unique_ptr<VTRenderer> _vtRenderer;
 
     ccstd::unordered_map<uint64_t, ModelState> _active;
-    ccstd::vector<IntrusivePtr<scene::Model>> _pool;
+    std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
+    uint32_t _vtRootLevel{0};
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
     // Float32Array-to-TypedArray copies when setting instance attributes.
@@ -126,6 +142,7 @@ private:
     LandscapeData _data;
     float _heightSampleSpacing{1.0F};
     Vec3 _viewPosition;
+    Vec3 _vtViewPosition;
     ccstd::vector<float> _morphStart;
     ccstd::vector<float> _morphEnd;
     bool _lodColor{false};

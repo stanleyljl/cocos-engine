@@ -9,6 +9,15 @@
 - Only modify code and ensure it compiles.
 - Do not automatically commit or push code unless the user explicitly requests it.
 
+# Required reminders after changes
+
+- After changing engine TypeScript code, explicitly remind the user to restart the editor.
+- After changing Effects or project TypeScript code, explicitly remind the user to rebuild the project.
+- After changing C++ code, explicitly remind the user to recompile the native code.
+- After changing editor extension or importer code, explicitly remind the user to restart the editor and reimport affected assets when necessary. The editor may retain the old importer in memory until restarted.
+- When multiple change types are involved, list all required steps in execution order: restart the editor, reimport affected assets when necessary, rebuild the project, then recompile native code.
+- Include the applicable reminders in the final response, stating which steps have already been completed and which remain for the user.
+
 # Progress communication
 
 - Before starting tool-assisted work, briefly tell the user what you will investigate or change.
