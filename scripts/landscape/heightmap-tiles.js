@@ -505,6 +505,7 @@ function generate (rawOptions) {
         bounds,
     });
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));
+    require('./normalmap-tiles').generateNormalTiles(manifestPath, assetDir);
     console.log(`Wrote ${totalTiles} height tiles to ${assetDir}`);
     console.log(`Manifest: ${manifestPath}`);
 }

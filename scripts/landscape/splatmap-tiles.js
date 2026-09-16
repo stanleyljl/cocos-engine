@@ -51,6 +51,44 @@ function noise (x, z, scale, seed) {
         mix(hash(ix, iz + 1), hash(ix + 1, iz + 1), tx), tz) * 2 - 1;
 }
 
+function classifySplat (x, z, elevation, slope, seed, regional) {
+    // World-locked variation: all tiles and pyramid levels sample one field.
+    // Keep local features at >=32m so the demo's 16m coarse samples can still
+    // represent them; this does not alter the material textures' UV scale.
+    const local = noise(x, z, 64, seed ^ 0x165667b1) * 0.30
+        + noise(x, z, 32, seed ^ 0x85ebca6b) * 0.18;
+    const variation = noise(x, z, 320, seed) * 0.9
+        + noise(x, z, 96, seed ^ 0x5bd1e995) * 0.45 + local;
+    const ground = clamp(elevation * 11 + variation, 0, 11);
+    const rock = clamp(8.5 + 2.5 * elevation + variation * 0.4, 8, 11);
+    // Avoid broad pure-material plateaus where the altitude sequence saturates.
+    const layer = clamp(mix(ground, Math.max(ground, rock), smooth(25, 55, slope)), 0.15, 10.85);
+    let lower = Math.floor(layer), upper = lower + 1;
+    const centered = (layer - lower) * 2 - 1;
+    // Spend more of each band mixing both layers, but still reach exactly 0/1
+    // at integer crossings so adjacent material pairs meet continuously.
+    let blend = 0.5 + 0.5 * centered * Math.abs(centered);
+    if (regional) {
+        const region = noise(x, z, 220, seed ^ 0x27d4eb2d);
+        const mud = smooth(0.05, 0.5, region) * (1 - smooth(0.4, 0.65, elevation))
+            * (1 - smooth(12, 32, slope));
+        const debris = smooth(0.1, 0.55, -region) * smooth(0.15, 0.3, elevation)
+            * (1 - smooth(0.6, 0.8, elevation)) * (1 - smooth(20, 40, slope));
+        // Even inside a fully covered region, retain soil/gravel underneath.
+        // The strongest-two reduction below can amplify the overlay weight:
+        // capping it at .72 keeps >=16% substrate after renormalization.
+        const strength = mix(0.52, 0.72, noise(x, z, 32, seed ^ 0xc2b2ae35) * 0.5 + 0.5);
+        const overlay = Math.max(mud, debris) * strength;
+        const a = (1 - blend) * (1 - overlay), b = blend * (1 - overlay);
+        if (overlay > Math.min(a, b)) {
+            if (b > a) lower = upper;
+            upper = mud >= debris ? 14 : 13;
+            blend = overlay / (Math.max(a, b) + overlay);
+        }
+    }
+    return lower | (upper << 5) | (Math.round(blend * 63) << 10);
+}
+
 function stringifyManifest (manifest) {
     // Keep the existing large height-bound arrays compact, without modifying them.
     const arrays = [];
@@ -133,6 +171,7 @@ function main () {
     console.log(`Reconstructed ${width}x${depth} height samples, spacing ${spacing}m; borders verified`);
     const splats = new Uint16Array(heights.length);
     const coverage = new Float64Array(materialLayers.length);
+    let pureSamples = 0, nearPureSamples = 0;
     const radius = Math.max(1, Math.round(4 / spacing));
     const metersPerUnit = heightScale / 65535;
     for (let z = 0; z < depth; ++z) {
@@ -144,37 +183,13 @@ function main () {
             const dz = (heights[z1 * width + x] - heights[z0 * width + x]) * metersPerUnit / ((z1 - z0) * spacing);
             const slope = Math.atan(Math.hypot(dx, dz)) * 180 / Math.PI;
             const elevation = (heights[index] - minimum) / (maximum - minimum);
-            const variation = noise(x * spacing, z * spacing, 320, seed) * 0.9
-                + noise(x * spacing, z * spacing, 96, seed ^ 0x5bd1e995) * 0.45;
-            const ground = clamp(elevation * 11 + variation, 0, 11);
-            const rock = clamp(8.5 + 2.5 * elevation + variation * 0.4, 8, 11);
-            const layer = clamp(mix(ground, Math.max(ground, rock), smooth(25, 55, slope)), 0, 11);
-            // Adjacent ecological layers form a continuous material sequence:
-            // at an integer boundary the outgoing/incoming pair shares its full layer.
-            let lower = Math.floor(layer), upper = Math.min(11, lower + 1);
-            let blend = layer - lower;
-            if (regional) {
-                // Continuous regional mask: greener soil in low, gentle patches;
-                // pale weathered debris on other low/mid-elevation gentle slopes.
-                const region = noise(x * spacing, z * spacing, 220, seed ^ 0x27d4eb2d);
-                const mud = smooth(0.05, 0.5, region) * (1 - smooth(0.4, 0.65, elevation))
-                    * (1 - smooth(12, 32, slope));
-                const debris = smooth(0.1, 0.55, -region) * smooth(0.15, 0.3, elevation)
-                    * (1 - smooth(0.6, 0.8, elevation)) * (1 - smooth(20, 40, slope));
-                const overlay = Math.max(mud, debris);
-                const a = (1 - blend) * (1 - overlay), b = blend * (1 - overlay);
-                // Keep the strongest two contributions and renormalize, respecting
-                // the two-layer encoding even at a regional/altitude intersection.
-                if (overlay > Math.min(a, b)) {
-                    if (b > a) lower = upper;
-                    upper = mud >= debris ? 14 : 13;
-                    blend = overlay / (Math.max(a, b) + overlay);
-                }
-            }
-            const weight = Math.round(blend * 63);
-            splats[index] = lower | (upper << 5) | (weight << 10);
+            const packed = classifySplat(x * spacing, z * spacing, elevation, slope, seed, regional);
+            splats[index] = packed;
+            const lower = packed & 31, upper = (packed >>> 5) & 31, weight = packed >>> 10;
             coverage[lower] += 1 - weight / 63;
             coverage[upper] += weight / 63;
+            if (lower === upper || weight === 0 || weight === 63) ++pureSamples;
+            if (lower === upper || weight <= 6 || weight >= 57) ++nearPureSamples;
         }
         if (z % 1024 === 0) console.log(`Classified row ${z}/${depth}`);
     }
@@ -214,9 +229,12 @@ function main () {
     };
     fs.writeFileSync(path.join(output, path.basename(manifestPath)), stringifyManifest(manifest));
     const report = {
-        preset: regional ? 'demo-altitude-slope-regions-v2' : 'demo-altitude-slope-v1', seed, tiles: total, bytes, resolution, levels,
+        preset: regional ? 'demo-altitude-slope-regions-v3' : 'demo-altitude-slope-v2', seed, tiles: total, bytes, resolution, levels,
         heightRangeMeters: [heightBias + minimum * metersPerUnit, heightBias + maximum * metersPerUnit],
-        slopeRadiusMeters: radius * spacing, rockSlopeDegrees: [25, 55], noiseScalesMeters: [320, 96],
+        slopeRadiusMeters: radius * spacing, rockSlopeDegrees: [25, 55], noiseScalesMeters: [320, 96, 64, 32],
+        pureSamplePercent: pureSamples / splats.length * 100,
+        nearPureSamplePercent: nearPureSamples / splats.length * 100,
+        regionalStrengthRange: regional ? [0.52, 0.72] : null,
         excludedLayers: [12],
         regionalNoiseScaleMeters: regional ? 220 : null,
         weightedCoverage: materialLayers.map(({name, id}) => ({ id, name, percent: coverage[id] / splats.length * 100 })),
@@ -226,7 +244,10 @@ function main () {
     console.log(JSON.stringify(report, null, 2));
 }
 
-try { main(); } catch (error) {
-    console.error(`splatmap-tiles: ${error.message}`);
-    process.exitCode = 1;
+module.exports = { classifySplat };
+if (require.main === module) {
+    try { main(); } catch (error) {
+        console.error(`splatmap-tiles: ${error.message}`);
+        process.exitCode = 1;
+    }
 }

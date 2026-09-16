@@ -54,6 +54,14 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         CC_LOG_WARNING("[Landscape] page pool has %u layers but needs %zu permanent root pages", layerCount, rootCount);
         return false;
     }
+    // Check capabilities before createTexture reaches the validator assertion.
+    // Height and normal arrays both require linearly filtered RG8 sampling.
+    const auto filtered = gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER;
+    if (!hasAllFlags(device->getFormatFeatures(gfx::Format::RG8), filtered) ||
+        !hasAllFlags(device->getFormatFeatures(gfx::Format::R16UI), gfx::FormatFeature::SAMPLED_TEXTURE)) {
+        CC_LOG_ERROR("[Landscape] device requires filtered RG8 and sampled R16UI textures");
+        return false;
+    }
     destroy();
     _device = device;
     _asset = asset;
@@ -71,8 +79,10 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _heightArray = _device->createTexture(info);
     info.format = gfx::Format::R16UI;
     _splatArray = _device->createTexture(info);
+    info.format = gfx::Format::RG8;
+    _normalArray = _device->createTexture(info);
     if (!valid()) {
-        CC_LOG_WARNING("[Landscape] failed to create paired height/splat arrays");
+        CC_LOG_WARNING("[Landscape] failed to create height/splat/normal arrays");
         destroy();
         return false;
     }
@@ -92,19 +102,20 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     si.magFilter = gfx::Filter::POINT;
     _splatSampler = _device->getSampler(si);
 
-    // Fill the first layers with real root pairs before any model can render.
+    // Fill all three arrays with root data before any model can render.
     // Roots deliberately stay out of the LRU, even when outside the view.
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
             LandscapeAsset::TileData tile;
             if (!_asset->loadRootTile(x, z, tile)) {
-                CC_LOG_WARNING("[Landscape] cannot initialize root L%u (%u,%u)", data.maxLevel, x, z);
+                CC_LOG_WARNING("[Landscape] cannot initialize height/splat/normal root L%u (%u,%u)", data.maxLevel, x, z);
                 destroy();
                 return false;
             }
             const uint32_t layer = z * data.sectorsX + x;
             uploadLayer(_heightArray, layer, tile.height.data());
             uploadLayer(_splatArray, layer, tile.splat.data());
+            uploadLayer(_normalArray, layer, tile.normal.data());
             _resident[tile.key] = layer;
         }
     }
@@ -113,7 +124,7 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         _freeLayers.push_back(layer - 1);
     }
 #if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] %zu root height/splat pages loaded and permanently resident", rootCount);
+    CC_LOG_INFO("[Landscape] %zu root height/splat/normal pages resident; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
 #endif
     return true;
 }
@@ -200,7 +211,8 @@ void TilePagePool::update(uint32_t maxUploads) {
         }
         uploadLayer(_heightArray, static_cast<uint32_t>(layer), rt.height.data());
         uploadLayer(_splatArray, static_cast<uint32_t>(layer), rt.splat.data());
-        // Publish only after both textures occupy the same layer.
+        uploadLayer(_normalArray, static_cast<uint32_t>(layer), rt.normal.data());
+        // Publish only after all three textures occupy the same layer.
         _resident[rt.key] = static_cast<uint32_t>(layer);
         touchLRU(rt.key);
         ++done;
@@ -253,6 +265,7 @@ void TilePagePool::destroy() {
     _asset = nullptr;
     _heightArray = nullptr;
     _splatArray = nullptr;
+    _normalArray = nullptr;
     _heightSampler = nullptr;
     _splatSampler = nullptr;
     _device = nullptr;

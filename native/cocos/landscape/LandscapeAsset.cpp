@@ -306,6 +306,19 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         return false;
     }
 
+    if (!document.HasMember("normalMap") || !document["normalMap"].IsObject()) {
+        CC_LOG_WARNING("[Landscape] normalMap is required; regenerate normal PNG tiles, reimport and rebuild assets");
+        return false;
+    }
+    const auto &normalMap = document["normalMap"];
+    if (!matchesString(normalMap, "format", "RGB8") || !matchesString(normalMap, "fileFormat", "PNG") ||
+        !matchesString(normalMap, "space", "terrain-local") || !matchesString(normalMap, "upAxis", "Y") ||
+        !matchesString(normalMap, "path", "nodes/L{level}/n_{x}_{z}.png") ||
+        !matchesUint(normalMap, "resolution", parsed.tileResolution) ||
+        !matchesUint(normalMap, "minTileLevel", parsed.minTileLevel) || !matchesUint(normalMap, "maxTileLevel", parsed.maxLevel)) {
+        CC_LOG_WARNING("[Landscape] RGB8 normalMap must match the height tile layout");
+        return false;
+    }
     _data = parsed;
     _dataDir = assetDir;
     _files = std::move(files);
@@ -318,13 +331,25 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     return true;
 }
 
-bool LandscapeAsset::decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
+bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
                                     uint32_t resolution, TileData &tile) {
     const bool valid = loadTile(heightPath, gfx::Format::RG8, resolution, tile.height) &&
-                       loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat);
+                       loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat) &&
+                       loadTile(normalPath, gfx::Format::RGB8, resolution, tile.normal);
     if (!valid) {
-        CC_LOG_WARNING("[Landscape] failed to load height/splat pair: %s, %s",
-                       heightPath.c_str(), splatPath.c_str());
+        CC_LOG_WARNING("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
+                       heightPath.c_str(), splatPath.c_str(), normalPath.c_str());
+    } else {
+        // Disk PNGs retain RGB XYZ. Compact to RG XZ on the decoding worker,
+        // before upload; height-field normals always lie in the +Y hemisphere.
+        // Forward compaction is safe because each destination precedes the next
+        // unread RGB pixel. No extra allocation or per-frame conversion needed.
+        const size_t count = static_cast<size_t>(resolution) * resolution;
+        for (size_t i = 0; i < count; ++i) {
+            tile.normal[i * 2U] = tile.normal[i * 3U];
+            tile.normal[i * 2U + 1U] = tile.normal[i * 3U + 2U];
+        }
+        tile.normal.resize(count * 2U);
     }
     return valid;
 }
@@ -342,8 +367,8 @@ bool LandscapeAsset::loadRootTile(uint32_t x, uint32_t z, TileData &tile) const 
     tile.key = makeNodeKey(_data.maxLevel, x, z);
     const ccstd::string directory = "nodes/L" + std::to_string(_data.maxLevel) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    return decodeTilePair(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
-                          _data.tileResolution, tile);
+    return decodeTileSet(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
+                          resolveFile(directory + "n_" + suffix), _data.tileResolution, tile);
 }
 
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
@@ -359,18 +384,32 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     }
     const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    const ccstd::string heightPath = resolveFile(directory + "h_" + suffix);
-    const ccstd::string splatPath = resolveFile(directory + "s_" + suffix);
+    // Resolve search paths on the main thread: FileUtils' relative-path cache
+    // is not synchronized. Worker reads must take its absolute-path fast path,
+    // even for cache hits (another thread could insert/rehash the cache).
+    auto *fileUtils = FileUtils::getInstance();
+    const ccstd::string heightPath = fileUtils->fullPathForFilename(resolveFile(directory + "h_" + suffix));
+    const ccstd::string splatPath = fileUtils->fullPathForFilename(resolveFile(directory + "s_" + suffix));
+    const ccstd::string normalPath = fileUtils->fullPathForFilename(resolveFile(directory + "n_" + suffix));
+    if (heightPath.empty() || splatPath.empty() || normalPath.empty() ||
+        !fileUtils->isAbsolutePath(heightPath) || !fileUtils->isAbsolutePath(splatPath) || !fileUtils->isAbsolutePath(normalPath)) {
+        CC_LOG_WARNING("[Landscape] cannot resolve absolute paths for tile L%u/%u/%u", level, x, z);
+        // Preserve the asynchronous failure contract so the page cache can
+        // release the pending request without scheduling an unsafe file read.
+        std::lock_guard<std::mutex> lock(_async->mutex);
+        _async->failed.push_back(key);
+        return true;
+    }
     const uint32_t resolution = _data.tileResolution;
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, heightPath, splatPath, resolution](int /*threadId*/) {
+        [async, key, heightPath, splatPath, normalPath, resolution](int /*threadId*/) {
             if (async->cancelled.load()) {
                 return;
             }
             TileData tile;
             tile.key = key;
-            const bool valid = decodeTilePair(heightPath, splatPath, resolution, tile);
+            const bool valid = decodeTileSet(heightPath, splatPath, normalPath, resolution, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
             if (async->cancelled.load()) {
                 return;
@@ -429,7 +468,7 @@ bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t g
 
 bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,
                               uint32_t tileResolution, ccstd::vector<uint8_t> &data) {
-    if (format != gfx::Format::RG8 && format != gfx::Format::R16UI) {
+    if (format != gfx::Format::RG8 && format != gfx::Format::R16UI && format != gfx::Format::RGB8) {
         return false;
     }
     const Data file = FileUtils::getInstance()->getDataFromFile(path);
@@ -439,13 +478,13 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,
     IntrusivePtr<Image> image = ccnew Image();
     const bool packHeight = format == gfx::Format::RG8;
     if (!image->initWithImageData(file.getBytes(), file.getSize()) ||
-        image->getRenderFormat() != gfx::Format::R16UI ||
+        image->getRenderFormat() != (format == gfx::Format::RGB8 ? gfx::Format::RGB8 : gfx::Format::R16UI) ||
         static_cast<uint32_t>(image->getWidth()) != tileResolution ||
         static_cast<uint32_t>(image->getHeight()) != tileResolution) {
         return false;
     }
     const size_t sampleCount = static_cast<size_t>(tileResolution) * tileResolution;
-    const size_t sourceByteSize = sampleCount * sizeof(uint16_t);
+    const size_t sourceByteSize = sampleCount * (format == gfx::Format::RGB8 ? 3U : sizeof(uint16_t));
     if (image->getDataLen() != sourceByteSize) {
         return false;
     }

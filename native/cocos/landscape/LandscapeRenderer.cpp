@@ -173,6 +173,7 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
             }
         };
         setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
+        setRuntimeTexture("terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
         setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
@@ -295,6 +296,7 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &pat
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     setInstanceAttribute(model, "a_tileInst", tileParams);
+    setInstanceAttribute(model, "a_normalParentInst", this->tileParams(resolveNormalParent(node, tile)));
     const int vtSlot = resolveVTPage(patch.page);
     CC_ASSERTF(vtSlot >= 0, "[Landscape] missing permanent root VT page");
     const auto &vtRegion = _vtRenderer->texture().page(static_cast<uint32_t>(vtSlot)).region;
@@ -370,6 +372,13 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     const auto page = vtCoveringPage(_data.sectorSize, _vtRootLevel, desired,
                                      safeMinX, safeMinZ, minX + size, minZ + size);
     patches.push_back(Patch{node, x, z, meshIndex, page});
+}
+
+LandscapeRenderer::TilePage LandscapeRenderer::resolveNormalParent(const QuadNode &node, const TilePage &tile) {
+    // Finer geometry already shares the finest source normal map. A streaming
+    // fallback likewise must not morph towards an extra-coarse level again.
+    if (node.level != tile.level || node.level >= _data.maxLevel) return tile;
+    return resolveTilePage(QuadNode{node.level + 1U, node.ix >> 1U, node.iz >> 1U});
 }
 
 LandscapeRenderer::TilePage LandscapeRenderer::resolveTilePage(const QuadNode &node) {
@@ -469,7 +478,8 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     auto &vt = _vtRenderer->texture();
     vt.beginFrame(keys);
     _tilePages->beginFrame();
-    for (const auto &node : selected) resolveTilePage(node);
+    // Protect both current and parent normals before recycling any tile layer.
+    for (const auto &node : selected) resolveNormalParent(node, resolveTilePage(node));
     for (const auto &request : requests) resolveVTSource(request.page);
     _tilePages->update(config::PAGE_UPLOAD_BUDGET);
     for (const auto &request : requests) {

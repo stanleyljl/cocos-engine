@@ -60,6 +60,7 @@ public:
         uint64_t key{0};
         ccstd::vector<uint8_t> height;
         ccstd::vector<uint8_t> splat;
+        ccstd::vector<uint8_t> normal; // linear RG8 terrain-local XZ; shader reconstructs +Y
     };
 
     // One non-repeating, sRGB color map covering the complete landscape XZ extent.
@@ -73,16 +74,17 @@ public:
     ~LandscapeAsset() override;
 
     bool load(const ccstd::string &dataDir);
-    // Synchronously loads a sector root pair before terrain rendering starts.
+    // Synchronously loads sector root height/splat/normal tiles before rendering.
     bool loadRootTile(uint32_t x, uint32_t z, TileData &tile) const;
-    // Requests a height/splat pair as one job. Only complete pairs are made
-    // available through takeReadyTile() on the main thread.
+    // Call on the main thread: resolves absolute file paths before scheduling
+    // background I/O, bypassing FileUtils' unsynchronized relative-path cache.
+    // Only complete height/splat/normal sets are available through takeReadyTile().
     bool requestTile(uint32_t level, uint32_t x, uint32_t z);
     bool takeReadyTile(TileData &tile);
     bool takeFailedTile(uint64_t &key);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                         float &minY, float &maxY) const;
-    // Decodes uint16 PNG samples as RG8 heights or raw R16UI tile data.
+    // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
                          ccstd::vector<uint8_t> &data);
 
@@ -107,7 +109,7 @@ private:
     };
 
     void resetAsyncState();
-    static bool decodeTilePair(const ccstd::string &heightPath, const ccstd::string &splatPath,
+    static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
                                uint32_t resolution, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 

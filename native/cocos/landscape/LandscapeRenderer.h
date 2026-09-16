@@ -117,6 +117,7 @@ private:
                        ccstd::vector<Patch> &patches);
     float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
     TilePage resolveTilePage(const QuadNode &node);
+    TilePage resolveNormalParent(const QuadNode &node, const TilePage &tile);
     TilePage resolveVTSource(const VTPageAddress &page);
     Vec4 tileParams(const TilePage &tile) const;
     int resolveVTPage(VTPageAddress page) const;

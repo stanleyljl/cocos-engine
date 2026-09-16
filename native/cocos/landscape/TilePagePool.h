@@ -43,9 +43,9 @@ namespace landscape {
 class LandscapeAsset;
 
 /**
- * One LRU cache for paired height (RG8) and splat (R16UI) texture arrays.
- * A node has one request, readiness state and array layer for both textures.
- * Both uploads finish before residency is published; eviction replaces both.
+ * One LRU cache for height (RG8), splat (R16UI) and normal XZ (RG8) arrays.
+ * A node has one request, readiness state and array layer for all textures.
+ * All uploads finish before residency is published; eviction replaces all.
  * Sector roots are loaded during init and never enter the eviction LRU.
  * They remain resident until destroy, providing a real terrain fallback.
  */
@@ -56,7 +56,7 @@ public:
 
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount);
     void destroy();
-    inline bool valid() const { return _heightArray != nullptr && _splatArray != nullptr; }
+    inline bool valid() const { return _heightArray != nullptr && _splatArray != nullptr && _normalArray != nullptr; }
 
     // Marks the start of a frame: clears the "in use this frame" set that
     // protects visible tiles from LRU eviction.
@@ -75,6 +75,7 @@ public:
 
     inline gfx::Texture *heightArray() const { return _heightArray; }
     inline gfx::Texture *splatArray() const { return _splatArray; }
+    inline gfx::Texture *normalArray() const { return _normalArray; }
     inline gfx::Sampler *heightSampler() const { return _heightSampler; }
     inline gfx::Sampler *splatSampler() const { return _splatSampler; }
     inline uint32_t layerCount() const { return _layerCount; }
@@ -88,6 +89,7 @@ private:
     IntrusivePtr<LandscapeAsset> _asset;
     IntrusivePtr<gfx::Texture> _heightArray;
     IntrusivePtr<gfx::Texture> _splatArray;
+    IntrusivePtr<gfx::Texture> _normalArray;
     gfx::Sampler *_heightSampler{nullptr}; // cached by device
     gfx::Sampler *_splatSampler{nullptr};
     uint32_t _tileRes{129};

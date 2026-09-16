@@ -17,6 +17,7 @@ CCEffect %{
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.
         heightmap: { sampler: { minFilter: linear, magFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         lodMorph: { value: [0, 0, 0, 0] }
     - vert: landscape-vs
       frag: landscape-fs
@@ -55,7 +56,7 @@ CCProgram landscape-uniforms %{
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
     vec4 morphCameraPos;
-    vec4 heightParams; // height sample spacing (m), tile resolution
+    vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
@@ -74,23 +75,35 @@ CCProgram landscape-vertex %{
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
     in vec4 a_quadrantInst; // parent UV offset XY, patch UV size Z
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
+    in vec4 a_normalParentInst; // parent normal region XZ origin, size, array layer
     in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
   #endif
   #if __VERSION__ >= 300
     uniform sampler2DArray heightmap;
     flat out float v_lod;
     flat out vec4 v_vtParams;
+    out vec4 v_normalUV;
+    flat out vec2 v_normalLayers;
+    out float v_normalMorph;
   #else
     out float v_lod;
   #endif
 
-  float sampleHeight(vec2 localXZ) {
+  float sampleHeightRegion(vec2 localXZ, vec4 region) {
   #if __VERSION__ >= 300 && USE_INSTANCING
-    vec2 tileUv = (localXZ - a_tileInst.xy) / max(a_tileInst.z, 1e-6);
+    vec2 tileUv = (localXZ - region.xy) / max(region.z, 1e-6);
     float resolution = max(heightParams.y, 2.0);
     tileUv = tileUv * ((resolution - 1.0) / resolution) + 0.5 / resolution;
-    vec2 encoded = textureLod(heightmap, vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), a_tileInst.w), 0.0).rg;
+    vec2 encoded = textureLod(heightmap, vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), region.w), 0.0).rg;
     return dot(encoded, vec2(256.0, 1.0)) / 257.0 * terrainParams.x + terrainParams.y;
+  #else
+    return terrainParams.y;
+  #endif
+  }
+
+  float sampleHeight(vec2 localXZ) {
+  #if USE_INSTANCING
+    return sampleHeightRegion(localXZ, a_tileInst);
   #else
     return terrainParams.y;
   #endif
@@ -104,6 +117,9 @@ CCProgram landscape-vertex %{
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
+    v_normalUV = vec4(0.5);
+    v_normalLayers = vec2(0.0);
+    v_normalMorph = 0.0;
     #if USE_INSTANCING
       v_vtParams = a_vtInst;
     #endif
@@ -124,22 +140,28 @@ CCProgram landscape-vertex %{
       // instances preserves the original odd/even vertex phase exactly.
       vec2 odd = fract(parentUV * 16.0 * 0.5) * 2.0;
       localXZ -= odd * (a_gridInst.z / 16.0) * morph;
+      v_normalMorph = morph;
     #endif
   #endif
     float height = sampleHeight(localXZ);
+  #if __VERSION__ >= 300 && USE_INSTANCING
+    // Identical final world coordinates for geometry and both normal levels.
+    float resolution = max(heightParams.y, 2.0);
+    v_normalUV = vec4((localXZ - a_tileInst.xy) / a_tileInst.z,
+                     (localXZ - a_normalParentInst.xy) / a_normalParentInst.z);
+    v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
+    v_normalLayers = vec2(a_tileInst.w, a_normalParentInst.w);
+  #endif
     // Sample base terrain at the final morphed coordinate.
     return vec3(localXZ.x, height, localXZ.y);
   }
 
   #define CC_SURFACES_VERTEX_MODIFY_LOCAL_SHARED_DATA
   void SurfacesVertexModifyLocalSharedData(inout SurfacesStandardVertexIntermediate In) {
-    vec2 p = In.position.xz;
-    float stepSize = max(heightParams.x, 0.001);
-    float dx = (sampleHeight(p + vec2(stepSize, 0.0)) - sampleHeight(p - vec2(stepSize, 0.0))) / (2.0 * stepSize);
-    float dz = (sampleHeight(p + vec2(0.0, stepSize)) - sampleHeight(p - vec2(0.0, stepSize))) / (2.0 * stepSize);
-    In.normal = normalize(vec3(-dx, 1.0, -dz));
-    // OpenGL tangent normal: U along +X, V along -Z, B = cross(N, T).
-    In.tangent = vec4(normalize(vec3(1.0, dx, 0.0)), 1.0);
+    // Supply only the terrain coordinate frame; slopes come from RG8 normal
+    // maps per pixel, not from sparsely sampled, interpolated vertex normals.
+    In.normal = vec3(0.0, 1.0, 0.0);
+    In.tangent = vec4(1.0, 0.0, 0.0, 1.0);
   }
 
   #define CC_SURFACES_VERTEX_MODIFY_UV
@@ -153,6 +175,12 @@ CCProgram landscape-surface %{
     uniform sampler2D vtAlbedo;
     uniform sampler2D vtNormalRoughnessAO;
     flat in vec4 v_vtParams;
+    #if !LANDSCAPE_DEBUG_UNLIT
+      uniform sampler2DArray terrainNormalMap;
+      in vec4 v_normalUV;
+      flat in vec2 v_normalLayers;
+      in float v_normalMorph;
+    #endif
   #endif
   #if __VERSION__ >= 300
     flat in float v_lod;
@@ -182,6 +210,7 @@ CCProgram landscape-surface %{
     vec3 albedo = vec3(0.0);
   #if !LANDSCAPE_DEBUG_UNLIT
     vec3 detailNormal = vec3(0.0, 0.0, 1.0);
+    vec3 terrainNormal = vec3(0.0, 1.0, 0.0);
     float roughness = 1.0;
     float ao = 1.0;
   #endif
@@ -194,6 +223,14 @@ CCProgram landscape-surface %{
     vec2 atlasUV = (slot * vtLayout.y + vtLayout.z + nodeUV * (vtLayout.y - 2.0*vtLayout.z)) / vtLayout.x;
     albedo = texture(vtAlbedo, atlasUV).rgb;
     #if !LANDSCAPE_DEBUG_UNLIT
+    // StreamingCDLOD: sample current + parent normal maps, then use exactly
+    // the geometry morph factor. RG8 stores local XZ, never sRGB-decoded.
+    // As in the reference's two-channel normals, blend encoded components
+    // before reconstructing the positive vertical component.
+    vec2 fineNormal = texture(terrainNormalMap, vec3(v_normalUV.xy, v_normalLayers.x)).rg;
+    vec2 parentNormal = texture(terrainNormalMap, vec3(v_normalUV.zw, v_normalLayers.y)).rg;
+    vec2 terrainXZ = mix(fineNormal, parentNormal, v_normalMorph) * 2.0 - 1.0;
+    terrainNormal = normalize(vec3(terrainXZ.x, sqrt(max(1.0 - dot(terrainXZ, terrainXZ), 0.0)), terrainXZ.y));
     vec4 nra = texture(vtNormalRoughnessAO, atlasUV);
     vec2 xy = nra.rg * 2.0 - 1.0;
     detailNormal = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
@@ -206,7 +243,12 @@ CCProgram landscape-surface %{
     // Only RG carries the normal. B is roughness; A is linear AO.
     vec3 normal = normalize(FSInput_worldNormal);
     vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
-    surfaceData.worldNormal = normalize(CalculateNormalFromTangentSpace(detailNormal, 1.0,
+    vec3 terrainTangent = normalize(vec3(terrainNormal.y, -terrainNormal.x, 0.0));
+    vec3 terrainBitangent = cross(terrainNormal, terrainTangent);
+    vec3 localNormal = normalize(terrainTangent * detailNormal.x + terrainBitangent * detailNormal.y + terrainNormal * detailNormal.z);
+    // The surface frame is (+X, -Z, +Y); transform the composed local normal
+    // through it so node transforms retain the existing world-space behavior.
+    surfaceData.worldNormal = normalize(CalculateNormalFromTangentSpace(vec3(localNormal.x, -localNormal.z, localNormal.y), 1.0,
       normal, tangent, FSInput_mirrorNormal));
     surfaceData.roughness = roughness;
     surfaceData.ao = ao;
