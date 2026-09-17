@@ -11,8 +11,8 @@ CCEffect %{
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4224, 264, 4, 0] }
-        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
-        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
+        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
+        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.

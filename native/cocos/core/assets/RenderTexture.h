@@ -37,6 +37,8 @@ struct IRenderTextureCreateInfo {
     ccstd::optional<uint32_t> externalResLow;        // for vulkan vkImage/opengl es texture created from external
     ccstd::optional<uint32_t> externalResHigh;       // for vulkan vkImage created from external
     ccstd::optional<gfx::TextureFlags> externalFlag; // external texture type normal or oes
+    // Native render targets may populate a limited mip chain explicitly.
+    uint32_t colorMipLevels{1};
 };
 namespace scene {
 class RenderWindow;

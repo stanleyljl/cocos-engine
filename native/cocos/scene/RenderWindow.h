@@ -43,6 +43,7 @@ struct IRenderWindowInfo {
     ccstd::optional<uint32_t> externalResLow{0};                              // for vulkan vkImage/opengl es texture created from external
     ccstd::optional<uint32_t> externalResHigh{0};                             // for vulkan vkImage created from external
     ccstd::optional<gfx::TextureFlags> externalFlag{gfx::TextureFlags::NONE}; // external texture type normal or oes
+    uint32_t colorMipLevels{1};
 };
 
 /**
@@ -119,6 +120,8 @@ public:
      * @zh 帧缓冲对象。
      */
     inline gfx::Framebuffer *getFramebuffer() const { return _frameBuffer.get(); }
+    // Full sampling resource; framebuffer attachments may be mip-zero views.
+    inline gfx::Texture *getColorTexture(uint32_t index) const { return _colorTextures.at(index); }
 
     inline const ccstd::vector<IntrusivePtr<Camera>> &getCameras() const { return _cameras; }
 
@@ -167,6 +170,7 @@ private:
     IntrusivePtr<gfx::Framebuffer> _frameBuffer;
     ccstd::vector<IntrusivePtr<Camera>> _cameras;
     RefVector<gfx::Texture *> _colorTextures;
+    RefVector<gfx::Texture *> _colorAttachmentViews;
     uint32_t _renderWindowId{0};
     bool _isResized{true};
     ccstd::string _colorName;

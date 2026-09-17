@@ -93,6 +93,7 @@ bool RenderWindow::initialize(gfx::Device *device, IRenderWindowInfo &info) {
                                             colorAttachment.format,
                                             _width,
                                             _height};
+            textureInfo.levelCount = info.colorMipLevels;
             if (info.externalFlag.has_value()) {
                 if (hasFlag(info.externalFlag.value(), gfx::TextureFlagBit::EXTERNAL_NORMAL)) {
                     textureInfo.flags |= info.externalFlag.value();
@@ -125,6 +126,7 @@ void RenderWindow::destroy() {
 
     // Gfx objects invoke destroy in VK\GL\MTL Object destructor.
     _frameBuffer = nullptr;
+    _colorAttachmentViews.clear();
     _renderPass = nullptr;
     _depthStencilTexture = nullptr;
 
@@ -133,6 +135,11 @@ void RenderWindow::destroy() {
 }
 
 void RenderWindow::resize(uint32_t width, uint32_t height) {
+    // Views must not outlive the backing allocation when resizing mip targets.
+    if (!_colorAttachmentViews.empty()) {
+        _frameBuffer = nullptr;
+        _colorAttachmentViews.clear();
+    }
     if (_swapchain != nullptr) {
         _swapchain->resize(width, height, ORIENTATION_MAP.at(Device::getDeviceOrientation()));
         _width = _swapchain->getWidth();
@@ -183,9 +190,25 @@ void RenderWindow::onNativeWindowResume(uint32_t windowId) {
 }
 
 void RenderWindow::generateFrameBuffer() {
+    _frameBuffer = nullptr;
+    _colorAttachmentViews.clear();
+    gfx::TextureList attachments;
+    for (auto *texture : _colorTextures) {
+        if (texture->getInfo().levelCount > 1) {
+            gfx::TextureViewInfo view;
+            view.texture = texture;
+            view.format = texture->getFormat();
+            view.type = texture->getInfo().type;
+            auto *attachment = gfx::Device::getInstance()->createTexture(view);
+            _colorAttachmentViews.pushBack(attachment);
+            attachments.push_back(attachment);
+        } else {
+            attachments.push_back(texture);
+        }
+    }
     _frameBuffer = gfx::Device::getInstance()->createFramebuffer(gfx::FramebufferInfo{
         _renderPass,
-        _colorTextures.get(),
+        attachments,
         _depthStencilTexture});
 }
 

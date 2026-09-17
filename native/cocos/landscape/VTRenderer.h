@@ -51,15 +51,18 @@ public:
     void render();
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
+    void setHeightBlendEnabled(bool enabled);
 
 private:
     VirtualTexture _texture;
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;
+    std::array<IntrusivePtr<Material>, config::VT_MIP_LEVELS - 1> _mipMaterials;
     IntrusivePtr<gfx::Buffer> _instances;
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
     IntrusivePtr<gfx::CommandBuffer> _commands;
     IntrusivePtr<gfx::PipelineState> _pipelineState;
+    std::array<IntrusivePtr<gfx::PipelineState>, config::VT_MIP_LEVELS - 1> _mipPipelineStates;
     IntrusivePtr<gfx::RenderPass> _initialPass;
     ccstd::vector<uint32_t> _dirtySlots;
     ccstd::vector<float> _instanceData;

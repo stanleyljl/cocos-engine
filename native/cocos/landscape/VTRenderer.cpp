@@ -39,6 +39,7 @@
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXInputAssembler.h"
+#include "renderer/gfx-base/GFXFramebuffer.h"
 #include "renderer/gfx-base/GFXPipelineState.h"
 #include "renderer/gfx-base/GFXQueue.h"
 #include "renderer/gfx-base/GFXRenderPass.h"
@@ -74,7 +75,8 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     if (pass->getHandle("sourceParams") == 0U || pass->getHandle("vtLayout") == 0U ||
         pass->getHandle("splatmap") == 0U || pass->getHandle("albedoHeightMap") == 0U ||
         pass->getHandle("normalRoughnessAOMap") == 0U || pass->getHandle("tilingParams") == 0U ||
-        pass->getHandle("globalColorMap") == 0U || pass->getHandle("globalColorParams") == 0U) {
+        pass->getHandle("globalColorMap") == 0U || pass->getHandle("globalColorParams") == 0U ||
+        pass->getHandle("heightBlendParams") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -119,6 +121,38 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     _pipelineState = device->createPipelineState({shader, pass->getPipelineLayout(), _texture.renderPass(),
         {iaInfo.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(),
         *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
+    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
+        // Technique 1 filters the completed pages, never re-evaluates materials.
+        auto &mipMaterial = _mipMaterials[level - 1];
+        mipMaterial = ccnew Material();
+        info.technique = 1;
+        mipMaterial->initialize(info);
+        if (!mipMaterial->getPasses() || mipMaterial->getPasses()->empty()) {
+            destroy();
+            return false;
+        }
+        auto *mipPass = mipMaterial->getPasses()->front().get();
+        if (!mipPass->getHandle("mipLayout") || !mipPass->getHandle("sourceAlbedo") || !mipPass->getHandle("sourceNormal")) {
+            CC_LOG_ERROR("[Landscape] VT mip technique is missing; rebuild project effects");
+            destroy();
+            return false;
+        }
+        // Read the preceding level; the source view excludes the destination.
+        mipMaterial->setPropertyGFXTexture("sourceAlbedo", _texture.mipSourceAlbedo(level));
+        mipMaterial->setPropertyGFXTexture("sourceNormal", _texture.mipSourceNormal(level));
+        mipMaterial->setPropertyVec4("mipLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE >> (level - 1)),
+            static_cast<float>(config::VT_PAGE_RES >> (level - 1)), static_cast<float>(level - 1),
+            device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
+        mipPass->update();
+        auto *mipShader = mipPass->getShaderVariant();
+        if (!mipShader) {
+            destroy();
+            return false;
+        }
+        _mipPipelineStates[level - 1] = device->createPipelineState({mipShader, mipPass->getPipelineLayout(), _texture.renderPass(),
+            {iaInfo.attributes}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(),
+            *mipPass->getBlendState(), mipPass->getPrimitive(), mipPass->getDynamicStates()});
+    }
     _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
     gfx::RenderPassInfo initialInfo;
     initialInfo.colorAttachments = _texture.renderPass()->getColorAttachments();
@@ -157,7 +191,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     _beforeRender = root->on<Root::BeforeRender>([this](Root *) { render(); });
     _subscribed = true;
 #if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] VT enabled: %u cached pages, %u interior texels, two RGBA8 atlases",
+    CC_LOG_INFO("[Landscape] VT enabled: %u cached pages, %u interior texels, two RGBA8 atlases with mip0 + mip1 + mip2",
         config::VT_PAGE_COUNT, config::VT_PAGE_INTERIOR);
 #endif
     return true;
@@ -185,8 +219,28 @@ void VTRenderer::setFrozen(bool frozen) {
     }
 }
 
+void VTRenderer::setHeightBlendEnabled(bool enabled) {
+    if (!_material) return;
+    auto *pass = _material->getPasses()->front().get();
+    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("heightBlendParams")));
+    const float strength = enabled ? 1.0F : 0.0F;
+    if (params.x == strength) return;
+    // Keep the effect's scale/sharpness when toggling the global blend mode.
+    params.x = strength;
+    _material->setPropertyVec4("heightBlendParams", params);
+    // Frozen pages can reference source tiles that are no longer resident.
+    // Re-resolve them through the normal update path after unfreezing.
+    if (_frozen) {
+        _pendingInvalidation = true;
+    } else {
+        _texture.invalidate();
+    }
+}
+
 bool VTRenderer::valid() const {
-    return _texture.valid() && _pipelineState && _commands;
+    return _texture.valid() && _pipelineState && _commands &&
+        std::all_of(_mipPipelineStates.begin(), _mipPipelineStates.end(),
+            [](const auto &state) { return state != nullptr; });
 }
 
 void VTRenderer::render() {
@@ -217,12 +271,25 @@ void VTRenderer::render() {
     draw.instanceCount = static_cast<uint32_t>(_dirtySlots.size());
     _commands->draw(draw);
     _commands->endRenderPass();
+    // Each pass makes its output shader-readable before the next downsample.
+    // Separate material descriptors keep both recorded source bindings intact.
+    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
+        auto *mipPass = _mipMaterials[level - 1]->getPasses()->front().get();
+        const uint32_t size = config::VT_ATLAS_SIZE >> level;
+        _commands->beginRenderPass(_needsClear ? _initialPass.get() : _texture.renderPass(), _texture.mipFramebuffer(level),
+            gfx::Rect{0, 0, size, size}, colors, 1.0F, 0);
+        _commands->bindPipelineState(_mipPipelineStates[level - 1]);
+        _commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), mipPass->getDescriptorSet());
+        _commands->bindInputAssembler(_inputAssembler);
+        _commands->draw(draw);
+        _commands->endRenderPass();
+    }
     _commands->end();
     gfx::CommandBuffer *command = _commands.get();
     auto *device = Root::getInstance()->getDevice();
     device->flushCommands(&command, 1);
     device->getQueue()->submit(&command, 1);
-    // Same graphics queue: subsequent Base Pass reads follow this submission.
+    // Publish only after ALL levels have been submitted on the same queue.
     _texture.markRendered(_dirtySlots);
     _needsClear = false;
 }
@@ -236,6 +303,7 @@ void VTRenderer::destroy() {
     _subscribed = false;
     _commands = nullptr;
     _pipelineState = nullptr;
+    for (auto &state : _mipPipelineStates) state = nullptr;
     _initialPass = nullptr;
     _inputAssembler = nullptr;
     _instances = nullptr;
@@ -243,6 +311,10 @@ void VTRenderer::destroy() {
     _mesh = nullptr;
     if (_material) _material->destroy();
     _material = nullptr;
+    for (auto &material : _mipMaterials) {
+        if (material) material->destroy();
+        material = nullptr;
+    }
     _texture.destroy();
     _dirtySlots.clear();
     _instanceData.clear();

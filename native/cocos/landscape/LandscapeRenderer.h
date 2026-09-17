@@ -80,6 +80,8 @@ public:
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
     void setUnlit(bool enabled);
+    void setVTMipEnabled(bool enabled);
+    void setHeightBlendEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);

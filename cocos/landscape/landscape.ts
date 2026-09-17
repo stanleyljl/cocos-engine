@@ -101,6 +101,12 @@ export class Landscape extends Component {
     private _showVTAtlas = false;
 
     @serializable
+    private _vtMipEnabled = true;
+
+    @serializable
+    private _heightBlendEnabled = true;
+
+    @serializable
     private _unlit = false;
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
@@ -236,6 +242,36 @@ export class Landscape extends Component {
         this._showVTAtlas = value;
     }
 
+    /** F9: compare three-level VT trilinear filtering with mip0-only bilinear filtering. */
+    @editable
+    @displayOrder(8.5)
+    @tooltip('VT mip 过滤：开启使用 mip0/mip1/mip2（256/128/64）三线性过滤；关闭仅使用 mip0 双线性过滤。冻结后仍可切换，不重新生成 VT。')
+    get vtMipEnabled (): boolean {
+        return this._vtMipEnabled;
+    }
+    set vtMipEnabled (value: boolean) {
+        if (this._vtMipEnabled === value) return;
+        this._vtMipEnabled = value;
+        if (this._native) {
+            this._native.setVTMipEnabled(value);
+        }
+    }
+
+    /** F10: compare height blending with linear material weight blending. */
+    @editable
+    @displayOrder(8.6)
+    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；F6 冻结期间的修改在解冻后生效。')
+    get heightBlendEnabled (): boolean {
+        return this._heightBlendEnabled;
+    }
+    set heightBlendEnabled (value: boolean) {
+        if (this._heightBlendEnabled === value) return;
+        this._heightBlendEnabled = value;
+        if (this._native) {
+            this._native.setHeightBlendEnabled(value);
+        }
+    }
+
     /**
      * @en LOD quality multiplier, applied only when loading terrain. Larger values retain finer geometry farther away.
      * @zh LOD 精度倍率，默认 1，最小值为 1。值越大，网格越精细；仅可在地形加载前设置。
@@ -281,6 +317,8 @@ export class Landscape extends Component {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setFreezeLod(this._freezeLod);
+            this._native.setVTMipEnabled(this._vtMipEnabled);
+            this._native.setHeightBlendEnabled(this._heightBlendEnabled);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);

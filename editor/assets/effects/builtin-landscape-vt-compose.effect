@@ -20,10 +20,100 @@ CCEffect %{
         sourceParams: { value: [129, 0, 0, 0] }
         tilingParams: { value: [0.1, 0, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
+        heightBlendParams: { value: [1, 3, 2, 0] }
         globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
         normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+  - name: downsample
+    passes:
+    - vert: vt-mip-vs:vert
+      frag: vt-mip-fs
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      rasterizerState:
+        cullMode: none
+      blendState:
+        targets:
+        - blend: false
+        - blend: false
+      properties:
+        mipLayout: { value: [4224, 264, 0, 1] }
+        sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
+        sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
+}%
+
+CCProgram vt-mip-uniforms %{
+  uniform MipConstants {
+    vec4 mipLayout; // source atlas size, source slot size, source LOD, clip Y sign
+  };
+}%
+
+CCProgram vt-mip-vs %{
+  precision highp float;
+  #include <vt-mip-uniforms>
+  in vec2 a_position;
+  in vec4 a_vtPage;
+  out vec2 v_pageUV;
+  #if __VERSION__ >= 300
+    flat out vec2 v_slot;
+  #else
+    out vec2 v_slot;
+  #endif
+  vec4 vert() {
+    float count = mipLayout.x / mipLayout.y;
+    v_slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    v_pageUV = a_position;
+    vec2 clip = (v_slot + a_position) / count * 2.0 - 1.0;
+    clip.y *= mipLayout.w;
+    return vec4(clip, 0.0, 1.0);
+  }
+}%
+
+CCProgram vt-mip-fs %{
+  precision highp float;
+  precision highp int;
+  #include <vt-mip-uniforms>
+  #if __VERSION__ >= 300
+    uniform sampler2D sourceAlbedo;
+    uniform sampler2D sourceNormal;
+    in vec2 v_pageUV;
+    flat in vec2 v_slot;
+    layout(location = 0) out vec4 albedoOut;
+    layout(location = 1) out vec4 normalOut;
+
+    vec3 decodeNormal(vec2 encoded) {
+      vec2 xy = encoded * 2.0 - 1.0;
+      return normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+    }
+    void main() {
+      // Halve the complete slot: 256+4+4 -> 128+2+2 -> 64+1+1. Integer fetches
+      // cannot cross into an unrelated physical slot, even at its outer edge.
+      int size = int(mipLayout.y);
+      int sourceLod = int(mipLayout.z);
+      ivec2 pixel = clamp(ivec2(floor(v_pageUV * float(size / 2))), ivec2(0), ivec2(size / 2 - 1));
+      ivec2 origin = ivec2(v_slot) * size + pixel * 2;
+      vec4 albedo = vec4(0.0);
+      vec3 normal = vec3(0.0);
+      vec2 roughnessAO = vec2(0.0);
+      for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+          ivec2 at = origin + ivec2(x, y);
+          albedo += texelFetch(sourceAlbedo, at, sourceLod);
+          vec4 nra = texelFetch(sourceNormal, at, sourceLod);
+          normal += decodeNormal(nra.rg);
+          roughnessAO += nra.ba;
+        }
+      }
+      // Albedo was already converted to linear by the compose pass.
+      albedoOut = albedo * 0.25;
+      vec3 filteredNormal = dot(normal, normal) > 1e-10 ? normalize(normal) : vec3(0.0, 0.0, 1.0);
+      normalOut = vec4(filteredNormal.xy * 0.5 + 0.5, roughnessAO * 0.25);
+    }
+  #else
+    void main() { gl_FragColor = vec4(0.0); }
+  #endif
 }%
 
 CCProgram vt-compose-uniforms %{
@@ -32,6 +122,7 @@ CCProgram vt-compose-uniforms %{
     vec4 sourceParams;
     vec4 tilingParams[32]; // repeats/m, linear mean albedo RGB
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
+    vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
   };
 }%
 
@@ -73,13 +164,26 @@ CCProgram vt-compose-fs %{
   #include <common/color/gamma>
   #if __VERSION__ >= 300
   uniform highp usampler2DArray splatmap;
-  uniform sampler2DArray albedoHeightMap;
-  uniform sampler2DArray normalRoughnessAOMap;
+  uniform highp sampler2DArray albedoHeightMap;
+  uniform highp sampler2DArray normalRoughnessAOMap;
   uniform sampler2D globalColorMap;
   in vec2 v_localXZ;
   flat in vec4 v_source;
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
+
+  float heightBlend(float weight, float height0, float height1) {
+    // Delta Force (GDC 2025, slide 66). Use the same height blending at
+    // every page resolution; only the explicit F10 toggle selects linear blending.
+    float amount = clamp(heightBlendParams.x, 0.0, 1.0);
+    if (amount <= 0.0 || weight <= 0.0 || weight >= 1.0) return weight;
+    float sharpness = mix(1.0, max(heightBlendParams.z, 1.0), amount);
+    // Heights are in [0,1]. This bound preserves both pure-layer endpoints
+    // continuously, even when artists reduce the weight scale.
+    float scale = max(mix(1.0, heightBlendParams.y, amount), 2.0 * amount + 1.0 / sharpness);
+    return clamp((amount * (height1 - height0) + (weight - 0.5) * scale)
+      * sharpness + 0.5, 0.0, 1.0);
+  }
 
   void main() {
     float edge = sourceParams.x - 1.0;
@@ -87,42 +191,83 @@ CCProgram vt-compose-fs %{
     ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
     vec2 f = pixel - vec2(origin);
     int page = int(v_source.w);
-    uvec4 packed = uvec4(texelFetch(splatmap, ivec3(origin, page), 0).r,
-      texelFetch(splatmap, ivec3(origin + ivec2(1, 0), page), 0).r,
-      texelFetch(splatmap, ivec3(origin + ivec2(0, 1), page), 0).r,
+    // Match the importer's 00->11 diagonal. Only three integer splat fetches.
+    bool lowerTriangle = f.x >= f.y;
+    ivec2 third = lowerTriangle ? ivec2(1, 0) : ivec2(0, 1);
+    uvec3 packed = uvec3(texelFetch(splatmap, ivec3(origin, page), 0).r,
+      texelFetch(splatmap, ivec3(origin + third, page), 0).r,
       texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
-    vec4 spatialWeights = vec4((1.0-f.x)*(1.0-f.y), f.x*(1.0-f.y), (1.0-f.x)*f.y, f.x*f.y);
-    int layers[8];
-    float weights[8];
-    for (int i = 0; i < 4; ++i) {
-      float blend = float(packed[i] >> 10u) / 63.0;
-      layers[i*2] = int(packed[i] & 31u);
-      layers[i*2+1] = int((packed[i] >> 5u) & 31u);
-      weights[i*2] = spatialWeights[i] * (1.0-blend);
-      weights[i*2+1] = spatialWeights[i] * blend;
+    vec3 spatialWeights = lowerTriangle ? vec3(1.0-f.x, f.x-f.y, f.y)
+      : vec3(1.0-f.y, f.y-f.x, f.x);
+    int ids[6];
+    int minId = 31;
+    int maxId = 0;
+    for (int i = 0; i < 3; ++i) {
+      ids[i*2] = int(packed[i] & 31u);
+      ids[i*2+1] = int((packed[i] >> 5u) & 31u);
+      minId = min(minId, min(ids[i*2], ids[i*2+1]));
+      maxId = max(maxId, max(ids[i*2], ids[i*2+1]));
     }
-    for (int i = 1; i < 8; ++i) {
-      for (int j = 0; j < i; ++j) {
-        if (layers[j] == layers[i]) {
-          weights[j] += weights[i];
-          weights[i] = 0.0;
-          break;
-        }
-      }
+    // Offline ID fixing guarantees <=3 distinct IDs across these six entries.
+    // Extract min/mid/max without pixel-dependent top-three weight selection.
+    int midId = minId;
+    for (int i = 0; i < 6; ++i) {
+      if (ids[i] < maxId) midId = max(midId, ids[i]);
+    }
+    int layers[3];
+    layers[0] = minId;
+    layers[1] = midId;
+    layers[2] = maxId;
+    int sampleIndices[6];
+    float weights[3];
+    vec4 albedoHeights[3];
+    for (int i = 0; i < 3; ++i) {
+      weights[i] = 0.0;
+      albedoHeights[i] = vec4(0.0);
+    }
+    for (int i = 0; i < 6; ++i) {
+      sampleIndices[i] = ids[i] == minId ? 0 : (ids[i] == maxId ? 2 : 1);
+    }
+    for (int i = 0; i < 3; ++i) {
+      float blend = float(packed[i] >> 10u) / 63.0;
+      weights[sampleIndices[i*2]] += spatialWeights[i] * (1.0-blend);
+      weights[sampleIndices[i*2+1]] += spatialWeights[i] * blend;
     }
     vec2 uv = vec2(v_localXZ.x, -v_localXZ.y);
     vec2 uvDx = dFdx(uv);
     vec2 uvDy = dFdy(uv);
+    // Fetch each contributing material's color/height once. Pure endpoints
+    // cannot acquire a previously absent layer during height blending.
+    for (int i = 0; i < 3; ++i) {
+      if (weights[i] > 0.0) {
+        float scale = tilingParams[layers[i]].x;
+        vec3 coord = vec3(uv * scale, float(layers[i]));
+        albedoHeights[i] = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
+      }
+      weights[i] = 0.0;
+    }
+    // Apply height blending to each original pair BEFORE spatial interpolation.
+    // Shared vertex pairs agree across triangle edges and imported tile borders.
+    for (int i = 0; i < 3; ++i) {
+      int bottom = sampleIndices[i*2];
+      int top = sampleIndices[i*2+1];
+      float blend = float(packed[i] >> 10u) / 63.0;
+      if (bottom != top && spatialWeights[i] > 0.0) {
+        blend = heightBlend(blend, albedoHeights[bottom].a, albedoHeights[top].a);
+      }
+      weights[bottom] += spatialWeights[i] * (1.0-blend);
+      weights[top] += spatialWeights[i] * blend;
+    }
     vec3 albedo = vec3(0.0);
     vec3 meanAlbedo = vec3(0.0);
     vec3 normal = vec3(0.0);
     float roughness = 0.0;
     float ao = 0.0;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 3; ++i) {
       if (weights[i] > 0.0) {
         float scale = tilingParams[layers[i]].x;
         vec3 coord = vec3(uv * scale, float(layers[i]));
-        vec4 ah = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
+        vec4 ah = albedoHeights[i];
         vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
         vec2 xy = nra.rg * 2.0 - 1.0;
         albedo += SRGBToLinear(ah.rgb) * weights[i];

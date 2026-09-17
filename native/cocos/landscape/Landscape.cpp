@@ -92,6 +92,8 @@ void Landscape::initializeRenderer() {
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
     renderer->setDebugFlags(_lodColor, _showRanges);
     renderer->setUnlit(_unlit);
+    renderer->setVTMipEnabled(_vtMipEnabled);
+    renderer->setHeightBlendEnabled(_heightBlendEnabled);
     renderer->setGlobalColorStrength(_globalColorStrength);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
@@ -255,6 +257,20 @@ void Landscape::setUnlit(bool enabled) {
     _unlit = enabled;
     if (_renderer != nullptr) {
         _renderer->setUnlit(enabled);
+    }
+}
+
+void Landscape::setVTMipEnabled(bool enabled) {
+    _vtMipEnabled = enabled;
+    if (_renderer != nullptr) {
+        _renderer->setVTMipEnabled(enabled);
+    }
+}
+
+void Landscape::setHeightBlendEnabled(bool enabled) {
+    _heightBlendEnabled = enabled;
+    if (_renderer != nullptr) {
+        _renderer->setHeightBlendEnabled(enabled);
     }
 }
 

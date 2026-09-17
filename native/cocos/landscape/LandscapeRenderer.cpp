@@ -44,7 +44,9 @@
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
+#include "renderer/gfx-base/GFXFramebuffer.h"
 #include "renderer/gfx-base/GFXTexture.h"
+#include "renderer/gfx-base/states/GFXSampler.h"
 #include "scene/RenderScene.h"
 #include "scene/Octree.h"
 #include "scene/Pass.h"
@@ -157,8 +159,8 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
         return false;
     }
     _vtRenderer->setFrozen(_freezeLod);
-    // Resource initialization succeeded. Bind the textures once; subsequent
-    // parameter updates do not change these textures or their samplers.
+    // Resource initialization succeeded. Bind the textures once; the mip
+    // comparison toggle only replaces their Base Pass samplers afterwards.
     auto &vt = _vtRenderer->texture();
     for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
         const auto setRuntimeTexture = [material](const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
@@ -183,6 +185,35 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
 
 void LandscapeRenderer::setGlobalColorStrength(float strength) {
     if (_vtRenderer) _vtRenderer->setGlobalColorStrength(strength);
+}
+
+void LandscapeRenderer::setHeightBlendEnabled(bool enabled) {
+    if (_vtRenderer) _vtRenderer->setHeightBlendEnabled(enabled);
+}
+
+void LandscapeRenderer::setVTMipEnabled(bool enabled) {
+    if (!_vtRenderer || !_vtRenderer->valid()) return;
+    auto &vt = _vtRenderer->texture();
+    auto info = vt.sampler()->getInfo();
+    info.mipFilter = enabled ? gfx::Filter::LINEAR : gfx::Filter::NONE;
+    auto *sampler = Root::getInstance()->getDevice()->getSampler(info);
+    // Keep all mip levels resident and current, including while filtering is
+    // disabled. Switching is immediate and never invalidates frozen VT pages.
+    // Vulkan's NONE mip filter maps to nearest-mip selection. Restrict the
+    // sampled view to mip0 as well, using the existing attachment views.
+    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+        material->setPropertyGFXTexture("vtAlbedo", enabled ? vt.albedo() : vt.framebuffer()->getColorTextures()[0]);
+        material->setPropertyGFXTexture("vtNormalRoughnessAO", enabled ? vt.normalRoughnessAO() : vt.framebuffer()->getColorTextures()[1]);
+        for (const auto &pass : *material->getPasses()) {
+            for (const char *name : {"vtAlbedo", "vtNormalRoughnessAO"}) {
+                const uint32_t handle = pass->getHandle(name);
+                if (handle != 0U) {
+                    pass->bindSampler(scene::Pass::getBindingFromHandle(handle), sampler);
+                }
+            }
+            pass->update();
+        }
+    }
 }
 
 void LandscapeRenderer::setDebugFlags(bool lodColor, bool showRanges) {

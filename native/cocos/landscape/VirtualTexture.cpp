@@ -66,12 +66,31 @@ bool VirtualTexture::init(gfx::Device *device) {
     info.width = config::VT_ATLAS_SIZE;
     info.height = config::VT_ATLAS_SIZE;
     info.passInfo = passInfo;
+    info.colorMipLevels = config::VT_MIP_LEVELS;
     _atlas = ccnew RenderTexture();
     _atlas->initialize(info);
+    const auto createMipView = [device](gfx::Texture *texture, uint32_t baseLevel, uint32_t levelCount) {
+        gfx::TextureViewInfo view;
+        view.texture = texture;
+        view.format = texture->getFormat();
+        view.baseLevel = baseLevel;
+        view.levelCount = levelCount;
+        return device->createTexture(view);
+    };
+    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
+        auto &mip = _mips[level - 1];
+        mip.albedo = createMipView(albedo(), level, 1);
+        mip.normal = createMipView(normalRoughnessAO(), level, 1);
+        // Prefix views exclude the destination mip and preserve absolute LOD
+        // numbering for texelFetch on Vulkan and GLES alike.
+        mip.sourceAlbedo = createMipView(albedo(), 0, level);
+        mip.sourceNormal = createMipView(normalRoughnessAO(), 0, level);
+        mip.framebuffer = device->createFramebuffer({renderPass(), {mip.albedo, mip.normal}, nullptr});
+    }
     gfx::SamplerInfo samplerInfo;
     samplerInfo.minFilter = gfx::Filter::LINEAR;
     samplerInfo.magFilter = gfx::Filter::LINEAR;
-    samplerInfo.mipFilter = gfx::Filter::NONE;
+    samplerInfo.mipFilter = gfx::Filter::LINEAR;
     samplerInfo.addressU = gfx::Address::CLAMP;
     samplerInfo.addressV = gfx::Address::CLAMP;
     _sampler = device->getSampler(samplerInfo);
@@ -79,7 +98,10 @@ bool VirtualTexture::init(gfx::Device *device) {
     return valid();
 }
 
-bool VirtualTexture::valid() const { return albedo() != nullptr && normalRoughnessAO() != nullptr; }
+bool VirtualTexture::valid() const {
+    return albedo() != nullptr && normalRoughnessAO() != nullptr &&
+        std::all_of(_mips.begin(), _mips.end(), [](const MipTarget &mip) { return mip.framebuffer != nullptr; });
+}
 RenderTexture *VirtualTexture::atlas() const { return _atlas.get(); }
 gfx::Framebuffer *VirtualTexture::framebuffer() const {
     return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getFramebuffer() : nullptr;
@@ -88,10 +110,10 @@ gfx::RenderPass *VirtualTexture::renderPass() const {
     return framebuffer() ? framebuffer()->getRenderPass() : nullptr;
 }
 gfx::Texture *VirtualTexture::albedo() const {
-    return framebuffer() ? framebuffer()->getColorTextures()[0] : nullptr;
+    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(0) : nullptr;
 }
 gfx::Texture *VirtualTexture::normalRoughnessAO() const {
-    return framebuffer() ? framebuffer()->getColorTextures()[1] : nullptr;
+    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(1) : nullptr;
 }
 
 void VirtualTexture::beginFrame(const ccstd::vector<uint64_t> &keys) {
@@ -185,6 +207,13 @@ void VirtualTexture::invalidate() {
     for (auto &p : _pages) p.dirty = true;
 }
 void VirtualTexture::destroy() {
+    for (auto &mip : _mips) {
+        mip.framebuffer = nullptr;
+        mip.sourceAlbedo = nullptr;
+        mip.sourceNormal = nullptr;
+        mip.albedo = nullptr;
+        mip.normal = nullptr;
+    }
     if (_atlas) _atlas->destroy();
     _atlas = nullptr;
     _sampler = nullptr;

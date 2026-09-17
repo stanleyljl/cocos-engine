@@ -296,6 +296,10 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         return false;
     }
     const auto &encoding = splat["encoding"];
+    if (!matchesUint(splat, "triangleMaterials", 3U) || !matchesString(splat, "triangleDiagonal", "00-11")) {
+        CC_LOG_WARNING("[Landscape] splat maps require triangle ID fixing; restart editor, reimport Landscape assets and rebuild");
+        return false;
+    }
     const auto matchesField = [&](const char *name, uint32_t offset, uint32_t bits) {
         return encoding.HasMember(name) && encoding[name].IsObject() &&
                matchesUint(encoding[name], "offset", offset) && matchesUint(encoding[name], "bits", bits);

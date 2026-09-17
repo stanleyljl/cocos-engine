@@ -63,6 +63,8 @@ public:
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
     void setUnlit(bool enabled);
+    void setVTMipEnabled(bool enabled);
+    void setHeightBlendEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setAssetPath(const ccstd::string &manifestPath);
 
@@ -81,6 +83,8 @@ private:
     bool _lodColor{false};
     bool _showRanges{false};
     bool _unlit{false};
+    bool _vtMipEnabled{true};
+    bool _heightBlendEnabled{true};
     float _lodQualityScale{1.0F};
     float _globalColorStrength{0.1F};
     ccstd::string _assetPath;

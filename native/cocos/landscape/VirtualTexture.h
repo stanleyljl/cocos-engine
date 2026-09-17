@@ -23,11 +23,14 @@
 ****************************************************************************/
 #pragma once
 
+#include <array>
+
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "math/Vec4.h"
+#include "landscape/LandscapeConfig.h"
 
 namespace cc {
 class RenderTexture;
@@ -69,6 +72,9 @@ public:
     gfx::Sampler *sampler() const { return _sampler; }
     gfx::Framebuffer *framebuffer() const;
     gfx::RenderPass *renderPass() const;
+    gfx::Framebuffer *mipFramebuffer(uint32_t level) const { return _mips[level - 1].framebuffer.get(); }
+    gfx::Texture *mipSourceAlbedo(uint32_t level) const { return _mips[level - 1].sourceAlbedo.get(); }
+    gfx::Texture *mipSourceNormal(uint32_t level) const { return _mips[level - 1].sourceNormal.get(); }
 
     // Protect ALL requested keys before allocating anything, so selection order
     // cannot evict pages that another visible node requests later this frame.
@@ -84,6 +90,14 @@ public:
 
 private:
     IntrusivePtr<RenderTexture> _atlas;
+    struct MipTarget {
+        IntrusivePtr<gfx::Texture> albedo;
+        IntrusivePtr<gfx::Texture> normal;
+        IntrusivePtr<gfx::Texture> sourceAlbedo;
+        IntrusivePtr<gfx::Texture> sourceNormal;
+        IntrusivePtr<gfx::Framebuffer> framebuffer;
+    };
+    std::array<MipTarget, config::VT_MIP_LEVELS - 1> _mips;
     gfx::Sampler *_sampler{nullptr}; // device-owned
     ccstd::vector<Page> _pages;
     ccstd::unordered_map<uint64_t, uint32_t> _lookup;
