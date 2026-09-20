@@ -56,6 +56,24 @@ public:
         float pixelsPerMeter{128.0F}; // source texture pixels per landscape-local meter
     };
 
+    struct DecalLayer {
+        ccstd::string albedoMask;
+        ccstd::string normalRoughnessAO;
+        ccstd::string height;
+        float heightScale{0.0F};
+        bool modulateColor{false}; // preserve underlying terrain color for imprints
+        int32_t detailMaterial0{-1}; // optional tiled material-library pair, RVT-only
+        int32_t detailMaterial1{-1}; // normalRoughnessAO.B stores pair blend weight
+    };
+    struct Decal {
+        float x{0}; // minimum corner in landscape-local XZ
+        float z{0};
+        float size{1};
+        uint32_t layer{0};
+        float nearDistance{12};
+        float farDistance{40};
+    };
+
     struct TileData {
         uint64_t key{0};
         ccstd::vector<uint8_t> height;
@@ -88,6 +106,9 @@ public:
     static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
                          ccstd::vector<uint8_t> &data);
 
+    const ccstd::vector<DecalLayer> &decalLayers() const { return _decalLayers; }
+    const ccstd::vector<Decal> &decals() const { return _decals; }
+    uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
     const ccstd::string &dataDir() const { return _dataDir; }
     bool valid() const { return _data.valid(); }
@@ -119,6 +140,9 @@ private:
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
     GlobalColorMap _globalColorMap;
+    ccstd::vector<DecalLayer> _decalLayers;
+    ccstd::vector<Decal> _decals;
+    uint32_t _decalResolution{1};
     ccstd::vector<size_t> _levelOffsets;
     ccstd::vector<HeightRange> _heightRanges;
     size_t _nodesPerSector{0U};

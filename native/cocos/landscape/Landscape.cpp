@@ -94,6 +94,7 @@ void Landscape::initializeRenderer() {
     renderer->setUnlit(_unlit);
     renderer->setVTMipEnabled(_vtMipEnabled);
     renderer->setHeightBlendEnabled(_heightBlendEnabled);
+    renderer->setDecal3DEnabled(_decal3DEnabled);
     renderer->setGlobalColorStrength(_globalColorStrength);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
@@ -265,6 +266,11 @@ void Landscape::setVTMipEnabled(bool enabled) {
     if (_renderer != nullptr) {
         _renderer->setVTMipEnabled(enabled);
     }
+}
+
+void Landscape::setDecal3DEnabled(bool enabled) {
+    _decal3DEnabled = enabled;
+    if (_renderer) _renderer->setDecal3DEnabled(enabled);
 }
 
 void Landscape::setHeightBlendEnabled(bool enabled) {

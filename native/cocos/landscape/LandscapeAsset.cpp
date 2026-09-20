@@ -273,6 +273,54 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
         }
     }
 
+    ccstd::vector<DecalLayer> decalLayers;
+    ccstd::vector<Decal> decals;
+    uint32_t decalResolution = 1;
+    if (document.HasMember("decalLibrary")) {
+        const auto &library = document["decalLibrary"];
+        if (!readUnsigned(library, "resolution", decalResolution) || decalResolution < 2 || decalResolution > 2048 ||
+            (decalResolution & (decalResolution - 1U)) != 0 || !library.HasMember("layers") ||
+            !library["layers"].IsArray() || library["layers"].Empty() || library["layers"].Size() > config::DECAL_LIBRARY_MAX) return false;
+        for (const auto &value : library["layers"].GetArray()) {
+            DecalLayer layer;
+            if (!value.IsObject() || !value.HasMember("albedoMask") || !value["albedoMask"].IsString() ||
+                !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
+                !value.HasMember("height") || !value["height"].IsString() ||
+                !readFloat(value, "heightScale", layer.heightScale) || layer.heightScale < 0 || layer.heightScale > 10) return false;
+            layer.albedoMask = resolve(value["albedoMask"].GetString());
+            layer.normalRoughnessAO = resolve(value["normalRoughnessAO"].GetString());
+            layer.height = resolve(value["height"].GetString());
+            if (value.HasMember("modulateColor")) {
+                if (!value["modulateColor"].IsBool()) return false;
+                layer.modulateColor = value["modulateColor"].GetBool();
+            }
+            if (value.HasMember("detailMaterials")) {
+                const auto &ids = value["detailMaterials"];
+                if (!ids.IsArray() || ids.Size() != 2 || layer.heightScale != 0 || layer.modulateColor ||
+                    !ids[0].IsUint() || !ids[1].IsUint() ||
+                    ids[0].GetUint() >= materialLayers.size() || ids[1].GetUint() >= materialLayers.size()) return false;
+                layer.detailMaterial0 = static_cast<int32_t>(ids[0].GetUint());
+                layer.detailMaterial1 = static_cast<int32_t>(ids[1].GetUint());
+            }
+            if (layer.albedoMask.empty() || layer.normalRoughnessAO.empty() || layer.height.empty()) return false;
+            decalLayers.emplace_back(std::move(layer));
+        }
+    }
+    if (document.HasMember("decals")) {
+        const auto &values = document["decals"];
+        if (!values.IsArray() || values.Size() > config::DECAL_INSTANCE_MAX) return false;
+        for (const auto &value : values.GetArray()) {
+            Decal d;
+            if (!readFloat(value, "x", d.x) || !readFloat(value, "z", d.z) || !readFloat(value, "size", d.size) ||
+                !readUnsigned(value, "layer", d.layer) || d.layer >= decalLayers.size() || d.size <= 0 || d.size > 64 ||
+                !readFloat(value, "nearDistance", d.nearDistance) || !readFloat(value, "farDistance", d.farDistance) ||
+                d.nearDistance < 0 || d.farDistance <= d.nearDistance || d.farDistance > 200 ||
+                d.x < -parsed.worldWidth() * .5F || d.z < -parsed.worldDepth() * .5F ||
+                d.x + d.size > parsed.worldWidth() * .5F || d.z + d.size > parsed.worldDepth() * .5F) return false;
+            decals.push_back(d);
+        }
+    }
+
     // The shader's integer decode and the shared page pool require this layout.
     if (!document.HasMember("splatMap") || !document["splatMap"].IsObject()) {
         CC_LOG_WARNING("[Landscape] manifest requires paired splatMap tiles");
@@ -329,6 +377,9 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     _materialLayers = std::move(materialLayers);
     _materialResolution = materialResolution;
     _globalColorMap = std::move(globalColorMap);
+    _decalLayers = std::move(decalLayers);
+    _decals = std::move(decals);
+    _decalResolution = decalResolution;
     _levelOffsets = std::move(levelOffsets);
     _heightRanges = std::move(ranges);
     _nodesPerSector = nodesPerSector;

@@ -107,6 +107,9 @@ export class Landscape extends Component {
     private _heightBlendEnabled = true;
 
     @serializable
+    private _decal3DEnabled = true;
+
+    @serializable
     private _unlit = false;
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
@@ -272,6 +275,19 @@ export class Landscape extends Component {
         }
     }
 
+    /** F12: compare the raised near mesh with the planar RVT decal. */
+    @editable
+    @displayOrder(8.8)
+    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。F6 冻结时仍可即时切换。')
+    get decal3DEnabled (): boolean {
+        return this._decal3DEnabled;
+    }
+    set decal3DEnabled (value: boolean) {
+        if (this._decal3DEnabled === value) return;
+        this._decal3DEnabled = value;
+        if (this._native) this._native.setDecal3DEnabled(value);
+    }
+
     /**
      * @en LOD quality multiplier, applied only when loading terrain. Larger values retain finer geometry farther away.
      * @zh LOD 精度倍率，默认 1，最小值为 1。值越大，网格越精细；仅可在地形加载前设置。
@@ -319,6 +335,7 @@ export class Landscape extends Component {
             this._native.setFreezeLod(this._freezeLod);
             this._native.setVTMipEnabled(this._vtMipEnabled);
             this._native.setHeightBlendEnabled(this._heightBlendEnabled);
+            this._native.setDecal3DEnabled(this._decal3DEnabled);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);

@@ -65,6 +65,7 @@ public:
     void setUnlit(bool enabled);
     void setVTMipEnabled(bool enabled);
     void setHeightBlendEnabled(bool enabled);
+    void setDecal3DEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setAssetPath(const ccstd::string &manifestPath);
 
@@ -85,6 +86,7 @@ private:
     bool _unlit{false};
     bool _vtMipEnabled{true};
     bool _heightBlendEnabled{true};
+    bool _decal3DEnabled{true};
     float _lodQualityScale{1.0F};
     float _globalColorStrength{0.1F};
     ccstd::string _assetPath;

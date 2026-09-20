@@ -59,6 +59,9 @@ private:
     IntrusivePtr<Material> _material;
     std::array<IntrusivePtr<Material>, config::VT_MIP_LEVELS - 1> _mipMaterials;
     IntrusivePtr<gfx::Buffer> _instances;
+    IntrusivePtr<gfx::Texture> _decalIndices;
+    ccstd::vector<Vec4> _decalRegions;
+    ccstd::vector<uint8_t> _decalIndexData;
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
     IntrusivePtr<gfx::CommandBuffer> _commands;
     IntrusivePtr<gfx::PipelineState> _pipelineState;

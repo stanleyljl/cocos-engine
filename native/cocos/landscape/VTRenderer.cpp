@@ -43,6 +43,7 @@
 #include "renderer/gfx-base/GFXPipelineState.h"
 #include "renderer/gfx-base/GFXQueue.h"
 #include "renderer/gfx-base/GFXRenderPass.h"
+#include "renderer/gfx-base/GFXTexture.h"
 #include "scene/Pass.h"
 
 namespace cc {
@@ -76,7 +77,9 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
         pass->getHandle("splatmap") == 0U || pass->getHandle("albedoHeightMap") == 0U ||
         pass->getHandle("normalRoughnessAOMap") == 0U || pass->getHandle("tilingParams") == 0U ||
         pass->getHandle("globalColorMap") == 0U || pass->getHandle("globalColorParams") == 0U ||
-        pass->getHandle("heightBlendParams") == 0U) {
+        pass->getHandle("heightBlendParams") == 0U || pass->getHandle("decalAlbedoMap") == 0U ||
+        pass->getHandle("decalNormalMap") == 0U || pass->getHandle("decalRegions") == 0U ||
+        pass->getHandle("decalIndexMap") == 0U || pass->getHandle("decalLayerParams") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -90,6 +93,34 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
     bind("globalColorMap", materials.globalColorMap(), materials.globalColorSampler());
+    bind("decalAlbedoMap", materials.decalAlbedo(), materials.globalColorSampler());
+    bind("decalNormalMap", materials.decalNormal(), materials.globalColorSampler());
+    ccstd::vector<Vec4> decalRegions(config::DECAL_INSTANCE_MAX);
+    const auto &decals = asset.decals();
+    for (size_t i = 0; i < decals.size(); ++i) {
+        const auto &d = decals[i];
+        decalRegions[i] = Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)};
+    }
+    _decalRegions.assign(decalRegions.begin(), decalRegions.begin() + decals.size());
+    ccstd::vector<Vec4> layerParams(config::DECAL_LIBRARY_MAX);
+    for (size_t i = 0; i < asset.decalLayers().size(); ++i) {
+        const auto &layer = asset.decalLayers()[i];
+        layerParams[i] = Vec4{layer.modulateColor ? 1.0F : 0.0F,
+            static_cast<float>(layer.detailMaterial0 + 1), static_cast<float>(layer.detailMaterial1 + 1), 0};
+    }
+    _material->setPropertyVec4Array("decalLayerParams", layerParams);
+    gfx::TextureInfo indexInfo;
+    indexInfo.type = gfx::TextureType::TEX2D;
+    indexInfo.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
+    indexInfo.format = gfx::Format::RGBA8;
+    indexInfo.width = config::DECAL_INSTANCE_MAX / 4;
+    indexInfo.height = config::VT_PAGE_COUNT;
+    _decalIndices = device->createTexture(indexInfo);
+    if (!_decalIndices) return false;
+    _decalIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX, 0);
+    bind("decalIndexMap", _decalIndices, materials.globalColorSampler());
+    _material->setPropertyVec4Array("decalRegions", decalRegions);
+    _material->setPropertyVec4("decalParams", Vec4{static_cast<float>(decals.size()), 0, 0, 0});
     _hasGlobalColorMap = materials.hasGlobalColorMap();
     _globalColorParams = Vec4{1.0F / data.worldWidth(),
         1.0F / data.worldDepth(), materials.globalColorStrength(), 0.0F};
@@ -253,11 +284,24 @@ void VTRenderer::render() {
     _instanceData.clear();
     for (uint32_t slot : _dirtySlots) {
         const auto &page = _texture.page(slot);
-        _instanceData.insert(_instanceData.end(), {static_cast<float>(slot), 0, 0, 0,
+        // Include filtering gutters and retain manifest order (road before tracks).
+        const float border = page.region.z * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+        uint32_t count = 0;
+        for (size_t i = 0; i < _decalRegions.size(); ++i) {
+            const auto &d = _decalRegions[i];
+            if (d.x > page.region.x + page.region.z + border || d.y > page.region.y + page.region.z + border ||
+                d.x + d.z < page.region.x - border || d.y + d.z < page.region.y - border) continue;
+            _decalIndexData[slot * config::DECAL_INSTANCE_MAX + count++] = static_cast<uint8_t>(i);
+        }
+        _instanceData.insert(_instanceData.end(), {static_cast<float>(slot), static_cast<float>(count), 0, 0,
             page.region.x, page.region.y, page.region.z, page.region.w,
             page.source.x, page.source.y, page.source.z, page.source.w});
     }
     auto *pass = _material->getPasses()->front().get();
+    gfx::BufferTextureCopy indexCopy;
+    indexCopy.texExtent = {config::DECAL_INSTANCE_MAX / 4, config::VT_PAGE_COUNT, 1};
+    const uint8_t *indexBytes[]{_decalIndexData.data()};
+    Root::getInstance()->getDevice()->copyBuffersToTexture(indexBytes, _decalIndices, &indexCopy, 1);
     pass->update();
     _commands->begin();
     _commands->updateBuffer(_instances, _instanceData.data(), static_cast<uint32_t>(_instanceData.size() * sizeof(float)));
@@ -295,6 +339,9 @@ void VTRenderer::render() {
 }
 
 void VTRenderer::destroy() {
+    _decalIndices = nullptr;
+    _decalRegions.clear();
+    _decalIndexData.clear();
     _frozen = false;
     _pendingInvalidation = false;
     _hasGlobalColorMap = false;

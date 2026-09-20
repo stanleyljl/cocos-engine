@@ -55,13 +55,14 @@ namespace cc {
 namespace landscape {
 
 namespace {
-Material *createLandscapeMaterial(bool wireframe) {
+Material *createLandscapeMaterial(bool wireframe, bool decal = false) {
     auto *material = ccnew Material();
     IMaterialInfo info;
     info.effectName = ccstd::string{"builtin-landscape"};
     MacroRecord defines;
     defines["USE_INSTANCING"] = true;
     defines["LANDSCAPE_DEBUG_UNLIT"] = false;
+    defines["LANDSCAPE_DECAL_MESH"] = decal;
     info.defines = IMaterialInfo::DefinesType{defines};
 
     if (wireframe) {
@@ -98,8 +99,12 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     for (uint32_t i = 0; i < _meshes.size(); ++i) _meshes[i] = GridMesh::create(device, 1U << i);
     _materialSolid = createLandscapeMaterial(false);
     _materialWire = createLandscapeMaterial(true);
+    _decalSolid = createLandscapeMaterial(false, true);
+    _decalWire = createLandscapeMaterial(true, true);
+    _decalMesh = GridMesh::create(device, 16);
     if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
-        _materialSolid == nullptr || _materialWire == nullptr) {
+        _decalMesh == nullptr ||
+        _materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
         destroy();
         return false;
     }
@@ -140,6 +145,19 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     _vtRenderer.reset();
     _asset = asset;
     _data = asset->data();
+    _decalCenters.clear();
+    const float finestNodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, 0);
+    for (const auto &d : asset->decals()) {
+        const float x = d.x + d.size * 0.5F;
+        const float z = d.z + d.size * 0.5F;
+        float minY = _data.minHeight();
+        float maxY = _data.maxHeight();
+        asset->getHeightRange(0, static_cast<uint32_t>((x + _data.worldWidth() * 0.5F) / finestNodeSize),
+                             static_cast<uint32_t>((z + _data.worldDepth() * 0.5F) / finestNodeSize), minY, maxY);
+        // A stable height reference keeps the WHOLE decal's fade independent of
+        // selected LOD, streaming height pages and individual vertex positions.
+        _decalCenters.emplace_back(x, (minY + maxY) * 0.5F, z);
+    }
     _vtRootLevel = vtRootLevel(_data.sectorSize);
     _heightSampleSpacing = computeNodeSize(_data.sectorSize, _data.maxLevel, _data.minTileLevel) /
                            static_cast<float>(_data.tileResolution - 1U);
@@ -162,7 +180,7 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     // Resource initialization succeeded. Bind the textures once; the mip
     // comparison toggle only replaces their Base Pass samplers afterwards.
     auto &vt = _vtRenderer->texture();
-    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
         const auto setRuntimeTexture = [material](const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
             CC_ASSERT(texture != nullptr);
             material->setPropertyGFXTexture(name, texture);
@@ -177,6 +195,9 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
         setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
         setRuntimeTexture("terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
+        if (material == _decalSolid.get() || material == _decalWire.get()) {
+            setRuntimeTexture("decalHeightMap", _materialLibrary->decalHeight(), _tilePages->heightSampler());
+        }
         setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
     updateMaterialProperties();
@@ -185,6 +206,13 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
 
 void LandscapeRenderer::setGlobalColorStrength(float strength) {
     if (_vtRenderer) _vtRenderer->setGlobalColorStrength(strength);
+}
+
+void LandscapeRenderer::setDecal3DEnabled(bool enabled) {
+    _decal3DEnabled = enabled;
+    updateMaterialProperties();
+    // F12 affects geometry only and remains immediate while F6 holds residency.
+    for (size_t i = 0; i < _decalDraws.size(); ++i) _decalDraws[i].model->setEnabled(enabled && i < _decalActive);
 }
 
 void LandscapeRenderer::setHeightBlendEnabled(bool enabled) {
@@ -201,7 +229,7 @@ void LandscapeRenderer::setVTMipEnabled(bool enabled) {
     // disabled. Switching is immediate and never invalidates frozen VT pages.
     // Vulkan's NONE mip filter maps to nearest-mip selection. Restrict the
     // sampled view to mip0 as well, using the existing attachment views.
-    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
         material->setPropertyGFXTexture("vtAlbedo", enabled ? vt.albedo() : vt.framebuffer()->getColorTextures()[0]);
         material->setPropertyGFXTexture("vtNormalRoughnessAO", enabled ? vt.normalRoughnessAO() : vt.framebuffer()->getColorTextures()[1]);
         for (const auto &pass : *material->getPasses()) {
@@ -240,7 +268,7 @@ IntrusivePtr<scene::Model> LandscapeRenderer::createModel(uint32_t meshIndex) {
 }
 
 void LandscapeRenderer::updateMaterialProperties() {
-    if (_materialSolid == nullptr || _materialWire == nullptr) {
+    if (_materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
         return;
     }
 
@@ -257,8 +285,9 @@ void LandscapeRenderer::updateMaterialProperties() {
         lodMorph[i] = Vec4{start, end, 0.0F, 0.0F};
     }
 
-    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
         material->setPropertyVec4("terrainParams", terrainParams);
+        material->setPropertyVec4("decalControl", Vec4{_decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
                                                         static_cast<float>(_data.tileResolution),
                                                         0.0F, 0.0F});
@@ -270,7 +299,7 @@ void LandscapeRenderer::updateMaterialProperties() {
 }
 
 void LandscapeRenderer::updateMorphCameraProperty() {
-    if (_materialSolid == nullptr || _materialWire == nullptr) {
+    if (_materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
         return;
     }
 
@@ -280,7 +309,7 @@ void LandscapeRenderer::updateMorphCameraProperty() {
         _viewPosition.z,
         0.0F,
     };
-    for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
         material->setPropertyVec4("morphCameraPos", cameraPosition);
     }
 }
@@ -563,6 +592,75 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
             if (boundsChanged) updateModelBounds(state.model, patch);
         }
     }
+    syncDecals(patches);
+}
+
+void LandscapeRenderer::updateDecalInstance(const DecalDraw &draw) {
+    updateInstanceData(draw.model, draw.patch);
+    const auto &d = _asset->decals()[draw.decal];
+    const auto &layer = _asset->decalLayers()[d.layer];
+    setInstanceAttribute(draw.model, "a_decalRegion", Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)});
+    setInstanceAttribute(draw.model, "a_decalGrid", draw.grid);
+    const float distance = (_viewPosition - (_node->getWorldPosition() + _decalCenters[draw.decal])).length();
+    const float t = std::clamp((distance - d.nearDistance) / (d.farDistance - d.nearDistance), 0.0F, 1.0F);
+    setInstanceAttribute(draw.model, "a_decalFade", Vec4{layer.heightScale, 1.0F - t * t * (3.0F - 2.0F * t), 0, 0});
+    auto bounds = draw.patch;
+    bounds.node.maxY += layer.heightScale;
+    updateModelBounds(draw.model, bounds);
+}
+
+void LandscapeRenderer::syncDecals(const ccstd::vector<Patch> &patches) {
+    _decalActive = 0;
+    // Every decal uses a fixed lattice at 1/16 of the finest terrain cell.
+    // Split on finest-cell boundaries once conceptually: all possible terrain
+    // patches align with them, so changing patch ownership cannot retessellate
+    // the decal. Only its base height and resident material mapping may change.
+    const float step = computeNodeSize(_data.sectorSize, _data.maxLevel, 0) / 16.0F;
+    const float originX = -_data.worldWidth() * 0.5F;
+    const float originZ = -_data.worldDepth() * 0.5F;
+    for (const auto &patch : patches) {
+        const auto &node = patch.node;
+        const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
+        const float cell = nodeSize / 16.0F;
+        const float size = (1U << patch.meshIndex) * cell;
+        const float x = node.ix * nodeSize - _data.worldWidth() * .5F + patch.x * cell;
+        const float z = node.iz * nodeSize - _data.worldDepth() * .5F + patch.z * cell;
+        for (uint32_t i = 0; i < _asset->decals().size(); ++i) {
+            const auto &d = _asset->decals()[i];
+            // Roads and surface marks live entirely in RVT. Do not instantiate
+            // grids that would sample heights only to discard every fragment.
+            if (_asset->decalLayers()[d.layer].heightScale == 0.0F) continue;
+            const float distance = (_viewPosition - (_node->getWorldPosition() + _decalCenters[i])).length();
+            if (distance >= d.farDistance || x + size <= d.x || z + size <= d.z ||
+                x >= d.x + d.size || z >= d.z + d.size) continue;
+            const int firstX = static_cast<int>(std::floor((std::max(x, d.x) - originX) / step));
+            const int firstZ = static_cast<int>(std::floor((std::max(z, d.z) - originZ) / step));
+            const int endX = static_cast<int>(std::ceil((std::min(x + size, d.x + d.size) - originX) / step));
+            const int endZ = static_cast<int>(std::ceil((std::min(z + size, d.z + d.size) - originZ) / step));
+            for (int iz = firstZ; iz < endZ; ++iz) for (int ix = firstX; ix < endX; ++ix) {
+                const float left = std::max(originX + ix * step, d.x);
+                const float bottom = std::max(originZ + iz * step, d.z);
+                const float right = std::min(originX + (ix + 1) * step, d.x + d.size);
+                const float top = std::min(originZ + (iz + 1) * step, d.z + d.size);
+                const size_t at = _decalActive++;
+                if (at == _decalDraws.size()) {
+                    IntrusivePtr<scene::Model> model = Root::getInstance()->createModel<scene::Model>();
+                    model->setNode(_node);
+                    model->setTransform(_node);
+                    model->initSubModel(0, _decalMesh, _wireframe ? _decalWire.get() : _decalSolid.get());
+                    _scene->addModel(model);
+                    _decalDraws.push_back(DecalDraw{model, patch, i, {}});
+                }
+                auto &draw = _decalDraws[at];
+                draw.patch = patch;
+                draw.decal = i;
+                draw.grid = Vec4{left, bottom, right - left, top - bottom};
+                updateDecalInstance(draw);
+                draw.model->setEnabled(_decal3DEnabled);
+            }
+        }
+    }
+    for (size_t i = _decalActive; i < _decalDraws.size(); ++i) _decalDraws[i].model->setEnabled(false);
 }
 
 void LandscapeRenderer::setFreezeLod(bool frozen) {
@@ -571,6 +669,7 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
     }
     _freezeLod = frozen;
     if (_vtRenderer) _vtRenderer->setFrozen(frozen);
+    for (size_t i = 0; i < _decalActive; ++i) updateDecalInstance(_decalDraws[i]);
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         updateModelBounds(state.model, state.patch);
@@ -579,6 +678,11 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
 
 void LandscapeRenderer::setWireframe(bool wireframe) {
     _wireframe = wireframe;
+    for (size_t i = 0; i < _decalDraws.size(); ++i) {
+        const auto &draw = _decalDraws[i];
+        draw.model->setSubModelMaterial(0, wireframe ? _decalWire.get() : _decalSolid.get());
+        if (i < _decalActive) updateDecalInstance(draw);
+    }
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         state.model->setSubModelMaterial(0, _wireframe ? _materialWire.get() : _materialSolid.get());
@@ -613,7 +717,7 @@ void LandscapeRenderer::setUnlit(bool enabled) {
     // variants in place, preserving texture bindings and instanced batching.
     const auto compile = [this](bool unlit) {
         bool success = true;
-        for (auto *material : {_materialSolid.get(), _materialWire.get()}) {
+        for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
             for (const auto &pass : *material->getPasses()) {
                 pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = unlit;
                 success = pass->tryCompile() && success;
@@ -651,6 +755,10 @@ void LandscapeRenderer::destroy() {
         model->destroy();
     };
 
+    for (const auto &draw : _decalDraws) removeModel(draw.model);
+    _decalDraws.clear();
+    _decalActive = 0;
+    _decalCenters.clear();
     for (const auto &entry : _active) {
         removeModel(entry.second.model);
     }
@@ -670,6 +778,9 @@ void LandscapeRenderer::destroy() {
     for (auto &mesh : _meshes) mesh = nullptr;
     _materialSolid = nullptr;
     _materialWire = nullptr;
+    _decalSolid = nullptr;
+    _decalWire = nullptr;
+    _decalMesh = nullptr;
     _materialLibrary.reset();
     _node = nullptr;
     _scene = nullptr;

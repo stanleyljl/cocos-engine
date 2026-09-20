@@ -47,6 +47,9 @@ public:
     bool valid() const { return _albedoHeight != nullptr && _normalRoughnessAO != nullptr; }
     gfx::Texture *albedoHeight() const { return _albedoHeight; }
     gfx::Texture *normalRoughnessAO() const { return _normalRoughnessAO; }
+    gfx::Texture *decalAlbedo() const { return _decalAlbedo; }
+    gfx::Texture *decalNormal() const { return _decalNormal; }
+    gfx::Texture *decalHeight() const { return _decalHeight; }
     gfx::Sampler *sampler() const { return _sampler; }
     gfx::Texture *globalColorMap() const { return _globalColorMap; }
     gfx::Sampler *globalColorSampler() const { return _globalColorSampler; }
@@ -59,6 +62,9 @@ private:
     IntrusivePtr<gfx::Texture> _albedoHeight;
     IntrusivePtr<gfx::Texture> _normalRoughnessAO;
     IntrusivePtr<gfx::Texture> _globalColorMap;
+    IntrusivePtr<gfx::Texture> _decalAlbedo;
+    IntrusivePtr<gfx::Texture> _decalNormal;
+    IntrusivePtr<gfx::Texture> _decalHeight;
     gfx::Sampler *_sampler{nullptr}; // cached by device
     gfx::Sampler *_globalColorSampler{nullptr}; // cached by device
     float _globalColorStrength{0.0F};

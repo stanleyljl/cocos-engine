@@ -67,7 +67,7 @@ uint8_t encode(float value) {
     return static_cast<uint8_t>(std::round(std::clamp(value, 0.0F, 1.0F) * 255.0F));
 }
 
-void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, ccstd::vector<uint8_t> &dst) {
+void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, ccstd::vector<uint8_t> &dst, bool linearColor) {
     const uint32_t nextSize = std::max(1U, size / 2U);
     dst.resize(static_cast<size_t>(nextSize) * nextSize * 4U);
     for (uint32_t y = 0; y < nextSize; ++y) {
@@ -80,7 +80,7 @@ void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, c
                     const auto *pixel = src.data() + (static_cast<size_t>(sy) * size + sx) * 4U;
                     for (uint32_t c = 0; c < 4U; ++c) {
                         const float value = static_cast<float>(pixel[c]) / 255.0F;
-                        sum[c] += albedo && c < 3U ? srgbToLinear(value) : value;
+                        sum[c] += albedo && !linearColor && c < 3U ? srgbToLinear(value) : value;
                     }
                     if (!albedo) {
                         const float nx = static_cast<float>(pixel[0]) / 127.5F - 1.0F;
@@ -95,7 +95,7 @@ void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, c
             auto *pixel = dst.data() + (static_cast<size_t>(y) * nextSize + x) * 4U;
             for (uint32_t c = 0; c < 4U; ++c) {
                 const float value = sum[c] / static_cast<float>(count);
-                pixel[c] = encode(albedo && c < 3U ? linearToSrgb(value) : value);
+                pixel[c] = encode(albedo && !linearColor && c < 3U ? linearToSrgb(value) : value);
             }
             if (!albedo) {
                 const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
@@ -125,7 +125,7 @@ IntrusivePtr<gfx::Texture> createTexture(gfx::Device *device, uint32_t resolutio
 }
 
 void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
-                   uint32_t layer, ccstd::vector<uint8_t> pixels, bool albedo) {
+                   uint32_t layer, ccstd::vector<uint8_t> pixels, bool albedo, bool linearColor = false) {
     ccstd::vector<uint8_t> next;
     uint32_t size = resolution;
     for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
@@ -137,7 +137,7 @@ void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resoluti
         const uint8_t *buffers[]{pixels.data()};
         device->copyBuffersToTexture(buffers, texture, &region, 1U);
         if (mip + 1U < texture->getInfo().levelCount) {
-            downsample(pixels, size, albedo, next);
+            downsample(pixels, size, albedo, next, linearColor);
             pixels.swap(next);
             size = std::max(1U, size / 2U);
         }
@@ -193,6 +193,33 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         }
         _tilingParams[layer.id] = Vec4{uvScale, shaderMean[0], shaderMean[1], shaderMean[2]};
     }
+    // Decal color is premultiplied linear RGB: mip filtering cannot introduce
+    // dark borders through transparent texels. Height RG is a uint16 scalar.
+    const auto &decalLayers = asset.decalLayers();
+    const uint32_t decalSize = decalLayers.empty() ? 1U : asset.decalResolution();
+    const uint32_t decalCount = std::max(1U, static_cast<uint32_t>(decalLayers.size()));
+    _decalAlbedo = createTexture(device, decalSize, decalCount);
+    _decalNormal = createTexture(device, decalSize, decalCount);
+    if (!_decalAlbedo || !_decalNormal) return false;
+    auto heightInfo = _decalAlbedo->getInfo();
+    heightInfo.levelCount = 1;
+    _decalHeight = device->createTexture(heightInfo);
+    if (!_decalAlbedo || !_decalNormal || !_decalHeight) return false;
+    for (uint32_t i = 0; i < decalCount; ++i) {
+        ccstd::vector<uint8_t> color{0, 0, 0, 0}, normal{128, 128, 255, 255}, height{0, 0, 0, 255};
+        if (!decalLayers.empty()) {
+            const auto &d = decalLayers[i];
+            if (!decodeRGBA8(d.albedoMask, decalSize, color) || !decodeRGBA8(d.normalRoughnessAO, decalSize, normal) ||
+                !decodeRGBA8(d.height, decalSize, height)) return false;
+        }
+        for (size_t p = 0; p < color.size(); p += 4) {
+            const float alpha = color[p + 3] / 255.0F;
+            for (size_t c = 0; c < 3; ++c) color[p + c] = encode(srgbToLinear(color[p + c] / 255.0F) * alpha);
+        }
+        uploadTexture(device, _decalAlbedo, decalSize, i, std::move(color), true, true);
+        uploadTexture(device, _decalNormal, decalSize, i, std::move(normal), false);
+        uploadTexture(device, _decalHeight, decalSize, i, std::move(height), true, true);
+    }
     const auto &global = asset.globalColorMap();
     uint32_t globalResolution = 1U;
     ccstd::vector<uint8_t> globalPixels{255, 255, 255, 255};
@@ -232,6 +259,9 @@ void MaterialLibrary::destroy() {
     _albedoHeight = nullptr;
     _normalRoughnessAO = nullptr;
     _globalColorMap = nullptr;
+    _decalAlbedo = nullptr;
+    _decalNormal = nullptr;
+    _decalHeight = nullptr;
     _sampler = nullptr;
     _globalColorSampler = nullptr;
     _globalColorStrength = 0.0F;

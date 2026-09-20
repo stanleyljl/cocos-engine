@@ -54,6 +54,8 @@ constexpr uint32_t PAGE_POOL_LAYERS = 1024;
 constexpr uint32_t PAGE_UPLOAD_BUDGET = 8;
 // Retained for the material library and virtual texture implementation.
 constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
+constexpr uint32_t DECAL_LIBRARY_MAX = 8;
+constexpr uint32_t DECAL_INSTANCE_MAX = 128;
 
 // 256 usable texels + filtering gutters. Keep 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;

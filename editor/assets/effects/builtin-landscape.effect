@@ -11,6 +11,8 @@ CCEffect %{
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4224, 264, 4, 0] }
+        decalControl: { value: [1, 0, 0, 0] }
+        decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -58,6 +60,7 @@ CCProgram landscape-uniforms %{
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border
+    vec4 decalControl; // F12: enable nearby decal geometry; cached material is unchanged
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
   };
@@ -66,6 +69,7 @@ CCProgram landscape-uniforms %{
 CCProgram landscape-macros %{
   // F7: VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
   #pragma define-meta LANDSCAPE_DEBUG_UNLIT
+  #pragma define-meta LANDSCAPE_DECAL_MESH
   #define CC_SURFACES_USE_TANGENT_SPACE 1
   #include <surfaces/effect-macros/terrain>
 }%
@@ -77,9 +81,18 @@ CCProgram landscape-vertex %{
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
     in vec4 a_normalParentInst; // parent normal region XZ origin, size, array layer
     in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
+    #if LANDSCAPE_DECAL_MESH
+      in vec4 a_decalRegion; // minimum XZ, world size, height texture layer
+      in vec4 a_decalGrid; // fixed XZ origin, width and depth; independent of LOD
+      in vec4 a_decalFade; // height scale, whole-decal distance fade, unused ZW
+    #endif
   #endif
   #if __VERSION__ >= 300
     uniform sampler2DArray heightmap;
+    #if LANDSCAPE_DECAL_MESH
+      uniform sampler2DArray decalHeightMap;
+      out float v_decalLift;
+    #endif
     flat out float v_lod;
     flat out vec4 v_vtParams;
     out vec4 v_normalUV;
@@ -109,6 +122,62 @@ CCProgram landscape-vertex %{
   #endif
   }
 
+  #if __VERSION__ >= 300 && USE_INSTANCING
+  vec4 terrainVertex(vec2 parentUV) {
+    vec2 xz = a_gridInst.xy + parentUV * a_gridInst.z;
+    mat4 world;
+    CCGetWorldMatrix(world);
+    vec3 baseWorld = (world * vec4(xz.x, sampleHeight(xz), xz.y, 1.0)).xyz;
+    vec2 range = lodMorph[int(a_gridInst.w)].xy;
+    float morph = clamp((distance(morphCameraPos.xyz, baseWorld) - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
+    xz -= fract(parentUV * 8.0) * 2.0 * (a_gridInst.z / 16.0) * morph;
+    return vec4(xz.x, sampleHeight(xz), xz.y, morph);
+  }
+  #if LANDSCAPE_DECAL_MESH
+  bool decalTriangleHeight(vec2 xz, vec4 a, vec4 b, vec4 c, out vec2 heightMorph) {
+    vec2 ab = b.xz - a.xz;
+    vec2 ac = c.xz - a.xz;
+    vec2 ap = xz - a.xz;
+    float det = ab.x * ac.y - ab.y * ac.x;
+    // Odd CDLOD vertices eventually collapse onto the even lattice. Ignore
+    // collapsed triangles rather than dividing by a nearly zero area.
+    float cellSize = a_gridInst.z / 16.0;
+    if (abs(det) < cellSize * cellSize * 1e-8) return false;
+    vec2 w = vec2(ap.x * ac.y - ap.y * ac.x, ab.x * ap.y - ab.y * ap.x) / det;
+    if (min(min(w.x, w.y), 1.0 - w.x - w.y) < -1e-5) return false;
+    heightMorph = a.yw * (1.0 - w.x - w.y) + b.yw * w.x + c.yw * w.y;
+    return true;
+  }
+
+  vec4 decalTerrainAt(vec2 xz) {
+    // Even vertices never move in XZ; a morphed 2x2 cell block keeps its
+    // footprint. Invert its triangles to find Y at the FIXED decal position.
+    // Interpolating forward from the original cell barycentrics would drag
+    // the decal across its height texture and change the stone's silhouette.
+    vec2 grid = (xz - a_gridInst.xy) / a_gridInst.z * 16.0;
+    vec2 block = clamp(floor(grid * 0.5) * 2.0, vec2(0.0), vec2(14.0));
+    vec4 p[9];
+    for (int z = 0; z < 3; ++z) {
+      for (int x = 0; x < 3; ++x) {
+        p[z * 3 + x] = terrainVertex((block + vec2(float(x), float(z))) / 16.0);
+      }
+    }
+    vec2 heightMorph;
+    for (int z = 0; z < 2; ++z) {
+      for (int x = 0; x < 2; ++x) {
+        int i = z * 3 + x;
+        if (decalTriangleHeight(xz, p[i], p[i + 1], p[i + 3], heightMorph))
+          return vec4(xz.x, heightMorph.x, xz.y, heightMorph.y);
+        if (decalTriangleHeight(xz, p[i + 4], p[i + 3], p[i + 1], heightMorph))
+          return vec4(xz.x, heightMorph.x, xz.y, heightMorph.y);
+      }
+    }
+    // Only reached for coordinates outside the node or roundoff at its edge.
+    return vec4(xz.x, sampleHeight(xz), xz.y, 0.0);
+  }
+  #endif
+  #endif
+
   #define CC_SURFACES_VERTEX_MODIFY_LOCAL_POS
   vec3 SurfacesVertexModifyLocalPos(in SurfacesStandardVertexIntermediate In) {
     // The RG32F buffer packs terrain XZ into the first two input components.
@@ -128,22 +197,24 @@ CCProgram landscape-vertex %{
     vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     v_lod = a_gridInst.w;
-    // Evaluate LOD on the base terrain before morphing the grid.
-    mat4 matWorld;
-    CCGetWorldMatrix(matWorld);
-    vec3 baseWorld = (matWorld * vec4(localXZ.x, sampleHeight(localXZ), localXZ.y, 1.0)).xyz;
-    float eyeDist = distance(morphCameraPos.xyz, baseWorld);
-    #if __VERSION__ >= 300
-      vec2 range = lodMorph[int(v_lod)].xy;
-      float morph = clamp((eyeDist - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
-      // Morph in parent-node coordinates so splitting the grid into quadrant
-      // instances preserves the original odd/even vertex phase exactly.
-      vec2 odd = fract(parentUV * 16.0 * 0.5) * 2.0;
-      localXZ -= odd * (a_gridInst.z / 16.0) * morph;
-      v_normalMorph = morph;
-    #endif
   #endif
     float height = sampleHeight(localXZ);
+  #if __VERSION__ >= 300 && USE_INSTANCING
+    vec4 base;
+    #if LANDSCAPE_DECAL_MESH
+      base = decalTerrainAt(a_decalGrid.xy + In.position.xy * a_decalGrid.zw);
+      vec2 uv = (base.xz - a_decalRegion.xy) / a_decalRegion.z;
+      vec2 encoded = textureLod(decalHeightMap, vec3(clamp(uv, vec2(0.0), vec2(1.0)), a_decalRegion.w), 0.0).rg;
+      v_decalLift = dot(encoded, vec2(256.0, 1.0)) / 257.0 * a_decalFade.x * a_decalFade.y * decalControl.x;
+      if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) v_decalLift = 0.0;
+      base.y += v_decalLift;
+    #else
+      base = terrainVertex(parentUV);
+    #endif
+    localXZ = base.xz;
+    height = base.y;
+    v_normalMorph = base.w;
+  #endif
   #if __VERSION__ >= 300 && USE_INSTANCING
     // Identical final world coordinates for geometry and both normal levels.
     float resolution = max(heightParams.y, 2.0);
@@ -171,6 +242,9 @@ CCProgram landscape-vertex %{
 }%
 
 CCProgram landscape-surface %{
+  #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
+    in float v_decalLift;
+  #endif
   #if __VERSION__ >= 300
     uniform sampler2D vtAlbedo;
     uniform sampler2D vtNormalRoughnessAO;
@@ -207,6 +281,10 @@ CCProgram landscape-surface %{
   #endif
   #define CC_SURFACES_FRAGMENT_MODIFY_SHARED_DATA
   void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
+    #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
+      // Flat collar pixels already exist on the terrain: avoid coplanar overlap.
+      if (v_decalLift <= 0.001) discard;
+    #endif
     vec3 albedo = vec3(0.0);
   #if !LANDSCAPE_DEBUG_UNLIT
     vec3 detailNormal = vec3(0.0, 0.0, 1.0);

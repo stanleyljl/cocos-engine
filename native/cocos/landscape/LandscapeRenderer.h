@@ -82,6 +82,7 @@ public:
     void setUnlit(bool enabled);
     void setVTMipEnabled(bool enabled);
     void setHeightBlendEnabled(bool enabled);
+    void setDecal3DEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);
@@ -108,6 +109,14 @@ private:
         Patch patch;
     };
 
+    struct DecalDraw {
+        IntrusivePtr<scene::Model> model;
+        Patch patch;
+        uint32_t decal{0};
+        Vec4 grid; // fixed landscape-local XZ origin and width/depth
+    };
+    void syncDecals(const ccstd::vector<Patch> &patches);
+    void updateDecalInstance(const DecalDraw &draw);
     IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
     void updateMaterialProperties();
     void updateMorphCameraProperty();
@@ -129,6 +138,13 @@ private:
     std::array<IntrusivePtr<RenderingSubMesh>, 4> _meshes;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
+    IntrusivePtr<Material> _decalSolid;
+    IntrusivePtr<Material> _decalWire;
+    IntrusivePtr<RenderingSubMesh> _decalMesh;
+    ccstd::vector<DecalDraw> _decalDraws;
+    size_t _decalActive{0};
+    ccstd::vector<Vec3> _decalCenters;
+    bool _decal3DEnabled{true};
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<TilePagePool> _tilePages;
     std::unique_ptr<MaterialLibrary> _materialLibrary;

@@ -24,6 +24,11 @@ using namespace cc;
 
 %ignore cc::RefCounted;
 %ignore cc::landscape::LandscapeAsset::TileData;
+%ignore cc::landscape::LandscapeAsset::DecalLayer;
+%ignore cc::landscape::LandscapeAsset::Decal;
+%ignore cc::landscape::LandscapeAsset::decalLayers;
+%ignore cc::landscape::LandscapeAsset::decals;
+%ignore cc::landscape::LandscapeAsset::decalResolution;
 %ignore cc::landscape::LandscapeAsset::data;
 %ignore cc::landscape::LandscapeAsset::dataDir;
 %ignore cc::landscape::LandscapeAsset::valid;

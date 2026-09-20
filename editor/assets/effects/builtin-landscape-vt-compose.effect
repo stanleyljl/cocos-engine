@@ -21,6 +21,12 @@ CCEffect %{
         tilingParams: { value: [0.1, 0, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
+        decalRegions: { value: [0, 0, 1, 0] }
+        decalParams: { value: [0, 0, 0, 0] }
+        decalLayerParams: { value: [0, 0, 0, 0] }
+        decalIndexMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
+        decalAlbedoMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
+        decalNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
@@ -123,6 +129,9 @@ CCProgram vt-compose-uniforms %{
     vec4 tilingParams[32]; // repeats/m, linear mean albedo RGB
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
+    vec4 decalRegions[128]; // config::DECAL_INSTANCE_MAX
+    vec4 decalParams; // placed decal count
+    vec4 decalLayerParams[8]; // X: modulate the existing terrain color for imprints
   };
 }%
 
@@ -136,8 +145,10 @@ CCProgram vt-compose-vs %{
   out vec2 v_localXZ;
   #if __VERSION__ >= 300
   flat out vec4 v_source;
+  flat out vec2 v_decalPage;
   #else
   out vec4 v_source;
+  out vec2 v_decalPage;
   #endif
 
   vec4 vert() {
@@ -149,6 +160,7 @@ CCProgram vt-compose-vs %{
     vec2 local = (a_position * vtLayout.y - vtLayout.z) / (vtLayout.y - 2.0 * vtLayout.z);
     v_localXZ = a_vtRegion.xy + local * a_vtRegion.z;
     v_source = a_vtSource;
+    v_decalPage = a_vtPage.xy;
     vec2 clipPos = atlasUv * 2.0 - 1.0;
     // Texture-to-clip conversion: screenSpaceSignY * clipSpaceSignY.
     // Vulkan/GLES use +1; Metal needs -1. A screen-space flip alone is wrong.
@@ -167,8 +179,12 @@ CCProgram vt-compose-fs %{
   uniform highp sampler2DArray albedoHeightMap;
   uniform highp sampler2DArray normalRoughnessAOMap;
   uniform sampler2D globalColorMap;
+  uniform highp sampler2DArray decalAlbedoMap;
+  uniform highp sampler2DArray decalNormalMap;
+  uniform sampler2D decalIndexMap;
   in vec2 v_localXZ;
   flat in vec4 v_source;
+  flat in vec2 v_decalPage;
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
 
@@ -284,6 +300,48 @@ CCProgram vt-compose-fs %{
       vec3 globalColor = SRGBToLinear(texture(globalColorMap, globalUV).rgb);
       vec3 detail = clamp(albedo / max(meanAlbedo, vec3(0.02)), vec3(0.25), vec3(4.0));
       albedo = mix(albedo, globalColor * detail, globalColorParams.z);
+    }
+    // Static planar decal composition is cached in RVT. Explicit gradients
+    // remain valid at coverage boundaries and while a page is being refined.
+    vec2 decalDx = dFdx(v_localXZ), decalDy = dFdy(v_localXZ);
+    for (int entry = 0; entry < 128; ++entry) {
+      if (entry >= int(v_decalPage.y)) break;
+      vec4 indices = texelFetch(decalIndexMap, ivec2(entry / 4, int(v_decalPage.x)), 0);
+      int i = int(indices[entry % 4] * 255.0 + 0.5);
+      vec4 region = decalRegions[i];
+      vec2 decalUV = (v_localXZ - region.xy) / region.z;
+      // Half-open footprints give adjoining road segments one owner at seams.
+      if (any(lessThan(decalUV, vec2(0.0))) || any(greaterThanEqual(decalUV, vec2(1.0)))) continue;
+      vec3 coord = vec3(decalUV, region.w);
+      vec4 color = textureGrad(decalAlbedoMap, coord, decalDx / region.z, decalDy / region.z);
+      if (color.a <= 0.0) continue;
+      vec4 nra = textureGrad(decalNormalMap, coord, decalDx / region.z, decalDy / region.z);
+      vec4 layer = decalLayerParams[int(region.w)];
+      if (layer.y > 0.0 && layer.z > 0.0) {
+        // The low-resolution decal stores coverage and a blend mask only.
+        // Repeated source materials keep their own texel density in every VT page.
+        int a = int(layer.y) - 1, b = int(layer.z) - 1;
+        vec2 local = v_localXZ - region.xy;
+        float scaleA = tilingParams[a].x, scaleB = tilingParams[b].x;
+        vec3 uvA = vec3(local * scaleA, float(a)), uvB = vec3(local * scaleB, float(b));
+        vec4 ca = textureGrad(albedoHeightMap, uvA, decalDx * scaleA, decalDy * scaleA);
+        vec4 cb = textureGrad(albedoHeightMap, uvB, decalDx * scaleB, decalDy * scaleB);
+        vec4 na = textureGrad(normalRoughnessAOMap, uvA, decalDx * scaleA, decalDy * scaleA);
+        vec4 nb = textureGrad(normalRoughnessAOMap, uvB, decalDx * scaleB, decalDy * scaleB);
+        float weight = nra.b;
+        color.rgb = mix(ca.rgb * ca.rgb, cb.rgb * cb.rgb, weight) * color.a;
+        nra = mix(na, nb, weight);
+      }
+      vec2 xy = nra.rg * 2.0 - 1.0;
+      vec3 decalNormal = normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+      // Imprints darken the existing material rather than painting a solid
+      // shoe-shaped brown patch. The stored source is premultiplied linear RGB.
+      vec3 over = albedo * (1.0 - color.a) + color.rgb;
+      vec3 modulated = albedo * (vec3(1.0 - color.a) + color.rgb);
+      albedo = mix(over, modulated, layer.x);
+      normal = normalize(mix(normalize(normal), decalNormal, color.a));
+      roughness = mix(roughness, nra.b, color.a);
+      ao = mix(ao, nra.a, color.a);
     }
     // Color is stored in linear space; Base Pass must not apply SRGBToLinear.
     albedoOut = vec4(albedo, 1.0);
