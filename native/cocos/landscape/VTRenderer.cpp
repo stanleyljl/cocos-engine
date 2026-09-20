@@ -81,7 +81,10 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
         pass->getHandle("heightBlendParams") == 0U || pass->getHandle("decalAlbedoMap") == 0U ||
         pass->getHandle("decalNormalMap") == 0U || pass->getHandle("decalRegions") == 0U ||
         pass->getHandle("decalIndexMap") == 0U || pass->getHandle("decalLayerParams") == 0U ||
-        pass->getHandle("terrainNormalMap") == 0U || pass->getHandle("normalSourceMap") == 0U) {
+        pass->getHandle("terrainNormalMap") == 0U || pass->getHandle("normalSourceMap") == 0U ||
+        pass->getHandle("cliffSourceMap") == 0U || pass->getHandle("terrainHeightMap") == 0U ||
+        pass->getHandle("cliffParams") == 0U || pass->getHandle("cliffLayout") == 0U ||
+        pass->getHandle("cliffMaterialParams") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -93,6 +96,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     };
     bind("splatmap", tiles.splatArray(), tiles.splatSampler());
     bind("terrainNormalMap", tiles.normalArray(), tiles.heightSampler());
+    bind("terrainHeightMap", tiles.heightArray(), tiles.heightSampler());
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
     bind("globalColorMap", materials.globalColorMap(), materials.globalColorSampler());
@@ -128,6 +132,24 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     if (!_normalSources) return false;
     _normalSourceData.resize(config::VT_PAGE_COUNT * config::VT_NORMAL_SOURCE_COUNT);
     bind("normalSourceMap", _normalSources, tiles.splatSampler());
+    _cliffData = data;
+    _cliffLevel = cliffReferenceLevel(data);
+    _cliffColumns = data.sectorsX << (data.maxLevel - _cliffLevel);
+    _cliffRows = data.sectorsZ << (data.maxLevel - _cliffLevel);
+    indexInfo.width = _cliffColumns;
+    indexInfo.height = _cliffRows;
+    _cliffSources = device->createTexture(indexInfo);
+    if (!_cliffSources) return false;
+    _cliffSourceData.resize(static_cast<size_t>(_cliffColumns) * _cliffRows);
+    bind("cliffSourceMap", _cliffSources, tiles.splatSampler());
+    const float referenceSize = computeNodeSize(data.sectorSize, data.maxLevel, _cliffLevel);
+    const auto &cliffMaterial = asset.cliffMaterial();
+    _cliffParams = Vec4{0, data.heightScale, data.heightBias, static_cast<float>(cliffMaterial.layer + 1)};
+    _material->setPropertyVec4("cliffMaterialParams", Vec4{cliffMaterial.maxNormalY,
+        cliffMaterial.globalColorInfluence, 0, 0});
+    _material->setPropertyVec4("cliffParams", _cliffParams);
+    _material->setPropertyVec4("cliffLayout", Vec4{-data.worldWidth() * 0.5F,
+        -data.worldDepth() * 0.5F, referenceSize, 0});
     _material->setPropertyVec4Array("decalRegions", decalRegions);
     _material->setPropertyVec4("decalParams", Vec4{static_cast<float>(decals.size()), 0, 0, 0});
     _hasGlobalColorMap = materials.hasGlobalColorMap();
@@ -273,6 +295,48 @@ void VTRenderer::setRVTNormalEnabled(bool enabled) {
     _texture.invalidate();
 }
 
+void VTRenderer::setCliffEnabled(bool enabled) {
+    if (_cliffEnabled == enabled) return;
+    CC_ASSERT(!_frozen);
+    _cliffEnabled = enabled;
+    // An authored material override needs the same slope mask with projection disabled. Keep
+    // its references pinned; negative X means ready with planar projection.
+    if (_cliffParams.w <= 0.0F) _cliffReady = false;
+    _cliffParams.x = _cliffReady ? (enabled ? 1.0F : -1.0F) : 0.0F;
+    if (_material) _material->setPropertyVec4("cliffParams", _cliffParams);
+    _texture.invalidate();
+}
+
+void VTRenderer::syncCliffSources(TilePagePool &tiles) {
+    if ((!_cliffEnabled && _cliffParams.w <= 0.0F) || _frozen || !_material) return;
+    bool ready = true;
+    const float size = computeNodeSize(_cliffData.sectorSize, _cliffData.maxLevel, _cliffLevel);
+    for (uint32_t z = 0; z < _cliffRows; ++z) {
+        for (uint32_t x = 0; x < _cliffColumns; ++x) {
+            const int layer = tiles.query(_cliffLevel, x, z);
+            ready &= layer >= 0;
+            _cliffSourceData[z * _cliffColumns + x] = Vec4{
+                x * size - _cliffData.worldWidth() * 0.5F,
+                z * size - _cliffData.worldDepth() * 0.5F, size, static_cast<float>(layer)};
+        }
+    }
+    if (_cliffReady || !ready) return;
+    // Publish once, after the entire fixed reference is resident. No per-camera
+    // source LOD switches, partial-resolution seams or repeated VT invalidation.
+    gfx::BufferTextureCopy region;
+    region.texExtent.width = _cliffColumns;
+    region.texExtent.height = _cliffRows;
+    region.texExtent.depth = 1;
+    const uint8_t *buffers[]{reinterpret_cast<const uint8_t *>(_cliffSourceData.data())};
+    Root::getInstance()->getDevice()->copyBuffersToTexture(buffers, _cliffSources, &region, 1);
+    _cliffReady = true;
+    _cliffParams.x = _cliffEnabled ? 1.0F : -1.0F;
+    _material->setPropertyVec4("cliffParams", _cliffParams);
+    _texture.invalidate();
+    CC_LOG_INFO("[Landscape] Cliff reference ready: L%u, %ux%u tiles, %.2f m sample spacing",
+        _cliffLevel, _cliffColumns, _cliffRows, size / (_cliffData.tileResolution - 1U));
+}
+
 void VTRenderer::setHeightBlendEnabled(bool enabled) {
     if (!_material) return;
     auto *pass = _material->getPasses()->front().get();
@@ -307,7 +371,7 @@ void VTRenderer::render() {
     _instanceData.clear();
     for (uint32_t slot : _dirtySlots) {
         const auto &page = _texture.page(slot);
-        // Include filtering gutters and retain manifest order (road before tracks).
+        // Include filtering gutters and retain the asset-defined compositing order.
         const float border = page.region.z * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
         uint32_t count = 0;
         for (size_t i = 0; i < _decalRegions.size(); ++i) {
@@ -367,6 +431,9 @@ void VTRenderer::render() {
 }
 
 void VTRenderer::destroy() {
+    _cliffSources = nullptr;
+    _cliffSourceData.clear();
+    _cliffReady = false;
     _normalSources = nullptr;
     _normalSourceData.clear();
     _decalIndices = nullptr;

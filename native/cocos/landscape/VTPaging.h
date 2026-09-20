@@ -37,6 +37,32 @@ inline uint32_t vtDesiredLevel(float sectorSize, uint32_t rootLevel, float dista
     return level;
 }
 
+// A fixed, bounded reference grid keeps projection height/axis selection independent
+// of camera distance and CDLOD morph. Reuse at most a quarter of the source pool.
+inline uint32_t cliffReferenceLevel(const LandscapeData &data) {
+    uint32_t level = data.minTileLevel;
+    while (level < data.maxLevel &&
+           static_cast<uint64_t>(data.sectorsX) * data.sectorsZ *
+               (1ULL << (2U * (data.maxLevel - level))) > config::PAGE_POOL_LAYERS / 4U) ++level;
+    return level;
+}
+
+inline float cliffDensityScale(float heightRange, float width, float childScale = 1.0F) {
+    const float slope = std::max(heightRange, 0.0F) / std::max(width, 0.001F);
+    // At most two extra VT levels. This is a conservative range-based estimate,
+    // not a substitute for screen-space feedback; residency still bounds memory.
+    // Retain narrow steep features when a coarse node encloses mostly flat
+    // terrain. Averaging its high/low range over the coarse width loses them.
+    return std::min(4.0F, std::max(childScale, std::sqrt(1.0F + slope * slope)));
+}
+
+inline float vtAncestorPriority(float requiredPagePriority, uint32_t ancestorSteps) {
+    // Ancestors provide fallback, not additional visible coverage. Recomputing
+    // size/distance for them incorrectly promotes bigger, blurrier pages ahead
+    // of the fine page actually requested by the visible patch.
+    return std::ldexp(requiredPagePriority, -static_cast<int>(std::min(ancestorSteps, 27U)));
+}
+
 // Coordinates are relative to the landscape's minimum XZ, not its center.
 // Expand to an ancestor until the ENTIRE (possibly morphed) primitive fits.
 inline VTPageAddress vtCoveringPage(float sectorSize, uint32_t rootLevel, uint32_t desiredLevel,

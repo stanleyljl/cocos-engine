@@ -65,6 +65,12 @@ public:
         int32_t detailMaterial0{-1}; // optional tiled material-library pair, RVT-only
         int32_t detailMaterial1{-1}; // normalRoughnessAO.B stores pair blend weight
     };
+    // Optional slope-based material override, authored by the terrain asset.
+    struct CliffMaterial {
+        int32_t layer{-1}; // negative retains painted splat materials
+        float maxNormalY{0.0F};
+        float globalColorInfluence{1.0F}; // multiplier of the terrain-wide strength
+    };
     struct Decal {
         float x{0}; // minimum corner in landscape-local XZ
         float z{0};
@@ -102,6 +108,7 @@ public:
     bool takeFailedTile(uint64_t &key);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                         float &minY, float &maxY) const;
+    float getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
     // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
                          ccstd::vector<uint8_t> &data);
@@ -115,6 +122,7 @@ public:
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
     const GlobalColorMap &globalColorMap() const { return _globalColorMap; }
+    const CliffMaterial &cliffMaterial() const { return _cliffMaterial; }
 
 private:
     struct AsyncState {
@@ -127,6 +135,7 @@ private:
     struct HeightRange {
         float minY{0.0F};
         float maxY{0.0F};
+        float surfaceStretch{1.0F}; // maximum local stretch, propagated from finer nodes
     };
 
     void resetAsyncState();
@@ -140,6 +149,7 @@ private:
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
     GlobalColorMap _globalColorMap;
+    CliffMaterial _cliffMaterial;
     ccstd::vector<DecalLayer> _decalLayers;
     ccstd::vector<Decal> _decals;
     uint32_t _decalResolution{1};

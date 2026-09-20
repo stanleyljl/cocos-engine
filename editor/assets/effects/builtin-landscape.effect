@@ -61,7 +61,7 @@ CCProgram landscape-uniforms %{
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border
-    vec4 decalControl; // F12: enable nearby decal geometry; cached material is unchanged
+    vec4 decalControl; // Enable nearby decal geometry; cached material is unchanged
     vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
@@ -69,7 +69,7 @@ CCProgram landscape-uniforms %{
 }%
 
 CCProgram landscape-macros %{
-  // F7: VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
+  // VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
   #pragma define-meta LANDSCAPE_DEBUG_UNLIT
   #pragma define-meta LANDSCAPE_DECAL_MESH
   #define CC_SURFACES_USE_TANGENT_SPACE 1

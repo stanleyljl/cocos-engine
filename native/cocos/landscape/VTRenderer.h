@@ -54,9 +54,20 @@ public:
     void setGlobalColorStrength(float strength);
     void setHeightBlendEnabled(bool enabled);
     void setRVTNormalEnabled(bool enabled);
+    void setCliffEnabled(bool enabled);
+    void syncCliffSources(TilePagePool &tiles);
 
 private:
     bool _rvtNormalEnabled{true};
+    bool _cliffEnabled{true};
+    bool _cliffReady{false};
+    uint32_t _cliffLevel{0};
+    uint32_t _cliffColumns{0};
+    uint32_t _cliffRows{0};
+    Vec4 _cliffParams;
+    LandscapeData _cliffData;
+    IntrusivePtr<gfx::Texture> _cliffSources;
+    ccstd::vector<Vec4> _cliffSourceData;
     VirtualTexture _texture;
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;

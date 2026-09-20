@@ -27,7 +27,7 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(692);
+  const constants = new Float32Array(704);
   constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
@@ -51,6 +51,10 @@ try {
   const sourceRegions=new Float32Array(16*4);
   for(let q=0;q<16;q++)sourceRegions.set([0,0,1,Math.min(1,Math.max(0,q%4-1))+2*Math.min(1,Math.max(0,Math.floor(q/4)-1))],q*4);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,1,0,gl.RGBA,gl.FLOAT,sourceRegions);
+  const cliffSourceTable=tex('cliffSourceMap',12,gl.TEXTURE_2D);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,1,0]));
+  const cliffHeight=tex('terrainHeightMap',13,gl.TEXTURE_2D_ARRAY);
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([0,0]));
   const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
   gl.activeTexture(gl.TEXTURE0+5);
   for(let i=0;i<2;i++) { const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0); }
@@ -194,6 +198,104 @@ try {
       close([pixel[4],pixel[3],pixel[5]],enc(decode(bytes.slice(q*2,q*2+2))),'normal gutter neighbor '+x+','+y,3);
     }
     // Restore the original sources used below by the Base Pass baseline.
+    gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
+  }
+
+  // Exercise the actual cliff shader with nonconstant source textures: constant
+  // color tests cannot detect a reversed height byte order or wrong projection UV.
+  {
+    const materialSize=16, pixels=new Uint8Array(materialSize*materialSize*8*4);
+    for(let layer=0;layer<8;layer++)for(let y=0;y<materialSize;y++)for(let x=0;x<materialSize;x++){
+      pixels.set([24+x*13,24+y*13,50+layer*20,layer%2?255:0],((layer*materialSize+y)*materialSize+x)*4);
+    }
+    gl.useProgram(p);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D_ARRAY,ah);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.REPEAT);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,materialSize,materialSize,8,0,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    const setNormal=n=>{
+      gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:4},()=>n).flat()));
+    };
+    const setHeight=value=>{
+      const h=Math.round(value*65535);gl.activeTexture(gl.TEXTURE13);gl.bindTexture(gl.TEXTURE_2D_ARRAY,cliffHeight);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([h>>8,h&255]));
+    };
+    sourceRegions.fill(0);for(let q=0;q<16;q++)sourceRegions.set([0,0,1,0],q*4);
+    gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
+    constants.set([1,1,0,1],0);
+    constants.set([1,1,0,0],692);constants.set([0,0,1,0],696);constants[5]=1;
+    const material=repeat([0,0,0]);
+    const at={x:.27,y:.31,span:.01};
+    for(const n of [[255,128],[0,128],[128,255],[128,0],[210,210]]){
+      setNormal(n);setHeight(.16);
+      const low=render(material,at);setHeight(.66);const high=render(material,at);
+      if(Math.abs(high[1]-low[1])<40)throw new Error('Cliff side UV does not follow uint16 height: '+n);checks++;
+      const ref=render(material,at);
+      // Fixed reference + fixed world position: changing VT footprint or the
+      // normal source's bounds cannot shift the material phase.
+      close(render(material,{...at,span:.03}),ref,'cliff material phase across page scales',0);
+      close(render(material,{...at,sourceSize:2}),ref,'cliff UV independent of material source resolution',0);
+      const normal=unit([ref[4]/127.5-1,ref[3]/127.5-1,ref[5]/127.5-1]);
+      close(normal.map(v=>v*127.5+127.5),enc(decode(n)),'flat material recovers signed terrain normal',3);
+      close(render(repeat([0,1,32]),at),render(repeat([1,1,0]),at),'height blending retained on cliffs',1);
+      constants[5]=0;const off=render(material,at);constants[5]=1;
+      close(off.slice(0,3),ref.slice(0,3),'F11 does not change cliff color',0);
+      close([off[4],off[3],off[5]],[128,128,255],'F11 OFF keeps tangent encoding',2);
+    }
+    // An asset-defined material override uses the same layer and scale in
+    // both projection states, without recoloring it through the global map.
+    setNormal([255,128]);setHeight(.16);
+    for (const state of [1,-1]) {
+      constants.set([.65,0,0,0],700);
+      constants[692]=state;constants[695]=7;
+      const override=render(material,at);
+      constants[695]=0;
+      close(render(repeat([6,6,0]),at),override,'override layer identical in both projection states',0);
+      constants[695]=7;constants[138]=1;
+      close(render(material,at),override,'configured override bypasses global tint',0);
+      constants[138]=0;
+    }
+    constants[692]=1;constants[695]=0;constants[138]=1;
+    const tintedLayer=render(repeat([6,6,0]),at);
+    constants[695]=7;constants[701]=1;
+    close(render(material,at),tintedLayer,'override can retain global color modulation',0);
+    constants[695]=0;constants[138]=0;
+    const paintedSlope=render(material,at);
+    constants[695]=7;constants[700]=0;
+    close(render(material,at),paintedSlope,'asset slope threshold controls override coverage',0);
+    constants[700]=.65;constants[701]=0;
+    constants[692]=1;constants[695]=7;
+    setNormal([128,128]);
+    const untouchedFlat=render(material,at);constants[695]=0;
+    close(render(material,at),untouchedFlat,'override leaves flat material unchanged',0);
+    setNormal([128,128]);setHeight(.16);
+    const flat=render(material,at);constants[692]=0;
+    close(render(material,at),flat,'flat ground preserves planar rendering',0);
+    constants[692]=1;constants[5]=1;
+    // Neighbor reference tiles agree at their shared endpoint, including when
+    // the bake footprint crosses the boundary. The height field is continuous.
+    setNormal([255,128]);constants[698]=.5;
+    gl.activeTexture(gl.TEXTURE12);gl.bindTexture(gl.TEXTURE_2D,cliffSourceTable);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,2,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,.5,0,.5,0,.5,1]));
+    const heights=new Uint8Array(16);
+    for(let layer=0;layer<2;layer++)for(let y=0;y<2;y++)for(let x=0;x<2;x++){
+      const h=Math.round((.1+(layer+x)*.1)*65535);heights.set([h>>8,h&255],(layer*4+y*2+x)*2);
+    }
+    gl.activeTexture(gl.TEXTURE13);gl.bindTexture(gl.TEXTURE_2D_ARRAY,cliffHeight);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,2,2,2,0,gl.RG,gl.UNSIGNED_BYTE,heights);
+    close(render(material,{...at,x:.49999}),render(material,{...at,x:.50001}),'cliff reference tile seam',0);
+    // Planar decals must remain above projected materials.
+    setNormal([255,128]);constants.set([0,0,1,0],144);constants[656]=1;
+    gl.activeTexture(gl.TEXTURE6);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,255]));
+    // render() sets the per-page decal count; supply it explicitly after upload.
+    render(material,at);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,1,0,0);gl.drawArrays(gl.TRIANGLES,0,6);
+    close(readPixel(0,0).slice(0,3),[50,25,10],'decal stays on top of cliff projection',0);
+    constants[656]=0;constants[692]=0;
     gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
   }

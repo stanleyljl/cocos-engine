@@ -1,29 +1,9 @@
 # Landscape Asset Tools
 
-## Generating paired splat tiles
+## Splat tile format
 
-```powershell
-node scripts/landscape/splatmap-tiles.js --manifest <dataset>/<name>.json --output <new-staging-directory>
-```
-
-The demo preset uses the existing natural material sequence 00 through 11;
-layer 12 (artificial stone path) is retained but excluded from automatic splats.
-When layers 13 (`coral_ground_02`) and 14 (`brown_mud_leaves_01`) are present,
-a continuous 220m regional mask adds pale debris on low/mid-elevation gentle
-slopes and leafy soil on lower, gentler ground. The strongest two contributions
-are retained and normalized to fit the packed format. Relative elevation selects soil,
-grass, gravel and exposed rock, with slopes from 25 to 55 degrees increasingly
-favoring rock. Continuous world-space noise at 320m and 96m scales breaks up
-elevation bands. `--seed` defaults to 1337. The tool validates the material names
-and derives heights from the existing tiles, so the original source PNG is not
-required. `--height-root <dataset-directory>` allows reading height tiles from
-the original dataset when `--manifest` points to a staged material update.
-This is an artistic terrain distribution, not an ecological simulation.
-
-Each `nodes/L<level>/h_<x>_<z>.png` gets a paired `s_<x>_<z>.png` with the same
-129x129 resolution, orientation and coverage. In the current demo, L3 samples
-every 1m; L4 through L7 sample every 2/4/8/16m. Shared border samples and samples
-at matching positions across levels come from one global classification field.
+Material distribution is authored by the application or its asset tools.
+The engine does not prescribe material names, IDs or elevation presets.
 
 Splat PNGs are **16-bit grayscale**, decoded/uploaded as **R16UI**:
 
@@ -34,37 +14,14 @@ Splat PNGs are **16-bit grayscale**, decoded/uploaded as **R16UI**:
 | 10..15 | Second layer weight, divided by 63 |
 
 The first layer has weight `1 - secondWeight`. IDs refer to `materialLibrary.layers`.
-The current preset blends adjacent IDs for continuous transitions, but the
-encoding allows any pair of IDs from 0 through 31.
+The encoding allows any pair of IDs from 0 through 31. Coarser splat levels
+must preserve valid material IDs; never average packed uint16 values.
 
-The output contains `nodes/`, an updated manifest with `splatMap`, the original
-`manifest.before.json`, and `splat-report.json` with coverage and validation results.
-Every output PNG is decoded and compared against the intended uint16 samples;
-height tile borders and the height pyramid are checked as well. After validation,
-copy the splat PNGs and updated manifest into the dataset. Regenerate splats after
-changing height data or reordering materials. The tool never modifies its input.
-
-The native renderer uses one `TilePagePool` for both height and splat. One job
-loads the pair; both textures upload to the same array layer before it becomes
-resident. Upload budgets count pairs. LRU eviction, parent fallback and F6
-freezing therefore apply to both textures together. A failed pair never becomes
-resident. The loader requires the manifest's `splatMap` encoding and validates
-that decoded layer IDs exist in the material library.
-
-`MaterialLibrary` uploads all material layers into two RGBA8 texture arrays with
-mip chains. The shader fetches four neighboring splat texels using an unsigned
-integer sampler with point filtering and no mipmaps, then combines the pair
-weights with spatial bilinear weights. Up to eight IDs can contribute; duplicate
-IDs are merged before material sampling. Albedo blends in linear space; normals
-are reconstructed and renormalized after blending. Roughness and AO blend with
-the same weights. Each layer uses its own `uvScale`, `detailHeightScale` and
-`detailHeightBias`; vertex displacement uses the same splat interpolation at
-fixed material mip 0 and remains excluded from bounds and LOD calculations.
-Material displacement defaults to off. F7 toggles it live (including while F6
-freezes LOD), without changing per-layer height parameters. LOD debug colors
-replace albedo while retaining lighting. No virtual texture
-composition is used. Coarser splat levels must come from the global field,
-never from averaging packed uint16 values.
+The runtime samples the three splat texels of the containing triangle. Import
+must constrain each triangle to at most three unique materials. The compose
+pass combines barycentric interpolation with per-pair height blending and
+writes the result into RVT. Height, splat and normal tiles share residency and
+are published together. A failed tile set never becomes resident.
 
 ## Packing terrain material textures
 
@@ -82,11 +39,20 @@ the original manifest backup and a packing report with source ranges and PNG
 hashes. Copy the generated PNGs and updated manifest into the dataset after
 verification. Source ZIPs and existing assets are not overwritten by the tool.
 
+To add a single downloaded material when numbered source archives differ from
+runtime layer IDs,
+use `--append-archive <source-material.zip>` instead of `--raw`. The material name
+is read from its albedo filename. A new name receives the next free layer ID;
+repacking the same name keeps its existing ID and authored parameters. Other
+manifest entries and texture files are preserved. This mode must retain the array's
+existing resolution. The bulk `--raw` mode rejects an incomplete source library
+instead of silently dropping generated layers.
+
 Use `--layers 13,14` to pack only newly added layers, preserving other manifest
 entries and their existing PNGs. Numbered ZIPs remain contiguous; new layer names
 are discovered from the archive's albedo filename, and existing names are
-validated against the manifest. New layers inherit layer 0's `uvScale` (0.01 in
-the current dataset), with detail height scale 1.0 and bias 0.0. The staged manifest
+validated against the manifest. New layers default to 128 source pixels per meter, detail height scale 1.0 and
+bias 0.0. Author `pixelsPerMeter` in the manifest to choose each material density. The staged manifest
 includes both old and new layers; only selected PNGs are emitted.
 
 | PNG | RGB / RG | B | A |
@@ -102,8 +68,8 @@ stone path, which should be excluded from future automatic elevation blending.
 The manifest's
 `materialLibrary` records `dir: "textures"`, `resolution`, `format: "RGBA8"`
 and each layer's `id`, `name`, `albedoHeight`, `normalRoughnessAO`,
-`detailHeightScale` and `detailHeightBias`. Both detail-height parameters default
-to zero; repacking preserves existing parameters by material name. Re-running
+`detailHeightScale` and `detailHeightBias`. Detail height scale defaults
+to 1.0 and bias to 0.0; repacking preserves existing parameters by material name. Re-running
 the height tile generator with `--force` preserves this explicit material
 library from the existing manifest instead of rescanning the old `materials/`
 directory. It validates referenced PNG paths before replacing height tiles.
@@ -157,7 +123,7 @@ Generate a deterministic one-Sector fixture:
 ```powershell
 node scripts/landscape/heightmap-tiles.js `
   --procedural `
-  --out D:\work\editors\projects\landscape\assets\landscape `
+  --out <output-directory> `
   --name heightmap-demo `
   --sectors-x 1 `
   --sectors-y 1 `
@@ -170,7 +136,7 @@ full world dimensions, so a 5x5 Sector source is `20481x20481`:
 ```powershell
 node scripts/landscape/heightmap-tiles.js `
   --input source-height.png `
-  --out D:\work\editors\projects\landscape\assets\landscape `
+  --out <output-directory> `
   --name world `
   --sectors-x 5 `
   --sectors-y 5 `
@@ -187,14 +153,14 @@ oversized debug boxes). Backfill `heightRange` from the already-generated tiles
 
 ```powershell
 node scripts/landscape/patch-height-range.js `
-  --manifest D:\work\editors\projects\landscape\assets\landscape\heightmap-demo\heightmap-demo.json
+  --manifest <dataset>/<name>.json
 ```
 
 It scans every `h_<x>_<y>.png`, computes each node's `min/max`, merges bottom-up,
 and writes `heightRange` back into the manifest. Refresh the project assets so
 the running app reloads the patched manifest.
 
-## RVT terrain normals (F11)
+## RVT terrain normals
 
 `Landscape.rvtNormalEnabled` defaults to true. Composition selects the existing
 filtered normal tiles by the RVT page footprint, independently of geometry LOD.
@@ -205,7 +171,7 @@ it no longer samples current/parent terrain normals on the enabled path.
 The two RGBA8 atlases and three physical mips retain their sizes. Normal X/Z
 occupy the normal atlas RG channels; signed Y occupies the previously unused
 albedo alpha. Roughness/AO remain BA. Mip generation filters full vectors, and
-terrain/decal output remains opaque. The F8 viewer displays RGB without blending
+terrain/decal output remains opaque. An atlas viewer should display RGB without blending
 by the normal-bearing alpha channel.
 
 A 64 KiB RGBA32F lookup stores each page's 2x2 normal-source regions plus a
@@ -220,10 +186,10 @@ page publication and material invalidation wake the update. During active
 updates each source tile is resolved once per residency revision, and normal
 sources are only resolved a second time if uploads changed the available data.
 
-F11 switches between cached normals and the original geometry-LOD normal blend.
-Switching invalidates the pages; permanent roots provide a valid fallback until
-fine pages are rebuilt. During F6 freeze, F11 is deferred until unfreezing. F12
-continues to control the raised decals and grass independently.
+`Landscape.rvtNormalEnabled` switches between cached normals and the original
+geometry-LOD normal blend. Switching invalidates pages; permanent roots provide
+a fallback until fine pages are rebuilt. Changes defer while residency is frozen.
+`Landscape.decal3DEnabled` controls raised decal geometry independently.
 
 Restart Creator, rebuild the project, then rebuild the native executable so
 Effects, TypeScript and the new native binding agree. Existing source normal
@@ -238,3 +204,76 @@ node --test scripts/landscape/rvt-normal-baking.test.js scripts/landscape/decal-
 These tests cover signed normal composition/filtering, gutter source selection,
 decal composition order, Base Pass morph independence and conforming decal
 geometry. Native visual and performance comparison remains a separate check.
+
+## Cached cliff projection
+
+`Landscape.cliffEnabled` controls cached triplanar projection. The optional
+terrain-manifest `cliffMaterial` object selects a slope-based material override:
+
+- `layer`: an existing material-library ID.
+- `maxNormalY`: normal Y threshold in [0, 1]; the override applies below it.
+- `globalColorInfluence`: multiplier in [0, 1] of the global color strength.
+
+Omit the object to use painted splat materials and normal global color behavior.
+An override uses the same slope coverage with projection enabled or disabled;
+reference tiles remain resident in either mode. No material name or ID is
+selected by the engine. Planar decals compose after terrain materials.
+Reimport the terrain and rebuild project assets after changing its manifest.
+
+Projection changes defer while residency is frozen. Restart Creator, rebuild
+the project, then rebuild native code after engine TypeScript, Effect or native
+binding changes. Shortcut assignments belong to the application.
+
+References: `TerrainRenderingFarCry5.pdf`, PDF pages 92-112, and the original
+`Jiao_Hang_Delta+Force+Performant.pdf`, PDF pages 76-81 (both in the terrain docs
+directory). The latter explicitly notes that VT-baked cliffs lose maximum
+close-up resolution. This implementation adopts cached projection, but uses
+deterministic three-plane blending instead of their stochastic axis selection.
+
+The compose pass samples the existing materials from XZ, signed ZY and signed
+XY planes. Normal-direction weights suppress side projection on gentle slopes;
+negligible axes are skipped. Flat pixels evaluate one projection, cliffs usually
+one or two, and three-way transitions at most three. Each projection retains the
+existing triangle/pair height blend. Projection normal frames are rotated
+onto the terrain before mixing; neutral material normals reproduce the terrain
+normal on every signed axis. Planar decals compose afterwards, preserving their authored coverage. Global-color modulation and three physical mips
+remain enabled. The Base Pass shader and its sample count are unchanged.
+
+Height and projection-direction normals come from a fixed reference tile level,
+independent of geometry morph and VT page size. This prevents the side UV phase
+from shifting as the camera approaches. The whole reference fits at most 256
+tiles (one quarter of the existing 1024-layer source cache); a 4 km, 2x2-sector
+terrain with 129-sample tiles uses L4 / 2 m spacing. References use the existing
+height/normal arrays; the only additional GPU allocation is a lookup texture of
+at most 4 KiB. The corresponding height/splat/normal tiles occupy up to 24.4 MiB
+of the already allocated source pool, reducing space available for other tiles.
+Initial background loading therefore adds I/O and upload work. All references
+are protected and published together, followed by one VT invalidation; the log
+`Cliff reference ready` marks publication. Until then the baseline stays valid.
+Without a material override, disabling projection allows references to be evicted;
+reenabling it waits for
+a complete reference again. Stationary frames retain the sync-cache fast path.
+
+Patch height ranges conservatively estimate surface stretch and request up to
+two finer VT levels (4x linear density). At asset load, the maximum local stretch
+is propagated from fine height-range nodes to their ancestors; a distant region
+must not average away a narrow cliff by dividing its height range by a much
+larger width. This uses one additional float per range node (about 341 KiB for
+a 2x2-sector, L0-L7 dataset), with no extra texture or asset reimport.
+Required VT pages inherit their visible patch's surface-footprint priority;
+each fallback ancestor halves that priority instead of inflating it using the
+ancestor's larger world size. Permanent roots remain available during updates.
+Atlas capacity and per-frame update
+budget stay fixed. This may increase patch/model count and cache pressure, and
+does not guarantee every requested page fits. Geometry-cell containment, cache
+fallback, fixed reference resolution and the top-down atlas still limit extreme
+close-up cliffs. Neither overhang geometry nor a separate cliff mesh is added.
+
+Costs concentrate in VT generation and camera movement: each active projection
+can sample up to three albedo/height and three normal/roughness/AO textures.
+This trades more page-generation work for stable, noise-free blending rather
+than promising a free performance improvement. Compare stationary and moving
+native GPU/CPU frame times after the reference and fine VT pages have settled.
+The existing GPU regression harness also checks side UV height decoding, signed
+axes, projection phase across page sizes, reference seams, normal-mode color invariance,
+height blending, flat-ground equivalence and decal composition over cliffs.

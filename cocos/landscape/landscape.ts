@@ -113,6 +113,9 @@ export class Landscape extends Component {
     private _rvtNormalEnabled = true;
 
     @serializable
+    private _cliffEnabled = true;
+
+    @serializable
     private _unlit = false;
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
@@ -225,7 +228,7 @@ export class Landscape extends Component {
         this._showSectors = v;
     }
 
-    /** F7: show VT albedo without lighting, normal mapping or AO (debug). */
+    /** show VT albedo without lighting, normal mapping or AO (debug). */
     @editable
     @displayOrder(7)
     get unlit (): boolean {
@@ -238,7 +241,7 @@ export class Landscape extends Component {
         }
     }
 
-    /** F8: atlas visibility, consumed by the application's debug view. */
+    /** atlas visibility, consumed by the application's debug view. */
     @editable
     @displayOrder(8)
     get showVTAtlas (): boolean {
@@ -248,7 +251,7 @@ export class Landscape extends Component {
         this._showVTAtlas = value;
     }
 
-    /** F9: compare three-level VT trilinear filtering with mip0-only bilinear filtering. */
+    /** compare three-level VT trilinear filtering with mip0-only bilinear filtering. */
     @editable
     @displayOrder(8.5)
     @tooltip('VT mip 过滤：开启使用 mip0/mip1/mip2（256/128/64）三线性过滤；关闭仅使用 mip0 双线性过滤。冻结后仍可切换，不重新生成 VT。')
@@ -263,10 +266,10 @@ export class Landscape extends Component {
         }
     }
 
-    /** F10: compare height blending with linear material weight blending. */
+    /** compare height blending with linear material weight blending. */
     @editable
     @displayOrder(8.6)
-    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；F6 冻结期间的修改在解冻后生效。')
+    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。')
     get heightBlendEnabled (): boolean {
         return this._heightBlendEnabled;
     }
@@ -278,10 +281,10 @@ export class Landscape extends Component {
         }
     }
 
-    /** F12: compare the raised near mesh with the planar RVT decal. */
+    /** compare the raised near mesh with the planar RVT decal. */
     @editable
     @displayOrder(8.8)
-    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。F6 冻结时仍可即时切换。')
+    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。')
     get decal3DEnabled (): boolean {
         return this._decal3DEnabled;
     }
@@ -291,10 +294,23 @@ export class Landscape extends Component {
         if (this._native) this._native.setDecal3DEnabled(value);
     }
 
-    /** F11: bake terrain normals into RVT independently of geometry LOD. */
+    /** cache deterministic cliff projections in RVT. */
+    @editable
+    @displayOrder(8.9)
+    @tooltip('悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。')
+    get cliffEnabled (): boolean {
+        return this._cliffEnabled;
+    }
+    set cliffEnabled (value: boolean) {
+        if (this._cliffEnabled === value) return;
+        this._cliffEnabled = value;
+        if (this._native) this._native.setCliffEnabled(value);
+    }
+
+    /** bake terrain normals into RVT independently of geometry LOD. */
     @editable
     @displayOrder(8.7)
-    @tooltip('开启 RVT 地形法线烘焙；关闭使用随几何 LOD 变化的原法线。F6 冻结期间的切换在解冻后生效。')
+    @tooltip('开启 RVT 地形法线烘焙；关闭使用随几何 LOD 变化的原法线。冻结期间的切换在解冻后生效。')
     get rvtNormalEnabled (): boolean {
         return this._rvtNormalEnabled;
     }
@@ -353,6 +369,7 @@ export class Landscape extends Component {
             this._native.setHeightBlendEnabled(this._heightBlendEnabled);
             this._native.setDecal3DEnabled(this._decal3DEnabled);
             this._native.setRVTNormalEnabled(this._rvtNormalEnabled);
+            this._native.setCliffEnabled(this._cliffEnabled);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);

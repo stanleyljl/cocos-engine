@@ -31,6 +31,7 @@
 #include "base/Log.h"
 #include "base/Ptr.h"
 #include "base/ThreadPool.h"
+#include "landscape/VTPaging.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
 #include "rapidjson/document.h"
@@ -186,6 +187,16 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
                     parsed.heightBias + mins[index].GetFloat() * scale,
                     parsed.heightBias + maxs[index].GetFloat() * scale,
                 };
+                float childStretch = 1.0F;
+                if (level > 0U) {
+                    for (uint32_t q = 0; q < 4U; ++q) {
+                        const size_t child = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
+                            level - 1U, globalX * 2U + (q & 1U), globalZ * 2U + (q >> 1U));
+                        childStretch = std::max(childStretch, ranges[child].surfaceStretch);
+                    }
+                }
+                ranges[dst].surfaceStretch = cliffDensityScale(ranges[dst].maxY - ranges[dst].minY,
+                    computeNodeSize(parsed.sectorSize, parsed.maxLevel, level), childStretch);
             }
         }
     }
@@ -271,6 +282,21 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
             if (layer.albedoHeight.empty() || layer.normalRoughnessAO.empty()) return false;
             materialLayers.emplace_back(std::move(layer));
         }
+    }
+
+    CliffMaterial cliffMaterial;
+    if (document.HasMember("cliffMaterial")) {
+        const auto &value = document["cliffMaterial"];
+        uint32_t layer = 0U;
+        if (!readUnsigned(value, "layer", layer) || layer >= materialLayers.size() ||
+            !readFloat(value, "maxNormalY", cliffMaterial.maxNormalY) ||
+            cliffMaterial.maxNormalY < 0.0F || cliffMaterial.maxNormalY > 1.0F ||
+            !readFloat(value, "globalColorInfluence", cliffMaterial.globalColorInfluence) ||
+            cliffMaterial.globalColorInfluence < 0.0F || cliffMaterial.globalColorInfluence > 1.0F) {
+            CC_LOG_WARNING("[Landscape] invalid cliffMaterial in '%s'", manifestPath.c_str());
+            return false;
+        }
+        cliffMaterial.layer = static_cast<int32_t>(layer);
     }
 
     ccstd::vector<DecalLayer> decalLayers;
@@ -377,6 +403,7 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     _materialLayers = std::move(materialLayers);
     _materialResolution = materialResolution;
     _globalColorMap = std::move(globalColorMap);
+    _cliffMaterial = cliffMaterial;
     _decalLayers = std::move(decalLayers);
     _decals = std::move(decals);
     _decalResolution = decalResolution;
@@ -519,6 +546,12 @@ bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t g
     minY = _heightRanges[offset].minY;
     maxY = _heightRanges[offset].maxY;
     return true;
+}
+
+float LandscapeAsset::getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
+    if (!_data.valid() || level > _data.maxLevel) return 1.0F;
+    const size_t offset = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector, level, globalX, globalZ);
+    return offset < _heightRanges.size() ? _heightRanges[offset].surfaceStretch : 1.0F;
 }
 
 bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,

@@ -160,8 +160,8 @@ function scanMaterialLibrary (assetDir, manifestPath) {
 
 function printHelp () {
     console.log(`Usage:
-  node scripts/landscape/heightmap-tiles.js --input source.png --out D:\\work\\editors\\projects\\landscape\\assets\\landscape --name terrain
-  node scripts/landscape/heightmap-tiles.js --procedural --out D:\\work\\editors\\projects\\landscape\\assets\\landscape --name demo
+  node scripts/landscape/heightmap-tiles.js --input source.png --out <output-directory> --name terrain
+  node scripts/landscape/heightmap-tiles.js --procedural --out <output-directory> --name demo
 
 Input:
   --input <png>       8-bit or 16-bit grayscale PNG, one meter per source sample

@@ -67,6 +67,7 @@ public:
     void setHeightBlendEnabled(bool enabled);
     void setDecal3DEnabled(bool enabled);
     void setRVTNormalEnabled(bool enabled);
+    void setCliffEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setAssetPath(const ccstd::string &manifestPath);
 
@@ -78,6 +79,7 @@ public:
 
 private:
     bool _rvtNormalEnabled{true};
+    bool _cliffEnabled{true};
     void initializeRenderer();
     scene::Camera *pickMainCamera() const;
 

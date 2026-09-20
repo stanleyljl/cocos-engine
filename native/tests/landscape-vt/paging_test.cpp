@@ -70,6 +70,52 @@ int main() {
     require(vtDesiredLevel(sectorSize, root, 1.5F) == 0, "Near view must request maximum material precision");
     require(vtDesiredLevel(sectorSize, root, 8.0F) == 2, "Material precision must fall independently with distance");
 
+    LandscapeData reference;
+    reference.sectorsX = reference.sectorsZ = 2;
+    reference.maxLevel = 7;
+    reference.minTileLevel = 3;
+    require(cliffReferenceLevel(reference) == 4, "4 km reference must fit 256 source tiles at 2 m spacing");
+    for (uint32_t sectors : {1U, 2U, 4U, 8U, 16U}) {
+        reference.sectorsX = reference.sectorsZ = sectors;
+        const auto level = cliffReferenceLevel(reference);
+        const auto count = static_cast<uint64_t>(sectors) * sectors * (1ULL << (2U * (reference.maxLevel - level)));
+        require(count <= config::PAGE_POOL_LAYERS / 4U, "Cliff references exceeded cache budget");
+        require(level >= reference.minTileLevel && level <= reference.maxLevel, "Invalid reference level");
+    }
+    require(cliffDensityScale(0, 16) == 1, "Flat patches must retain baseline VT density");
+    require(cliffDensityScale(1000, 1) == 4, "Cliff refinement must be capped at two levels");
+    require(cliffDensityScale(16, 16) > 1 && cliffDensityScale(16, 16) < 2, "Slope density estimate must be continuous");
+
+    // A narrow 64 m wall in a 16 m cell must not disappear from the density
+    // estimate when CDLOD encloses it in a mostly flat 512 m distant node.
+    float inherited = cliffDensityScale(64, 16);
+    for (float width : {32.0F, 64.0F, 128.0F, 256.0F, 512.0F}) {
+        inherited = cliffDensityScale(64, width, inherited);
+        require(inherited == 4, "Coarse regions must preserve steep child density");
+    }
+    const auto oldCliffLevel = vtDesiredLevel(sectorSize, root, 1000 / cliffDensityScale(64, 512));
+    const auto newCliffLevel = vtDesiredLevel(sectorSize, root, 1000 / inherited);
+    require(oldCliffLevel == newCliffLevel + 2, "Distant narrow wall must retain two extra levels");
+    require(cliffDensityScale(0, 512, cliffDensityScale(0, 16)) == 1, "Flat hierarchy must not request extra pages");
+
+    // A full cache must retain visible leaf requests before their redundant
+    // fallback chain. Roots are separately permanent and never compete here.
+    struct PriorityRequest { float priority; bool direct; };
+    ccstd::vector<PriorityRequest> candidates;
+    constexpr size_t capacity = config::VT_PAGE_COUNT - 4;
+    for (size_t i = 0; i < capacity; ++i) candidates.push_back({vtAncestorPriority(1.0F, 0), true});
+    for (uint32_t ancestor = 1; ancestor <= 8; ++ancestor) {
+        candidates.push_back({vtAncestorPriority(1.0F, ancestor), false});
+        require(vtAncestorPriority(1.0F, ancestor) < vtAncestorPriority(1.0F, ancestor - 1),
+                "Coarser fallback must not inflate visible coverage priority");
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) { return a.priority > b.priority; });
+    candidates.resize(capacity);
+    require(std::all_of(candidates.begin(), candidates.end(), [](const auto &r) { return r.direct; }),
+            "Fallback ancestors displaced required detail pages under cache pressure");
+    require(vtAncestorPriority(4.0F, 1) > vtAncestorPriority(0.25F, 0),
+            "Important nearby fallback should still outrank tiny distant coverage");
+
     const auto fine = vtCoveringPage(sectorSize, root, 0, 17, 29, 18, 30);
     require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
     const auto morph = vtCoveringPage(sectorSize, root, 0, 16, 28, 18, 30);

@@ -212,7 +212,7 @@ void LandscapeRenderer::setGlobalColorStrength(float strength) {
 void LandscapeRenderer::setDecal3DEnabled(bool enabled) {
     _decal3DEnabled = enabled;
     updateMaterialProperties();
-    // F12 affects geometry only and remains immediate while F6 holds residency.
+    // Decal visibility affects geometry only and remains immediate while residency is frozen.
     for (size_t i = 0; i < _decalDraws.size(); ++i) _decalDraws[i].model->setEnabled(enabled && i < _decalActive);
 }
 
@@ -225,6 +225,13 @@ void LandscapeRenderer::setRVTNormalEnabled(bool enabled) {
 
 void LandscapeRenderer::setHeightBlendEnabled(bool enabled) {
     if (_vtRenderer) _vtRenderer->setHeightBlendEnabled(enabled);
+}
+
+void LandscapeRenderer::setCliffEnabled(bool enabled) {
+    _cliffEnabled = enabled;
+    if (_freezeLod || !_vtRenderer) return;
+    _vtRenderer->setCliffEnabled(enabled);
+    _syncCache.invalidate();
 }
 
 void LandscapeRenderer::setVTMipEnabled(bool enabled) {
@@ -459,7 +466,17 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     const float localX = minX - _data.worldWidth() * 0.5F;
     const float localZ = minZ - _data.worldDepth() * 0.5F;
     const float distance = patchDistance(node, localX, localZ, size, false);
-    const uint32_t desired = vtDesiredLevel(_data.sectorSize, _vtRootLevel, distance);
+    float density = 1.0F;
+    if (_cliffEnabled) {
+        float minY = node.minY, maxY = node.maxY;
+        const uint32_t rangeLevel = node.level + meshIndex >= 4U ? node.level + meshIndex - 4U : 0U;
+        const float rangeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, rangeLevel);
+        const uint32_t rangeX = static_cast<uint32_t>(minX / rangeSize);
+        const uint32_t rangeZ = static_cast<uint32_t>(minZ / rangeSize);
+        _asset->getHeightRange(rangeLevel, rangeX, rangeZ, minY, maxY);
+        density = cliffDensityScale(maxY - minY, size, _asset->getSurfaceStretch(rangeLevel, rangeX, rangeZ));
+    }
+    const uint32_t desired = vtDesiredLevel(_data.sectorSize, _vtRootLevel, distance / density);
     if (meshIndex > 0 && vtPageWorldSize(_data.sectorSize, _vtRootLevel, desired) < size) {
         const uint32_t half = cells / 2U;
         for (uint32_t q = 0; q < 4; ++q) {
@@ -475,7 +492,7 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     const float safeMinZ = minZ - (canMorph ? (z & 1U) * cellSize : 0.0F);
     const auto page = vtCoveringPage(_data.sectorSize, _vtRootLevel, desired,
                                      safeMinX, safeMinZ, minX + size, minZ + size);
-    patches.push_back(Patch{node, x, z, meshIndex, page});
+    patches.push_back(Patch{node, x, z, meshIndex, page, size * density / std::max(distance, 1.0F)});
 }
 
 LandscapeRenderer::TilePage LandscapeRenderer::resolveNormalParent(const QuadNode &node, const TilePage &tile) {
@@ -575,10 +592,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     for (const auto &patch : patches) {
         auto page = patch.page;
         for (; page.level < _vtRootLevel; ++page.level, page.x >>= 1U, page.z >>= 1U) {
-            const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
-            const float distance = patchDistance(patch.node, page.x * size - _data.worldWidth() * 0.5F,
-                                                page.z * size - _data.worldDepth() * 0.5F, size, false);
-            const float priority = size / std::max(distance, 1.0F);
+            const float priority = vtAncestorPriority(patch.vtPriority, page.level - patch.page.level);
             const uint64_t key = makeNodeKey(page.level, page.x, page.z);
             auto inserted = unique.emplace(key, Request{page, priority, key});
             inserted.first->second.priority = std::max(inserted.first->second.priority, priority);
@@ -599,6 +613,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     for (const auto &request : requests) keys.push_back(request.key);
     vt.beginFrame(keys);
     _tilePages->beginFrame();
+    _vtRenderer->syncCliffSources(*_tilePages);
     _tileResolveCache.clear();
     // Protect both current and parent normals before recycling any tile layer.
     for (const auto &node : selected) resolveNormalParent(node, resolveTilePage(node));
@@ -618,6 +633,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
     const auto beforeUpload = _tilePages->updateRevision();
     if (!uploadsPolled) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
     const bool sourcesChanged = _tilePages->updateRevision() != beforeUpload;
+    if (sourcesChanged) _vtRenderer->syncCliffSources(*_tilePages);
     if (sourcesChanged) _tileResolveCache.clear();
     for (size_t i = 0; i < requests.size(); ++i) {
         const auto &request = requests[i];
@@ -711,7 +727,7 @@ void LandscapeRenderer::syncDecals(const ccstd::vector<Patch> &patches) {
         const float z = node.iz * nodeSize - _data.worldDepth() * .5F + patch.z * cell;
         for (uint32_t i = 0; i < _asset->decals().size(); ++i) {
             const auto &d = _asset->decals()[i];
-            // Roads and surface marks live entirely in RVT. Do not instantiate
+            // Layers without displacement live entirely in RVT. Do not instantiate
             // grids that would sample heights only to discard every fragment.
             if (_asset->decalLayers()[d.layer].heightScale == 0.0F) continue;
             const float distance = (_viewPosition - (_node->getWorldPosition() + _decalCenters[i])).length();
@@ -755,6 +771,7 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
     if (_vtRenderer) _vtRenderer->setFrozen(frozen);
     for (size_t i = 0; i < _decalActive; ++i) updateDecalInstance(_decalDraws[i]);
     if (!frozen) setRVTNormalEnabled(_rvtNormalEnabled);
+    if (!frozen) setCliffEnabled(_cliffEnabled);
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         updateModelBounds(state.model, state.patch);

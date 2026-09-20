@@ -98,6 +98,7 @@ void Landscape::initializeRenderer() {
     renderer->setHeightBlendEnabled(_heightBlendEnabled);
     renderer->setDecal3DEnabled(_decal3DEnabled);
     renderer->setRVTNormalEnabled(_rvtNormalEnabled);
+    renderer->setCliffEnabled(_cliffEnabled);
     renderer->setGlobalColorStrength(_globalColorStrength);
     renderer->setWireframe(_wireframe);
     renderer->setFreezeLod(_freezeLod);
@@ -279,6 +280,11 @@ void Landscape::setDecal3DEnabled(bool enabled) {
 void Landscape::setRVTNormalEnabled(bool enabled) {
     _rvtNormalEnabled = enabled;
     if (_renderer) _renderer->setRVTNormalEnabled(enabled);
+}
+
+void Landscape::setCliffEnabled(bool enabled) {
+    _cliffEnabled = enabled;
+    if (_renderer) _renderer->setCliffEnabled(enabled);
 }
 
 void Landscape::setHeightBlendEnabled(bool enabled) {

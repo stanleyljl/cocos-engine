@@ -84,6 +84,7 @@ public:
     void setHeightBlendEnabled(bool enabled);
     void setDecal3DEnabled(bool enabled);
     void setRVTNormalEnabled(bool enabled);
+    void setCliffEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);
@@ -104,6 +105,7 @@ private:
         uint32_t z{0};
         uint32_t meshIndex{0}; // 1, 2, 4 or 8 cells per side
         VTPageAddress page;
+        float vtPriority{0.0F}; // visible footprint; ancestors must not inflate it
     };
 
     struct ModelState {
@@ -174,6 +176,7 @@ private:
     bool _wireframe{false};
     bool _unlit{false};
     bool _freezeLod{false};
+    bool _cliffEnabled{true};
 };
 
 } // namespace landscape

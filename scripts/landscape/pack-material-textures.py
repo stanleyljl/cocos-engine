@@ -23,21 +23,7 @@ from PIL import Image
 import png
 
 
-def default_pixels_per_meter(name):
-    """Choose source texture density in pixels/m, with a highest preset of 512."""
-    # Fine grass/leaves repeat more often than broad rock formations. Numbered
-    # variants share their material type's density; authored values win below.
-    material_type = re.sub(r"_\d+$", "", name.lower())
-    return {
-        "rocky_trail": 128,
-        "grass_path": 256,
-        "rocky_terrain": 64,
-        "gray_rocks": 32,
-        "rocks_ground": 128,
-        "concrete_rock_path": 256,
-        "coral_ground": 256,
-        "brown_mud_leaves": 512,
-    }.get(material_type, 128)
+DEFAULT_PIXELS_PER_METER = 128
 
 
 def migrate_layer_density(layer, resolution):
@@ -45,7 +31,7 @@ def migrate_layer_density(layer, resolution):
     result = layer.copy()
     if "pixelsPerMeter" not in result:
         result["pixelsPerMeter"] = (result["uvScale"] * resolution if "uvScale" in result
-                                    else default_pixels_per_meter(result.get("name", "")))
+                                    else DEFAULT_PIXELS_PER_METER)
     result.pop("uvScale", None)
     return result
 
@@ -118,7 +104,10 @@ def replace_library(text, library):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--raw", type=Path)
+    inputs.add_argument("--append-archive", type=Path,
+                        help="Pack one archive by material name; append a free ID or update that name's existing ID")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resolution", type=int, default=1024)
@@ -126,7 +115,8 @@ def main():
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError("Output staging directory must be empty")
-    archives = sorted(args.raw.glob("*.zip"), key=lambda p: p.name.removesuffix("_1k.blend.zip"))
+    archives = ([args.append_archive] if args.append_archive else
+                sorted(args.raw.glob("*.zip"), key=lambda p: p.name.removesuffix("_1k.blend.zip")))
     if not 1 <= len(archives) <= 32:
         raise ValueError(f"Expected 1..32 material archives, got {len(archives)}")
     manifest_text = args.manifest.read_bytes().decode("utf-8")
@@ -135,30 +125,48 @@ def main():
                 migrate_layer_density(layer, original["materialLibrary"]["resolution"])
                 for layer in original.get("materialLibrary", {}).get("layers", [])}
     previous_by_id = {layer["id"]: layer for layer in previous.values()}
+    if args.append_archive and args.resolution != original["materialLibrary"]["resolution"]:
+        raise ValueError("Appending must retain the material array resolution")
+    if not args.append_archive and len(archives) < len(previous_by_id):
+        raise ValueError("Raw directory omits existing layers; use --append-archive to preserve generated materials")
     archive_names = []
+    archive_ids = []
     for index, archive in enumerate(archives):
-        if re.fullmatch(r"\d{2}\.zip", archive.name):
-            if int(archive.stem) != index:
+        if args.append_archive or re.fullmatch(r"\d{2}\.zip", archive.name):
+            if not args.append_archive and int(archive.stem) != index:
                 raise ValueError(f"{archive.name}: numbered ZIPs must be contiguous")
             with zipfile.ZipFile(archive) as source:
                 albedo = find_source(source.namelist(), ["diff", "col"])
                 name = re.sub(r"_(?:diff|col)_\d+k$", "", Path(albedo).stem)
-            if index in previous_by_id and name != previous_by_id[index]["name"]:
+            if args.append_archive:
+                index = previous[name]["id"] if name in previous else max(previous_by_id, default=-1) + 1
+            elif index in previous_by_id and name != previous_by_id[index]["name"]:
                 raise ValueError(f"{archive.name}: source name differs from manifest")
             archive_names.append(name)
         else:
             archive_names.append(archive.name.removesuffix("_1k.blend.zip"))
-    selected = set(range(len(archives))) if args.layers is None else {int(v) for v in args.layers.split(",")}
-    if not selected or not selected.issubset(range(len(archives))):
+        archive_ids.append(index)
+    if max(archive_ids) >= 32:
+        raise ValueError("Material library exceeds 32 layers")
+    selected = set(archive_ids) if args.layers is None else {int(v) for v in args.layers.split(",")}
+    if not selected or not selected.issubset(archive_ids):
         raise ValueError("--layers contains invalid IDs")
     textures = args.output / "textures"
     textures.mkdir(parents=True)
     library = {"count": len(archives), "dir": "textures", "resolution": args.resolution,
                "format": "RGBA8", "layers": []}
+    if args.append_archive:
+        library.update(original["materialLibrary"])
+        library["layers"] = [layer.copy() for layer in original["materialLibrary"]["layers"]
+                             if layer["id"] not in archive_ids]
+        for layer in library["layers"]:
+            for key in ("albedoHeight", "normalRoughnessAO"):
+                if not (args.manifest.parent / library["dir"] / layer[key]).is_file():
+                    raise ValueError(f"Missing preserved texture: {layer[key]}")
+        library["count"] = len(library["layers"]) + len(archive_ids)
     report = []
     with tempfile.TemporaryDirectory(prefix="landscape-exr-") as temp:
-        for index, archive in enumerate(archives):
-            name = archive_names[index]
+        for index, archive, name in zip(archive_ids, archives, archive_names):
             if index not in selected:
                 old = previous_by_id.get(index)
                 if old is None or old["name"] != name:
@@ -215,12 +223,13 @@ def main():
             old = previous.get(name, {})
             library["layers"].append({"id": index, "name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
-                                      "pixelsPerMeter": old.get("pixelsPerMeter", default_pixels_per_meter(name)),
+                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER),
                                       "detailHeightScale": old.get("detailHeightScale", 1.0),
                                       "detailHeightBias": old.get("detailHeightBias", 0.0)})
             report.append({"id": index, "name": name, "sourceArchive": archive.name,
                            "sources": source_names, "statistics": stats, "sha256": hashes})
             print(f"{index:02d} {name}: {ah_name}, {nra_name}", flush=True)
+    library["layers"].sort(key=lambda layer: layer["id"])
     updated_text = replace_library(manifest_text, library)
     updated = json.loads(updated_text)
     if {k: v for k, v in updated.items() if k != "materialLibrary"} != {

@@ -26,7 +26,7 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(692);
+  const constants = new Float32Array(704);
   constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
@@ -48,6 +48,10 @@ try {
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,32,4,0,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
   tex('terrainNormalMap',10,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([128,128]));
   tex('normalSourceMap',11,gl.TEXTURE_2D);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,4,0,gl.RGBA,gl.FLOAT,new Float32Array(Array.from({length:64},()=>[0,0,1,0]).flat()));
+  const cliffSourceTable=tex('cliffSourceMap',12,gl.TEXTURE_2D);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,1,0]));
+  const cliffHeight=tex('terrainHeightMap',13,gl.TEXTURE_2D_ARRAY);
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([0,0]));
   const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
   gl.activeTexture(gl.TEXTURE0+6);
   for(let i=0;i<2;i++) { const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0); }
