@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "base/std/container/unordered_set.h"
 #include "landscape/LandscapeConfig.h"
 
 namespace cc {
@@ -61,6 +62,51 @@ inline float vtAncestorPriority(float requiredPagePriority, uint32_t ancestorSte
     // size/distance for them incorrectly promotes bigger, blurrier pages ahead
     // of the fine page actually requested by the visible patch.
     return std::ldexp(requiredPagePriority, -static_cast<int>(std::min(ancestorSteps, 27U)));
+}
+
+struct VTPageRequest {
+    VTPageAddress page;
+    float priority{0.0F};
+    uint64_t key{0};
+    bool required{false}; // directly requested by a visible patch
+};
+
+inline void budgetVTRequests(ccstd::vector<VTPageRequest> &requests, uint32_t rootLevel, size_t capacity) {
+    if (capacity == 0U) {
+        requests.clear();
+        return;
+    }
+    if (requests.size() > capacity) {
+        // Detail-first truncation alone can drop EVERY ancestor of a visible
+        // patch. Its only remaining fallback is then a whole-sector root page.
+        // Reserve a bounded, view-wide coverage set before spending on detail.
+        // All non-root ancestors already exist in the input request set.
+        ccstd::unordered_set<uint64_t> coverage;
+        const size_t coverageBudget = std::max(size_t{1}, capacity / 2U);
+        for (uint32_t bias = 0; bias <= rootLevel; ++bias) {
+            coverage.clear();
+            for (const auto &request : requests) {
+                if (!request.required) continue;
+                const auto &page = request.page;
+                const auto level = std::min(page.level + bias, rootLevel);
+                if (level == rootLevel) continue; // roots have permanent slots
+                const auto shift = level - page.level;
+                coverage.insert(makeNodeKey(level, page.x >> shift, page.z >> shift));
+            }
+            if (coverage.size() <= coverageBudget) break;
+        }
+        float maximumPriority = 0.0F;
+        for (const auto &request : requests) maximumPriority = std::max(maximumPriority, request.priority);
+        for (auto &request : requests) {
+            // Also compose coverage before refinement under the per-frame
+            // update budget, so movement does not leave lasting root fallbacks.
+            if (coverage.count(request.key) != 0U) request.priority += maximumPriority + 1.0F;
+        }
+    }
+    std::sort(requests.begin(), requests.end(), [](const auto &a, const auto &b) {
+        return a.priority != b.priority ? a.priority > b.priority : a.key < b.key;
+    });
+    if (requests.size() > capacity) requests.resize(capacity);
 }
 
 // Coordinates are relative to the landscape's minimum XZ, not its center.

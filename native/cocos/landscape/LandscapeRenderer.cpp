@@ -587,7 +587,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
         }
     }
 
-    struct Request { VTPageAddress page; float priority; uint64_t key; };
+    using Request = VTPageRequest;
     ccstd::unordered_map<uint64_t, Request> unique;
     for (const auto &patch : patches) {
         auto page = patch.page;
@@ -596,18 +596,16 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &selected) {
             const uint64_t key = makeNodeKey(page.level, page.x, page.z);
             auto inserted = unique.emplace(key, Request{page, priority, key});
             inserted.first->second.priority = std::max(inserted.first->second.priority, priority);
+            inserted.first->second.required |= page.level == patch.page.level;
         }
     }
     ccstd::vector<Request> requests;
     requests.reserve(unique.size());
     for (const auto &entry : unique) requests.push_back(entry.second);
-    std::sort(requests.begin(), requests.end(), [](const Request &a, const Request &b) {
-        return a.priority != b.priority ? a.priority > b.priority : a.key < b.key;
-    });
     // Bound the working set BEFORE protecting pages. Keeping all desired keys
     // pinned would prevent near pages from replacing distant pages after moving.
     const size_t capacity = config::VT_PAGE_COUNT - static_cast<size_t>(_data.sectorsX) * _data.sectorsZ;
-    if (requests.size() > capacity) requests.resize(capacity);
+    budgetVTRequests(requests, _vtRootLevel, capacity);
     ccstd::vector<uint64_t> keys;
     keys.reserve(requests.size());
     for (const auto &request : requests) keys.push_back(request.key);

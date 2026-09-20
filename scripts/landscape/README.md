@@ -63,8 +63,7 @@ includes both old and new layers; only selected PNGs are emitted.
 Named archives are sorted by material name before assigning ids starting at zero.
 Numbered archives must be contiguous from `00.zip`; their material names are checked against
 matching manifest layer IDs, preserving the chosen terrain order.
-The demo uses IDs 00–11 for the soil-to-rock sequence and 12 for the artificial
-stone path, which should be excluded from future automatic elevation blending.
+Material IDs and their use in terrain painting are defined by each asset.
 The manifest's
 `materialLibrary` records `dir: "textures"`, `resolution`, `format: "RGBA8"`
 and each layer's `id`, `name`, `albedoHeight`, `normalRoughnessAO`,
@@ -262,7 +261,14 @@ larger width. This uses one additional float per range node (about 341 KiB for
 a 2x2-sector, L0-L7 dataset), with no extra texture or asset reimport.
 Required VT pages inherit their visible patch's surface-footprint priority;
 each fallback ancestor halves that priority instead of inflating it using the
-ancestor's larger world size. Permanent roots remain available during updates.
+ancestor's larger world size. When requests exceed the physical cache, a bounded
+coverage set is reserved before optional detail pages: visible requests are
+coarsened until their unique fallback pages fit half of the dynamic capacity.
+These coverage pages are also composed first. This avoids dropping every
+intermediate ancestor of a visible patch and exposing a whole-sector root as
+an apparently solid-colored near-ground block. Permanent roots remain available
+during loading. The coverage set adapts to demand; it is not a guarantee of a
+fixed maximum LOD gap for arbitrarily large views.
 Atlas capacity and per-frame update
 budget stay fixed. This may increase patch/model count and cache pressure, and
 does not guarantee every requested page fits. Geometry-cell containment, cache

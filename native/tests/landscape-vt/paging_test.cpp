@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <map>
 
 using namespace cc::landscape;
 
@@ -11,6 +12,75 @@ void require(bool condition, const char *message) {
         std::cerr << message << '\n';
         std::exit(1);
     }
+}
+
+void testNearGroundCoverage() {
+    constexpr float sectorSize = 2048.0F;
+    const auto root = vtRootLevel(sectorSize);
+    constexpr size_t capacity = config::VT_PAGE_COUNT - 4U;
+    // Near-ground 64 x 64 m view with meter cells. Triplanar density increases
+    // demand beyond the physical cache; every visible cell still needs coverage.
+    for (float density : {1.0F, 4.0F}) {
+        std::map<uint64_t, VTPageRequest> unique;
+        for (uint32_t z = 0; z < 64; ++z) {
+            for (uint32_t x = 0; x < 64; ++x) {
+                const float dx = x - 31.5F, dz = z - 31.5F;
+                const float distance = std::sqrt(dx * dx + dz * dz + 1.7F * 1.7F);
+                const auto desired = vtDesiredLevel(sectorSize, root, distance / density);
+                const float priority = density / std::max(distance, 1.0F);
+                for (auto level = desired; level < root; ++level) {
+                    const VTPageAddress page{level, x >> level, z >> level};
+                    const auto key = makeNodeKey(level, page.x, page.z);
+                    auto &request = unique[key];
+                    request.page = page;
+                    request.key = key;
+                    request.priority = std::max(request.priority, vtAncestorPriority(priority, level - desired));
+                    request.required |= level == desired;
+                }
+            }
+        }
+        ccstd::vector<VTPageRequest> requests, required;
+        for (const auto &entry : unique) {
+            requests.push_back(entry.second);
+            if (entry.second.required) required.push_back(entry.second);
+        }
+        const auto maximumGap = [&required, root](const ccstd::vector<VTPageRequest> &resident) {
+            ccstd::unordered_set<uint64_t> keys;
+            for (const auto &r : resident) keys.insert(r.key);
+            uint32_t worst = 0;
+            for (const auto &r : required) {
+                auto page = r.page;
+                while (page.level < root && keys.count(makeNodeKey(page.level, page.x, page.z)) == 0U) {
+                    ++page.level;
+                    page.x >>= 1U;
+                    page.z >>= 1U;
+                }
+                worst = std::max(worst, page.level - r.page.level);
+            }
+            return worst;
+        };
+        if (density > 1.0F) {
+            auto truncated = requests;
+            std::sort(truncated.begin(), truncated.end(), [](const auto &a, const auto &b) {
+                return a.priority != b.priority ? a.priority > b.priority : a.key < b.key;
+            });
+            truncated.resize(capacity);
+            require(maximumGap(truncated) >= 8U, "Regression fixture must expose root-only fallback in old truncation");
+        }
+        auto empty = requests;
+        budgetVTRequests(empty, root, 0);
+        require(empty.empty(), "A zero dynamic budget must retain only permanent roots");
+        budgetVTRequests(requests, root, capacity);
+        require(requests.size() <= capacity, "Coverage must not enlarge the physical cache");
+        require(maximumGap(requests) <= 2U, "Near-ground view lost intermediate coverage under cache pressure");
+        if (density == 1.0F) require(maximumGap(requests) == 0U, "A fitting working set must retain full detail");
+        else {
+            auto initialBatch = requests;
+            initialBatch.resize(capacity / 2U);
+            require(maximumGap(initialBatch) <= 2U, "Coverage must be composed before optional detail pages");
+        }
+    }
+    std::cout << "PASS: near-ground cache overflow retains view-wide coverage and prioritizes its publication\n";
 }
 
 void testSyncCache() {
@@ -61,6 +131,7 @@ void testSyncCache() {
 }
 
 int main() {
+    testNearGroundCoverage();
     testSyncCache();
     constexpr float sectorSize = 4096.0F;
     const uint32_t root = vtRootLevel(sectorSize);
@@ -98,8 +169,8 @@ int main() {
     require(oldCliffLevel == newCliffLevel + 2, "Distant narrow wall must retain two extra levels");
     require(cliffDensityScale(0, 512, cliffDensityScale(0, 16)) == 1, "Flat hierarchy must not request extra pages");
 
-    // A full cache must retain visible leaf requests before their redundant
-    // fallback chain. Roots are separately permanent and never compete here.
+    // Within the optional detail budget, direct requests outrank redundant
+    // ancestors. The separate coverage test above validates cache truncation.
     struct PriorityRequest { float priority; bool direct; };
     ccstd::vector<PriorityRequest> candidates;
     constexpr size_t capacity = config::VT_PAGE_COUNT - 4;
@@ -112,7 +183,7 @@ int main() {
     std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) { return a.priority > b.priority; });
     candidates.resize(capacity);
     require(std::all_of(candidates.begin(), candidates.end(), [](const auto &r) { return r.direct; }),
-            "Fallback ancestors displaced required detail pages under cache pressure");
+            "Raw refinement priority must favor direct requests over redundant ancestors");
     require(vtAncestorPriority(4.0F, 1) > vtAncestorPriority(0.25F, 0),
             "Important nearby fallback should still outrank tiny distant coverage");
 
