@@ -110,6 +110,9 @@ export class Landscape extends Component {
     private _decal3DEnabled = true;
 
     @serializable
+    private _rvtNormalEnabled = true;
+
+    @serializable
     private _unlit = false;
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
@@ -288,6 +291,19 @@ export class Landscape extends Component {
         if (this._native) this._native.setDecal3DEnabled(value);
     }
 
+    /** F11: bake terrain normals into RVT independently of geometry LOD. */
+    @editable
+    @displayOrder(8.7)
+    @tooltip('开启 RVT 地形法线烘焙；关闭使用随几何 LOD 变化的原法线。F6 冻结期间的切换在解冻后生效。')
+    get rvtNormalEnabled (): boolean {
+        return this._rvtNormalEnabled;
+    }
+    set rvtNormalEnabled (value: boolean) {
+        if (this._rvtNormalEnabled === value) return;
+        this._rvtNormalEnabled = value;
+        if (this._native) this._native.setRVTNormalEnabled(value);
+    }
+
     /**
      * @en LOD quality multiplier, applied only when loading terrain. Larger values retain finer geometry farther away.
      * @zh LOD 精度倍率，默认 1，最小值为 1。值越大，网格越精细；仅可在地形加载前设置。
@@ -336,6 +352,7 @@ export class Landscape extends Component {
             this._native.setVTMipEnabled(this._vtMipEnabled);
             this._native.setHeightBlendEnabled(this._heightBlendEnabled);
             this._native.setDecal3DEnabled(this._decal3DEnabled);
+            this._native.setRVTNormalEnabled(this._rvtNormalEnabled);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);

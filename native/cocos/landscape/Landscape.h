@@ -66,6 +66,7 @@ public:
     void setVTMipEnabled(bool enabled);
     void setHeightBlendEnabled(bool enabled);
     void setDecal3DEnabled(bool enabled);
+    void setRVTNormalEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setAssetPath(const ccstd::string &manifestPath);
 
@@ -76,6 +77,7 @@ public:
     RenderTexture *getDebugAtlas() const;
 
 private:
+    bool _rvtNormalEnabled{true};
     void initializeRenderer();
     scene::Camera *pickMainCamera() const;
 

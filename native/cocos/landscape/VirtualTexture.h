@@ -53,6 +53,7 @@ public:
         float priority{0.0F};
         Vec4 region; // landscape-local XZ origin, size, unused
         Vec4 source; // source tile XZ origin, size, splat array layer
+        std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources; // 4x4 source regions, including the filtering gutter ring.
         bool occupied{false};
         bool dirty{true};
         bool permanent{false}; // Sector roots never enter the eviction candidates.
@@ -79,13 +80,14 @@ public:
     // Protect ALL requested keys before allocating anything, so selection order
     // cannot evict pages that another visible node requests later this frame.
     void beginFrame(const ccstd::vector<uint64_t> &keys);
-    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent = false, float priority = 0.0F);
+    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, const std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &normalSources, bool permanent = false, float priority = 0.0F);
     bool requested(uint64_t key) const { return _requested.count(key) != 0; }
     int findPage(uint64_t key) const;
     int findReadyPage(uint64_t key) const;
     void collectDirtyPages(ccstd::vector<uint32_t> &slots) const;
     void markRendered(const ccstd::vector<uint32_t> &slots);
     void invalidate();
+    uint64_t contentRevision() const { return _contentRevision; }
     const Page &page(uint32_t slot) const { return _pages[slot]; }
 
 private:
@@ -104,6 +106,7 @@ private:
     ccstd::unordered_set<uint64_t> _requested;
     ccstd::unordered_set<uint64_t> _updates; // Sources refreshed by acquirePage this frame.
     uint64_t _frame{0};
+    uint64_t _contentRevision{0};
     bool _warnedFull{false};
 };
 } // namespace landscape

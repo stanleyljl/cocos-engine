@@ -13,7 +13,55 @@ void require(bool condition, const char *message) {
     }
 }
 
+void testSyncCache() {
+    LandscapeSyncCache cache;
+    LandscapeSyncCache::Positions positions{1, 2, 3, 1, 2, 3, 0, 0, 0};
+    ccstd::vector<QuadNode> selected{{3, 4, 5, -10, 50, 15}, {4, 7, 8, 0, 90, 3}};
+    uint64_t tiles = 4, pages = 0;
+    require(!cache.matches(positions, tiles, pages, selected), "First frame must initialize bindings");
+    cache.store(positions, tiles, pages, selected);
+    // An unmoving camera must still advance streamed tiles and every batch of
+    // newly rendered pages. Otherwise it would stay on the root VT forever.
+    for (int batch = 0; batch < 32; ++batch) {
+        ++pages;
+        require(!cache.matches(positions, tiles, pages, selected), "VT publication must refresh bindings");
+        cache.store(positions, tiles, pages, selected);
+        ++tiles;
+        require(!cache.matches(positions, tiles, pages, selected), "Completed source uploads must refresh normals");
+        cache.store(positions, tiles, pages, selected);
+    }
+    for (int frame = 0; frame < 10000; ++frame) {
+        require(cache.matches(positions, tiles, pages, selected), "Stable frames must not rebuild sources");
+    }
+    // F10/F11 invalidation changes VT content before new pages are published.
+    require(!cache.matches(positions, tiles, pages + 1, selected), "Material toggle must not reuse stale bindings");
+    require(!cache.matches(positions, tiles + 1, pages, selected), "Failed/dropped async completion must allow retries");
+    for (size_t i = 0; i < positions.size(); ++i) {
+        auto moved = positions;
+        moved[i] += 0.001F;
+        require(!cache.matches(moved, tiles, pages, selected), "Camera/terrain motion must invalidate selection");
+    }
+    for (int field = 0; field < 6; ++field) {
+        auto changed = selected;
+        auto &node = changed[1];
+        switch (field) {
+            case 0: ++node.level; break;
+            case 1: ++node.ix; break;
+            case 2: ++node.iz; break;
+            case 3: ++node.minY; break;
+            case 4: ++node.maxY; break;
+            case 5: node.quadrantMask ^= 1; break;
+        }
+        require(!cache.matches(positions, tiles, pages, changed), "Frustum/LOD/bounds changes must not be missed");
+    }
+    require(!cache.matches(positions, tiles, pages, {}), "An empty view must retire visible models");
+    cache.invalidate();
+    require(!cache.matches(positions, tiles, pages, selected), "LOD configuration/reset must invalidate the cache");
+    std::cout << "PASS: stable frames, asynchronous residency, VT publication, toggles, movement and selection changes\n";
+}
+
 int main() {
+    testSyncCache();
     constexpr float sectorSize = 4096.0F;
     const uint32_t root = vtRootLevel(sectorSize);
     require(root == 12, "VT must have meter pages even when geometry has only nine LODs");

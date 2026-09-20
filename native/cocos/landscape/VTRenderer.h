@@ -48,17 +48,22 @@ public:
     VirtualTexture &texture() { return _texture; }
     const VirtualTexture &texture() const { return _texture; }
     bool valid() const;
+    bool rvtNormalEnabled() const { return _rvtNormalEnabled; }
     void render();
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
     void setHeightBlendEnabled(bool enabled);
+    void setRVTNormalEnabled(bool enabled);
 
 private:
+    bool _rvtNormalEnabled{true};
     VirtualTexture _texture;
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;
     std::array<IntrusivePtr<Material>, config::VT_MIP_LEVELS - 1> _mipMaterials;
     IntrusivePtr<gfx::Buffer> _instances;
+    IntrusivePtr<gfx::Texture> _normalSources;
+    ccstd::vector<Vec4> _normalSourceData;
     IntrusivePtr<gfx::Texture> _decalIndices;
     ccstd::vector<Vec4> _decalRegions;
     ccstd::vector<uint8_t> _decalIndexData;

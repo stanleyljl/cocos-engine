@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "base/Log.h"
+#include "base/Macros.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/LandscapeConfig.h"
 #include "renderer/gfx-base/GFXDef-common.h"
@@ -45,6 +46,7 @@ TilePagePool::~TilePagePool() {
 }
 
 bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount) {
+    CC_ASSERT(_device == nullptr);
     if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
         return false;
     }
@@ -62,7 +64,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         CC_LOG_ERROR("[Landscape] device requires filtered RG8 and sampled R16UI textures");
         return false;
     }
-    destroy();
     _device = device;
     _asset = asset;
     _tileRes = data.tileResolution;
@@ -192,10 +193,12 @@ void TilePagePool::update(uint32_t maxUploads) {
     if (_asset != nullptr) {
         uint64_t failedKey = 0;
         while (_asset->takeFailedTile(failedKey)) {
+            ++_updateRevision; // Let a stationary renderer retry failed sources.
         }
     }
     LandscapeAsset::TileData rt;
     while (_asset != nullptr && done < maxUploads && _asset->takeReadyTile(rt)) {
+        ++_updateRevision;
         if (_resident.find(rt.key) != _resident.end()) {
             continue; // already uploaded via an earlier duplicate
         }

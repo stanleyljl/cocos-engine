@@ -46,6 +46,8 @@ try {
   const decalIndices=tex('decalIndexMap',9,gl.TEXTURE_2D);
   const indexBytes=Uint8Array.from({length:128*4},(_,i)=>i%128);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,32,4,0,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
+  tex('terrainNormalMap',10,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([128,128]));
+  tex('normalSourceMap',11,gl.TEXTURE_2D);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,4,0,gl.RGBA,gl.FLOAT,new Float32Array(Array.from({length:64},()=>[0,0,1,0]).flat()));
   const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
   gl.activeTexture(gl.TEXTURE0+6);
   for(let i=0;i<2;i++) { const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0); }
@@ -63,7 +65,9 @@ try {
     constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
-    if(gl.getError()!==gl.NO_ERROR) throw new Error('WebGL error'); return output;
+    if(gl.getError()!==gl.NO_ERROR) throw new Error('WebGL error');
+    if(constants[5]<.5){output[5]=output[3];output[3]=255;} // Decode the new tangent-normal packing for baseline material checks.
+    return output;
   };
   let checks=0;
   const close=(a,b,label,tolerance=2)=>{if(a.some((v,i)=>Math.abs(v-b[i])>tolerance))throw new Error(label+': '+a+' vs '+b);checks++;};

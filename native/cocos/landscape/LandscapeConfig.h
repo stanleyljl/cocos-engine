@@ -59,6 +59,7 @@ constexpr uint32_t DECAL_INSTANCE_MAX = 128;
 
 // 256 usable texels + filtering gutters. Keep 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
+constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 16; // 2x2 interior sources plus a one-source gutter ring.
 constexpr uint32_t VT_PAGE_BORDER = 4;
 constexpr uint32_t VT_MIP_LEVELS = 3; // interiors 256/128/64, borders 4/2/1
 constexpr uint32_t VT_PAGE_RES = VT_PAGE_INTERIOR + 2 * VT_PAGE_BORDER;

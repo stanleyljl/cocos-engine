@@ -1634,6 +1634,7 @@ cocos_source_files(
                  cocos/landscape/MaterialLibrary.cpp
                  cocos/landscape/VirtualTexture.h
                  cocos/landscape/VirtualTexture.cpp
+                 cocos/landscape/VTPaging.h
                  cocos/landscape/VTRenderer.h
                  cocos/landscape/VTRenderer.cpp
                  cocos/landscape/Quadtree.h

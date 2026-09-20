@@ -27,6 +27,7 @@
 #include <cmath>
 
 #include "base/Log.h"
+#include "base/Macros.h"
 #include "core/assets/Material.h"
 #include "core/assets/RenderingSubMesh.h"
 #include "landscape/GridMesh.h"
@@ -52,7 +53,7 @@ VTRenderer::VTRenderer() = default;
 VTRenderer::~VTRenderer() { destroy(); }
 
 bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials) {
-    destroy();
+    CC_ASSERT(_material == nullptr && !_texture.valid());
     const auto &data = asset.data();
     const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
     if (rootCount > config::VT_PAGE_COUNT) {
@@ -79,7 +80,8 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
         pass->getHandle("globalColorMap") == 0U || pass->getHandle("globalColorParams") == 0U ||
         pass->getHandle("heightBlendParams") == 0U || pass->getHandle("decalAlbedoMap") == 0U ||
         pass->getHandle("decalNormalMap") == 0U || pass->getHandle("decalRegions") == 0U ||
-        pass->getHandle("decalIndexMap") == 0U || pass->getHandle("decalLayerParams") == 0U) {
+        pass->getHandle("decalIndexMap") == 0U || pass->getHandle("decalLayerParams") == 0U ||
+        pass->getHandle("terrainNormalMap") == 0U || pass->getHandle("normalSourceMap") == 0U) {
         CC_LOG_WARNING("[Landscape] VT effect is outdated; reimport builtin-landscape effects and rebuild assets");
         destroy();
         return false;
@@ -90,6 +92,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
         if (handle) pass->bindSampler(scene::Pass::getBindingFromHandle(handle), sampler);
     };
     bind("splatmap", tiles.splatArray(), tiles.splatSampler());
+    bind("terrainNormalMap", tiles.normalArray(), tiles.heightSampler());
     bind("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bind("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
     bind("globalColorMap", materials.globalColorMap(), materials.globalColorSampler());
@@ -119,6 +122,12 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     if (!_decalIndices) return false;
     _decalIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX, 0);
     bind("decalIndexMap", _decalIndices, materials.globalColorSampler());
+    indexInfo.format = gfx::Format::RGBA32F;
+    indexInfo.width = config::VT_NORMAL_SOURCE_COUNT;
+    _normalSources = device->createTexture(indexInfo);
+    if (!_normalSources) return false;
+    _normalSourceData.resize(config::VT_PAGE_COUNT * config::VT_NORMAL_SOURCE_COUNT);
+    bind("normalSourceMap", _normalSources, tiles.splatSampler());
     _material->setPropertyVec4Array("decalRegions", decalRegions);
     _material->setPropertyVec4("decalParams", Vec4{static_cast<float>(decals.size()), 0, 0, 0});
     _hasGlobalColorMap = materials.hasGlobalColorMap();
@@ -129,7 +138,7 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
         static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
         device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
-    _material->setPropertyVec4("sourceParams", Vec4{static_cast<float>(asset.data().tileResolution), 0, 0, 0});
+    _material->setPropertyVec4("sourceParams", Vec4{static_cast<float>(asset.data().tileResolution), _rvtNormalEnabled ? 1.0F : 0.0F, 0, 0});
     pass->update();
 
     constexpr uint32_t STRIDE = 12 * sizeof(float);
@@ -208,7 +217,9 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
                               static_cast<float>(z) * data.sectorSize - data.worldDepth() * 0.5F,
                               data.sectorSize, 0.0F};
             const Vec4 source{region.x, region.y, region.z, static_cast<float>(layer)};
-            if (layer < 0 || _texture.acquirePage(key, region, source, true) < 0) {
+            std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normals;
+            normals.fill(source);
+            if (layer < 0 || _texture.acquirePage(key, region, source, normals, true) < 0) {
                 CC_LOG_ERROR("[Landscape] failed to prepare root VT page (%u,%u)", x, z);
                 destroy();
                 return false;
@@ -248,6 +259,18 @@ void VTRenderer::setFrozen(bool frozen) {
         _texture.invalidate();
         _pendingInvalidation = false;
     }
+}
+
+void VTRenderer::setRVTNormalEnabled(bool enabled) {
+    if (!_material || _rvtNormalEnabled == enabled) return;
+    // The owner defers BOTH composition and decoding while pages are frozen.
+    CC_ASSERT(!_frozen);
+    _rvtNormalEnabled = enabled;
+    auto *pass = _material->getPasses()->front().get();
+    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("sourceParams")));
+    params.y = enabled ? 1.0F : 0.0F;
+    _material->setPropertyVec4("sourceParams", params);
+    _texture.invalidate();
 }
 
 void VTRenderer::setHeightBlendEnabled(bool enabled) {
@@ -296,12 +319,17 @@ void VTRenderer::render() {
         _instanceData.insert(_instanceData.end(), {static_cast<float>(slot), static_cast<float>(count), 0, 0,
             page.region.x, page.region.y, page.region.z, page.region.w,
             page.source.x, page.source.y, page.source.z, page.source.w});
+        std::copy(page.normalSources.begin(), page.normalSources.end(),
+                  _normalSourceData.begin() + slot * config::VT_NORMAL_SOURCE_COUNT);
     }
     auto *pass = _material->getPasses()->front().get();
     gfx::BufferTextureCopy indexCopy;
     indexCopy.texExtent = {config::DECAL_INSTANCE_MAX / 4, config::VT_PAGE_COUNT, 1};
     const uint8_t *indexBytes[]{_decalIndexData.data()};
     Root::getInstance()->getDevice()->copyBuffersToTexture(indexBytes, _decalIndices, &indexCopy, 1);
+    indexCopy.texExtent.width = config::VT_NORMAL_SOURCE_COUNT;
+    const uint8_t *normalBytes[]{reinterpret_cast<const uint8_t *>(_normalSourceData.data())};
+    Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSources, &indexCopy, 1);
     pass->update();
     _commands->begin();
     _commands->updateBuffer(_instances, _instanceData.data(), static_cast<uint32_t>(_instanceData.size() * sizeof(float)));
@@ -339,6 +367,8 @@ void VTRenderer::render() {
 }
 
 void VTRenderer::destroy() {
+    _normalSources = nullptr;
+    _normalSourceData.clear();
     _decalIndices = nullptr;
     _decalRegions.clear();
     _decalIndexData.clear();

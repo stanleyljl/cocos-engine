@@ -2,8 +2,10 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include "landscape/LandscapeConfig.h"
 
 namespace cc {
 namespace landscape {
@@ -49,6 +51,41 @@ inline VTPageAddress vtCoveringPage(float sectorSize, uint32_t rootLevel, uint32
     }
     return result;
 }
+
+// Skip CPU reconstruction only when both selection and streamed content are
+// unchanged. Page publication must wake it even when the camera is stationary.
+class LandscapeSyncCache {
+public:
+    using Positions = std::array<float, 9>; // geometry camera, VT camera, terrain origin
+
+    bool matches(const Positions &positions, uint64_t tileRevision, uint64_t vtRevision,
+                 const ccstd::vector<QuadNode> &selected) const {
+        return _valid && positions == _positions && tileRevision == _tileRevision &&
+            vtRevision == _vtRevision && selected.size() == _selected.size() &&
+            std::equal(selected.begin(), selected.end(), _selected.begin(), [](const QuadNode &a, const QuadNode &b) {
+                return a.level == b.level && a.ix == b.ix && a.iz == b.iz &&
+                    a.minY == b.minY && a.maxY == b.maxY && a.quadrantMask == b.quadrantMask;
+            });
+    }
+
+    void store(const Positions &positions, uint64_t tileRevision, uint64_t vtRevision,
+               const ccstd::vector<QuadNode> &selected) {
+        _positions = positions;
+        _tileRevision = tileRevision;
+        _vtRevision = vtRevision;
+        _selected = selected;
+        _valid = true;
+    }
+
+    void invalidate() { _valid = false; }
+
+private:
+    bool _valid{false};
+    Positions _positions{};
+    uint64_t _tileRevision{0};
+    uint64_t _vtRevision{0};
+    ccstd::vector<QuadNode> _selected;
+};
 
 } // namespace landscape
 } // namespace cc

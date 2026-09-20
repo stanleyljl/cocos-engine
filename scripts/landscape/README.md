@@ -193,3 +193,48 @@ node scripts/landscape/patch-height-range.js `
 It scans every `h_<x>_<y>.png`, computes each node's `min/max`, merges bottom-up,
 and writes `heightRange` back into the manifest. Refresh the project assets so
 the running app reloads the patched manifest.
+
+## RVT terrain normals (F11)
+
+`Landscape.rvtNormalEnabled` defaults to true. Composition selects the existing
+filtered normal tiles by the RVT page footprint, independently of geometry LOD.
+Material and planar-decal normals are combined first, then transformed through
+the terrain normal frame. The Base Pass reads this cached terrain-local normal;
+it no longer samples current/parent terrain normals on the enabled path.
+
+The two RGBA8 atlases and three physical mips retain their sizes. Normal X/Z
+occupy the normal atlas RG channels; signed Y occupies the previously unused
+albedo alpha. Roughness/AO remain BA. Mip generation filters full vectors, and
+terrain/decal output remains opaque. The F8 viewer displays RGB without blending
+by the normal-bearing alpha channel.
+
+A 64 KiB RGBA32F lookup stores each page's 2x2 normal-source regions plus a
+neighbor ring for filtering gutters. Sources within a page use one resident
+resolution, falling back together while finer tiles load. Changes invalidate
+the affected page. Source normals still share the height/splat streaming pool;
+this can increase tile requests and composition cost during camera movement.
+
+Stationary frames reuse source mappings and instance data once both tile and VT
+content revisions stop changing. Async completions are still polled; uploads,
+page publication and material invalidation wake the update. During active
+updates each source tile is resolved once per residency revision, and normal
+sources are only resolved a second time if uploads changed the available data.
+
+F11 switches between cached normals and the original geometry-LOD normal blend.
+Switching invalidates the pages; permanent roots provide a valid fallback until
+fine pages are rebuilt. During F6 freeze, F11 is deferred until unfreezing. F12
+continues to control the raised decals and grass independently.
+
+Restart Creator, rebuild the project, then rebuild the native executable so
+Effects, TypeScript and the new native binding agree. Existing source normal
+assets do not need regeneration for this change. After compiling both Effects
+with Creator's Effect compiler, set `LANDSCAPE_EFFECT_JSON`,
+`LANDSCAPE_BASE_EFFECT_JSON` and `CHROME_PATH`, then run:
+
+```powershell
+node --test scripts/landscape/rvt-normal-baking.test.js scripts/landscape/decal-rendering.test.js
+```
+
+These tests cover signed normal composition/filtering, gutter source selection,
+decal composition order, Base Pass morph independence and conforming decal
+geometry. Native visual and performance comparison remains a separate check.

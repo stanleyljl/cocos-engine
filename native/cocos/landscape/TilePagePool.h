@@ -72,6 +72,8 @@ public:
     // from the LandscapeAsset and uploads them to the GPU (LRU-evicting when
     // full).
     void update(uint32_t maxUploads);
+    // Changes when async work completes (including failed/dropped loads).
+    uint64_t updateRevision() const { return _updateRevision; }
 
     inline gfx::Texture *heightArray() const { return _heightArray; }
     inline gfx::Texture *splatArray() const { return _splatArray; }
@@ -101,6 +103,7 @@ private:
     ccstd::vector<uint32_t> _freeLayers;
     ccstd::unordered_set<uint64_t> _inUse;   // requested this frame (evict-protected)
     bool _warnedFull{false};
+    uint64_t _updateRevision{0};
 };
 
 } // namespace landscape

@@ -26,6 +26,7 @@
 #include <limits>
 #include <algorithm>
 #include "base/Log.h"
+#include "base/Macros.h"
 #include "core/assets/RenderTexture.h"
 #include "landscape/LandscapeConfig.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -45,7 +46,7 @@ VirtualTexture::VirtualTexture() = default;
 VirtualTexture::~VirtualTexture() { destroy(); }
 
 bool VirtualTexture::init(gfx::Device *device) {
-    destroy();
+    CC_ASSERT(_atlas == nullptr);
     if (device == nullptr || device->getCapabilities().maxColorRenderTargets < 2 ||
         device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
         return false;
@@ -133,7 +134,7 @@ int VirtualTexture::findReadyPage(uint64_t key) const {
     return slot >= 0 && !_pages[slot].dirty ? slot : -1;
 }
 
-int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, bool permanent, float priority) {
+int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, const std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &normalSources, bool permanent, float priority) {
     if (!valid()) return -1;
     _requested.insert(key);
     auto found = _lookup.find(key);
@@ -173,6 +174,8 @@ int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &so
     p.permanent |= permanent;
     p.priority = priority;
     p.dirty |= !same(p.region, region) || !same(p.source, source);
+    for (size_t i = 0; i < normalSources.size(); ++i) p.dirty |= !same(p.normalSources[i], normalSources[i]);
+    p.normalSources = normalSources;
     p.region = region;
     p.source = source;
     p.lastUsed = _frame;
@@ -202,9 +205,11 @@ void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
 }
 void VirtualTexture::markRendered(const ccstd::vector<uint32_t> &slots) {
     for (uint32_t slot : slots) _pages[slot].dirty = false;
+    if (!slots.empty()) ++_contentRevision;
 }
 void VirtualTexture::invalidate() {
     for (auto &p : _pages) p.dirty = true;
+    ++_contentRevision;
 }
 void VirtualTexture::destroy() {
     for (auto &mip : _mips) {

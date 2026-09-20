@@ -83,12 +83,14 @@ public:
     void setVTMipEnabled(bool enabled);
     void setHeightBlendEnabled(bool enabled);
     void setDecal3DEnabled(bool enabled);
+    void setRVTNormalEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
     void setFreezeLod(bool frozen);
     void setViewPos(const Vec3 &position);
     RenderTexture *debugAtlas() const;
 
 private:
+    bool _rvtNormalEnabled{true};
     struct TilePage {
         uint32_t level{0};
         uint32_t x{0};
@@ -130,6 +132,7 @@ private:
     TilePage resolveTilePage(const QuadNode &node);
     TilePage resolveNormalParent(const QuadNode &node, const TilePage &tile);
     TilePage resolveVTSource(const VTPageAddress &page);
+    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> resolveVTNormalSources(const VTPageAddress &page);
     Vec4 tileParams(const TilePage &tile) const;
     int resolveVTPage(VTPageAddress page) const;
 
@@ -153,6 +156,8 @@ private:
     ccstd::unordered_map<uint64_t, ModelState> _active;
     std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
     uint32_t _vtRootLevel{0};
+    LandscapeSyncCache _syncCache;
+    ccstd::unordered_map<uint64_t, TilePage> _tileResolveCache;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
     // Float32Array-to-TypedArray copies when setting instance attributes.

@@ -17,7 +17,7 @@ CCEffect %{
         - blend: false
       properties:
         vtLayout: { value: [4224, 264, 4, 1] }
-        sourceParams: { value: [129, 0, 0, 0] }
+        sourceParams: { value: [129, 1, 0, 0] }
         tilingParams: { value: [0.1, 0, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
@@ -28,6 +28,8 @@ CCEffect %{
         decalAlbedoMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         decalNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
         globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
+        normalSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
+        terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
         normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
@@ -89,9 +91,8 @@ CCProgram vt-mip-fs %{
     layout(location = 0) out vec4 albedoOut;
     layout(location = 1) out vec4 normalOut;
 
-    vec3 decodeNormal(vec2 encoded) {
-      vec2 xy = encoded * 2.0 - 1.0;
-      return normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+    vec3 decodeNormal(vec4 albedo, vec4 nra) {
+      return normalize(vec3(nra.r, albedo.a, nra.g) * 2.0 - 1.0);
     }
     void main() {
       // Halve the complete slot: 256+4+4 -> 128+2+2 -> 64+1+1. Integer fetches
@@ -106,16 +107,18 @@ CCProgram vt-mip-fs %{
       for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
           ivec2 at = origin + ivec2(x, y);
-          albedo += texelFetch(sourceAlbedo, at, sourceLod);
+          vec4 color = texelFetch(sourceAlbedo, at, sourceLod);
+          albedo += color;
           vec4 nra = texelFetch(sourceNormal, at, sourceLod);
-          normal += decodeNormal(nra.rg);
+          normal += decodeNormal(color, nra);
           roughnessAO += nra.ba;
         }
       }
       // Albedo was already converted to linear by the compose pass.
       albedoOut = albedo * 0.25;
       vec3 filteredNormal = dot(normal, normal) > 1e-10 ? normalize(normal) : vec3(0.0, 0.0, 1.0);
-      normalOut = vec4(filteredNormal.xy * 0.5 + 0.5, roughnessAO * 0.25);
+      albedoOut.a = filteredNormal.y * 0.5 + 0.5;
+      normalOut = vec4(filteredNormal.xz * 0.5 + 0.5, roughnessAO * 0.25);
     }
   #else
     void main() { gl_FragColor = vec4(0.0); }
@@ -125,7 +128,7 @@ CCProgram vt-mip-fs %{
 CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
-    vec4 sourceParams;
+    vec4 sourceParams; // tile resolution, bake terrain normals, unused ZW
     vec4 tilingParams[32]; // repeats/m, linear mean albedo RGB
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
@@ -142,10 +145,13 @@ CCProgram vt-compose-vs %{
   in vec4 a_vtPage;
   in vec4 a_vtRegion;
   in vec4 a_vtSource;
+
   out vec2 v_localXZ;
   #if __VERSION__ >= 300
   flat out vec4 v_source;
   flat out vec2 v_decalPage;
+  flat out vec4 v_region;
+
   #else
   out vec4 v_source;
   out vec2 v_decalPage;
@@ -161,6 +167,9 @@ CCProgram vt-compose-vs %{
     v_localXZ = a_vtRegion.xy + local * a_vtRegion.z;
     v_source = a_vtSource;
     v_decalPage = a_vtPage.xy;
+    #if __VERSION__ >= 300
+    v_region = a_vtRegion;
+    #endif
     vec2 clipPos = atlasUv * 2.0 - 1.0;
     // Texture-to-clip conversion: screenSpaceSignY * clipSpaceSignY.
     // Vulkan/GLES use +1; Metal needs -1. A screen-space flip alone is wrong.
@@ -176,6 +185,8 @@ CCProgram vt-compose-fs %{
   #include <common/color/gamma>
   #if __VERSION__ >= 300
   uniform highp usampler2DArray splatmap;
+  uniform highp sampler2DArray terrainNormalMap;
+  uniform highp sampler2D normalSourceMap;
   uniform highp sampler2DArray albedoHeightMap;
   uniform highp sampler2DArray normalRoughnessAOMap;
   uniform sampler2D globalColorMap;
@@ -185,6 +196,8 @@ CCProgram vt-compose-fs %{
   in vec2 v_localXZ;
   flat in vec4 v_source;
   flat in vec2 v_decalPage;
+  flat in vec4 v_region;
+
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
 
@@ -343,9 +356,25 @@ CCProgram vt-compose-fs %{
       roughness = mix(roughness, nra.b, color.a);
       ao = mix(ao, nra.a, color.a);
     }
-    // Color is stored in linear space; Base Pass must not apply SRGBToLinear.
-    albedoOut = vec4(albedo, 1.0);
-    normalOut = vec4(normalize(normal).xy * 0.5 + 0.5, roughness, ao);
+    normal = normalize(normal);
+    if (sourceParams.y > 0.5) {
+      // 2x2 interior cells plus a ring for the page's filtering gutters.
+      ivec2 cell = clamp(ivec2(floor((v_localXZ - v_region.xy) / v_region.z * 2.0)) + ivec2(1), ivec2(0), ivec2(3));
+      vec4 source = texelFetch(normalSourceMap, ivec2(cell.y * 4 + cell.x, int(v_decalPage.x)), 0);
+      vec2 uvNormal = clamp((v_localXZ - source.xy) / source.z, vec2(0.0), vec2(1.0));
+      uvNormal = (uvNormal * (sourceParams.x - 1.0) + 0.5) / sourceParams.x;
+      vec2 xz = texture(terrainNormalMap, vec3(uvNormal, source.w)).rg * 2.0 - 1.0;
+      vec3 terrainNormal = normalize(vec3(xz.x, sqrt(max(1.0 - dot(xz, xz), 0.0)), xz.y));
+      vec3 t = vec3(terrainNormal.y, -terrainNormal.x, 0.0);
+      vec3 tangent = dot(t, t) > 1e-10 ? normalize(t) : vec3(1.0, 0.0, 0.0);
+      normal = normalize(tangent * normal.x + cross(terrainNormal, tangent) * normal.y + terrainNormal * normal.z);
+    }
+    // Three signed components filter continuously, even when the composed
+    // normal points below the horizon. Reuse the otherwise unused albedo alpha.
+    // OFF stores tangent space; ON stores terrain-local space. All pages are
+    // invalidated together when this convention changes.
+    albedoOut = vec4(albedo, normal.y * 0.5 + 0.5);
+    normalOut = vec4(normal.xz * 0.5 + 0.5, roughness, ao);
   }
   #else
   void main() { gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0); }

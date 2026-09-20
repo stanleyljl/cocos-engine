@@ -28,6 +28,7 @@
 #include <cmath>
 
 #include "base/Log.h"
+#include "base/Macros.h"
 #include "landscape/LandscapeConfig.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
@@ -149,7 +150,7 @@ MaterialLibrary::MaterialLibrary() = default;
 MaterialLibrary::~MaterialLibrary() { destroy(); }
 
 bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
-    destroy();
+    CC_ASSERT(_albedoHeight == nullptr && _normalRoughnessAO == nullptr && _globalColorMap == nullptr);
     const auto &layers = asset.materialLayers();
     if (device == nullptr || layers.empty()) {
         return false;
