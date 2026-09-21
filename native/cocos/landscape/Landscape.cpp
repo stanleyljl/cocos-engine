@@ -30,8 +30,9 @@
 
 #include "base/Log.h"
 #include "core/Root.h"
+#include "core/assets/Texture2D.h"
 #include "core/geometry/AABB.h"
-#include "core/geometry/Sphere.h"
+#include "core/geometry/Intersect.h"
 #include "core/scene-graph/Node.h"
 #include "core/scene-graph/Scene.h"
 #include "landscape/LandscapeAsset.h"
@@ -42,7 +43,6 @@
 #include "math/Vec3.h"
 #include "renderer/pipeline/GeometryRenderer.h"
 #include "renderer/pipeline/PipelineSceneData.h"
-#include "renderer/pipeline/custom/RenderInterfaceTypes.h"
 #include "renderer/pipeline/shadow/CSMLayers.h"
 #include "scene/Camera.h"
 #include "scene/DirectionalLight.h"
@@ -52,48 +52,6 @@
 
 namespace cc {
 namespace landscape {
-
-namespace {
-
-void appendShadowFrusta(scene::RenderScene *scene, scene::Camera *camera,
-                        ccstd::vector<const geometry::Frustum *> &frusta) {
-    auto *root = Root::getInstance();
-    auto *pipeline = root ? root->getPipeline() : nullptr;
-    auto *sceneData = pipeline ? pipeline->getPipelineSceneData() : nullptr;
-    auto *shadows = sceneData ? sceneData->getShadows() : nullptr;
-    if (!shadows || !shadows->isEnabled() || shadows->getType() != scene::ShadowType::SHADOW_MAP) {
-        return;
-    }
-
-    auto *sun = scene->getMainLight();
-    if (sun && sun->getNode() && sun->isShadowEnabled()) {
-        // BEFORE_DRAW precedes pipeline culling. Update light frusta here so
-        // moving the camera/light never selects casters using last frame's CSM.
-        sun->update();
-        auto *csm = sceneData->getCSMLayers();
-        csm->update(sceneData, camera);
-        if (sun->isShadowFixedArea()) {
-            frusta.push_back(&csm->getSpecialLayer()->getValidFrustum());
-        } else {
-            const auto count = sceneData->getCSMSupported() ? static_cast<uint32_t>(sun->getCSMLevel()) : 1U;
-            for (uint32_t i = 0; i < count; ++i) {
-                frusta.push_back(&csm->getLayers()[i]->getValidFrustum());
-            }
-        }
-    }
-    for (const auto &light : scene->getSpotLights()) {
-        if (!light->getNode() || light->isBaked() || !light->isShadowEnabled()) continue;
-        light->update();
-        geometry::Sphere bounds;
-        bounds.setCenter(light->getPosition());
-        bounds.setRadius(light->getRange());
-        if (bounds.sphereFrustum(camera->getFrustum())) {
-            frusta.push_back(&light->getFrustum());
-        }
-    }
-}
-
-} // namespace
 
 Landscape::Landscape() = default;
 
@@ -142,18 +100,11 @@ void Landscape::initializeRenderer() {
         return;
     }
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
-    renderer->setDebugFlags(_lodColor, _showRanges);
-    renderer->setUnlit(_unlit);
-    renderer->setVTMipEnabled(_vtMipEnabled);
-    renderer->setHeightBlendEnabled(_heightBlendEnabled);
-    renderer->setDecal3DEnabled(_decal3DEnabled);
-    renderer->setRVTNormalEnabled(_rvtNormalEnabled);
-    renderer->setCliffEnabled(_cliffEnabled);
+    renderer->setDebugData(_debugData);
+    renderer->setGlobalColorMap(_globalColorMap);
     renderer->setGlobalColorStrength(_globalColorStrength);
-    renderer->setWireframe(_wireframe);
     renderer->setCastShadow(_castShadow);
     renderer->setReceiveShadow(_receiveShadow);
-    renderer->setFreezeLod(_freezeLod);
 
 #if CC_LANDSCAPE_DEBUG
     const auto &data = asset->data();
@@ -167,6 +118,12 @@ void Landscape::initializeRenderer() {
     _asset = std::move(asset);
     _quadtree = std::move(quadtree);
     _renderer = std::move(renderer);
+    _scene->addLandscape(this);
+}
+
+void Landscape::setGlobalColorMap(Texture2D *texture) {
+    _globalColorMap = texture;
+    if (_renderer) _renderer->setGlobalColorMap(texture);
 }
 
 void Landscape::setGlobalColorStrength(float strength) {
@@ -176,43 +133,42 @@ void Landscape::setGlobalColorStrength(float strength) {
 }
 
 void Landscape::onDisable() {
+    if (_scene) _scene->removeLandscape(this);
+    _passes.clear();
+    _coveredShadowModels.clear();
+    _passCount = 0;
+    _geometryNodes.clear();
     _renderer = nullptr;
     _quadtree = nullptr;
     _asset = nullptr;
-    _selected.clear();
-#if CC_LANDSCAPE_DEBUG
-    _lastLodNodeCounts.clear();
-#endif
+    _debugNodes.clear();
     _lastVisibilityDistanceWarning = false;
     _scene = nullptr;
     _node = nullptr;
 }
 
 void Landscape::update() {
-    if (_node == nullptr) {
-        return;
-    }
-    if (_renderer == nullptr || _quadtree == nullptr || !_renderer->valid()) {
-        return;
-    }
-    if (_freezeLod && _renderer->isReady()) {
-        return; // Keep both geometry selection and VT residency unchanged.
-    }
+    if (!_node || !_renderer || !_quadtree || !_renderer->valid()) return;
+    if (_debugData.freezeLod && _renderer->isReady()) return;
     auto *camera = pickMainCamera();
-    if (camera == nullptr) {
-        return;
-    }
-    // Selection runs before the render window updates its cameras. Refresh the
-    // view/projection here so culling and geomorph use this frame's camera pose.
+    if (!camera) return;
     camera->update();
-    _renderer->setViewPos(camera->getPosition());
+    _lodViewPosition = camera->getPosition();
+    _renderer->setViewPos(_lodViewPosition);
+}
 
-    // Select once using the MAIN camera's distance for both LOD and morph.
-    // Light frusta only retain offscreen casters; shadow passes reuse these models.
-    ccstd::vector<const geometry::Frustum *> frusta{&camera->getFrustum()};
-    if (_castShadow) appendShadowFrusta(_scene, camera, frusta);
+void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
+    if (_passCount == _passes.size()) _passes.emplace_back();
+    auto &pass = _passes[_passCount++];
+    pass.frustum = &frustum;
+    pass.shadow = shadow;
+    pass.nodes.clear();
+    pass.models.clear();
+    _visibilityDistanceWarning |= selectNodes(frustum, pass.nodes);
+}
 
-    _selected.clear();
+bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes) {
+    nodes.clear();
     const Vec3 base = _node->getWorldPosition();
     const auto &data = _asset->data();
     const float halfWorldX = data.worldWidth() * 0.5F;
@@ -225,12 +181,12 @@ void Landscape::update() {
                 base.y,
                 base.z + (static_cast<float>(sectorZ) + 0.5F) * data.sectorSize - halfWorldZ,
             };
-            const auto &local = _quadtree->select(camera->getPosition(), frusta,
+            const auto &local = _quadtree->select(_lodViewPosition, frustum,
                                                   origin, sectorX, sectorZ);
             visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
             for (const auto &node : local) {
                 const uint32_t scale = computeNodesPerSide(data.maxLevel, node.level);
-                _selected.push_back(QuadNode{
+                nodes.push_back(QuadNode{
                     node.level,
                     sectorX * scale + node.ix,
                     sectorZ * scale + node.iz,
@@ -241,8 +197,46 @@ void Landscape::update() {
             }
         }
     }
-    if (visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
-        if (visibilityDistanceWarning) {
+    return visibilityDistanceWarning;
+}
+
+void Landscape::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
+    _passCount = 0;
+    if (!_renderer || !_quadtree || !_renderer->valid()) return;
+    const auto layer = _node->getLayer();
+    // UI/other cameras that hide terrain must not rebuild its models or VT plan.
+    if ((camera.getVisibility() & layer) != layer) return;
+    update();
+    _visibilityDistanceWarning = false;
+
+    // The first selection is the only color pass in this forward camera batch.
+    selectPass(camera.getFrustum(), false);
+    uint32_t cascadesToDeduplicate = 0;
+    const auto *shadows = sceneData.getShadows();
+    if (_castShadow && shadows && shadows->isEnabled() && shadows->getType() == scene::ShadowType::SHADOW_MAP) {
+        const auto *mainLight = _scene->getMainLight();
+        const auto *csmLayers = sceneData.getCSMLayers();
+        if (mainLight && mainLight->isShadowEnabled()) {
+            if (mainLight->isShadowFixedArea()) {
+                selectPass(csmLayers->getSpecialLayer()->getValidFrustum(), true);
+            } else {
+                const uint32_t count = sceneData.getCSMSupported() ? static_cast<uint32_t>(mainLight->getCSMLevel()) : 1U;
+                if (mainLight->getCSMOptimizationMode() == scene::CSMOptimizationMode::REMOVE_DUPLICATES) {
+                    cascadesToDeduplicate = count;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    selectPass(csmLayers->getLayers()[i]->getValidFrustum(), true);
+                }
+            }
+        }
+        for (const auto *light : sceneData.getValidPunctualLights()) {
+            if (light->getType() != scene::LightType::SPOT) continue;
+            const auto *spot = static_cast<const scene::SpotLight *>(light);
+            if (spot->isShadowEnabled()) selectPass(spot->getFrustum(), true);
+        }
+    }
+    if (_visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
+        if (_visibilityDistanceWarning) {
             CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
         }
 #if CC_LANDSCAPE_DEBUG
@@ -250,55 +244,66 @@ void Landscape::update() {
             CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
         }
 #endif
-        _lastVisibilityDistanceWarning = visibilityDistanceWarning;
+        _lastVisibilityDistanceWarning = _visibilityDistanceWarning;
     }
-#if CC_LANDSCAPE_DEBUG
-    ccstd::vector<uint32_t> lodNodeCounts(data.maxLevel + 1U, 0U);
-    for (const auto &node : _selected) {
-        if (node.level <= data.maxLevel) {
-            for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
-                lodNodeCounts[node.level] += (node.quadrantMask >> quadrant) & 1U;
+    // Only residency/model storage is shared. Each pass keeps its own root traversal result.
+    auto &surfaceNodes = _passes.front().nodes;
+    mergeNodeSelections(surfaceNodes);
+    _geometryNodes.clear();
+    for (size_t i = 0; i < _passCount; ++i) {
+        const auto &nodes = _passes[i].nodes;
+        _geometryNodes.insert(_geometryNodes.end(), nodes.begin(), nodes.end());
+    }
+    mergeNodeSelections(_geometryNodes);
+    _renderer->preparePasses(_geometryNodes, surfaceNodes);
+    for (size_t i = 0; i < _passCount; ++i) {
+        auto &pass = _passes[i];
+        _renderer->collectPassModels(pass.nodes, *pass.frustum, pass.shadow, pass.models);
+    }
+    removeCSMDuplicates(cascadesToDeduplicate);
+}
+
+void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
+    _coveredShadowModels.clear();
+    if (cascadeCount < 2U) return;
+    // Match legacy shadowCulling: a model completely inside an earlier cascade
+    // is omitted from later cascades. Intersecting the frustum is not sufficient.
+    // All passes have already traversed their own quadtrees independently.
+    // Directional cascades follow the color pass; spot passes are never deduplicated.
+    for (uint32_t i = 1; i <= cascadeCount; ++i) {
+        auto &pass = _passes[i];
+        size_t count = 0;
+        for (const auto *model : pass.models) {
+            if (_coveredShadowModels.count(model) != 0) continue;
+            pass.models[count++] = model;
+            if (i < cascadeCount && geometry::aabbFrustumCompletelyInside(*model->getWorldBounds(), *pass.frustum)) {
+                _coveredShadowModels.insert(model);
             }
         }
+        pass.models.resize(count);
     }
+}
 
-    if (lodNodeCounts != _lastLodNodeCounts) {
-        constexpr uint32_t quadsPerQuadrantSide = (config::VERTS_PER_NODE_SIDE - 1U) / 2U;
-        constexpr uint32_t trianglesPerQuadrant = quadsPerQuadrantSide * quadsPerQuadrantSide * 2U;
-        uint32_t totalNodeCount = 0U;
-        uint32_t totalTriangleCount = 0U;
-        CC_LOG_INFO("[Landscape] LOD stats:");
-        for (uint32_t level = 0; level <= data.maxLevel; ++level) {
-            const uint32_t triangles = lodNodeCounts[level] * trianglesPerQuadrant;
-            totalNodeCount += lodNodeCounts[level];
-            totalTriangleCount += triangles;
-            CC_LOG_INFO("[Landscape]   LOD%u: quadrantInstances=%u triangles=%u",
-                        level, lodNodeCounts[level], triangles);
-        }
-        CC_LOG_INFO("[Landscape]   total: quadrantInstances=%u triangles=%u",
-                    totalNodeCount, totalTriangleCount);
-        _lastLodNodeCounts = lodNodeCounts;
+const ccstd::vector<const scene::Model *> &Landscape::getPassModels(const geometry::Frustum &frustum, bool shadow) const {
+    for (size_t i = 0; i < _passCount; ++i) {
+        const auto &pass = _passes[i];
+        if (pass.frustum == &frustum && pass.shadow == shadow) return pass.models;
     }
-#endif
-    _renderer->sync(_selected);
+    static const ccstd::vector<const scene::Model *> empty;
+    return empty;
+}
+
+void Landscape::onGlobalPipelineStateChanged() {
+    if (_renderer) _renderer->onGlobalPipelineStateChanged();
 }
 
 bool Landscape::isReady() const {
     return _renderer != nullptr && _renderer->isReady();
 }
 
-void Landscape::setFreezeLod(bool frozen) {
-    _freezeLod = frozen;
-    if (_renderer != nullptr) {
-        _renderer->setFreezeLod(frozen);
-    }
-}
-
-void Landscape::setWireframe(bool wireframe) {
-    _wireframe = wireframe;
-    if (_renderer != nullptr) {
-        _renderer->setWireframe(wireframe);
-    }
+void Landscape::setDebugData(const LandscapeDebugData &data) {
+    _debugData = data;
+    if (_renderer) _renderer->setDebugData(data);
 }
 
 void Landscape::setCastShadow(bool enabled) {
@@ -311,58 +316,8 @@ void Landscape::setReceiveShadow(bool enabled) {
     if (_renderer) _renderer->setReceiveShadow(enabled);
 }
 
-void Landscape::setLodColor(bool enabled) {
-    _lodColor = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setDebugFlags(_lodColor, _showRanges);
-    }
-}
-
-void Landscape::setShowRanges(bool enabled) {
-    _showRanges = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setDebugFlags(_lodColor, _showRanges);
-    }
-}
-
 void Landscape::setAssetPath(const ccstd::string &manifestPath) {
     _assetPath = manifestPath;
-}
-
-void Landscape::setUnlit(bool enabled) {
-    _unlit = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setUnlit(enabled);
-    }
-}
-
-void Landscape::setVTMipEnabled(bool enabled) {
-    _vtMipEnabled = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setVTMipEnabled(enabled);
-    }
-}
-
-void Landscape::setDecal3DEnabled(bool enabled) {
-    _decal3DEnabled = enabled;
-    if (_renderer) _renderer->setDecal3DEnabled(enabled);
-}
-
-void Landscape::setRVTNormalEnabled(bool enabled) {
-    _rvtNormalEnabled = enabled;
-    if (_renderer) _renderer->setRVTNormalEnabled(enabled);
-}
-
-void Landscape::setCliffEnabled(bool enabled) {
-    _cliffEnabled = enabled;
-    if (_renderer) _renderer->setCliffEnabled(enabled);
-}
-
-void Landscape::setHeightBlendEnabled(bool enabled) {
-    _heightBlendEnabled = enabled;
-    if (_renderer != nullptr) {
-        _renderer->setHeightBlendEnabled(enabled);
-    }
 }
 
 scene::Camera *Landscape::pickMainCamera() const {
@@ -379,13 +334,16 @@ scene::Camera *Landscape::pickMainCamera() const {
 
 void Landscape::drawDebugBounds() {
 #if CC_USE_GEOMETRY_RENDERER
-    if (_scene == nullptr || _node == nullptr || _selected.empty()) {
+    if (_scene == nullptr || _node == nullptr || !_quadtree) {
         return;
     }
     auto *camera = pickMainCamera();
     if (camera == nullptr) {
         return;
     }
+    // Debug drawing precedes pass collection. Traverse the current camera view
+    // here instead of drawing last frame's selection after a camera rotation.
+    selectNodes(camera->getFrustum(), _debugNodes);
     camera->initGeometryRenderer();
     auto *geometry = camera->getGeometryRenderer();
     if (geometry == nullptr) {
@@ -405,7 +363,7 @@ void Landscape::drawDebugBounds() {
     const auto &data = _asset->data();
     const float halfWorldX = data.worldWidth() * 0.5F;
     const float halfWorldZ = data.worldDepth() * 0.5F;
-    for (const auto &node : _selected) {
+    for (const auto &node : _debugNodes) {
         const float nodeSize = computeNodeSize(data.sectorSize, data.maxLevel, node.level);
         const float quadrantSize = nodeSize * 0.5F;
         const float nodeX = static_cast<float>(node.ix) * nodeSize - halfWorldX;
@@ -425,67 +383,15 @@ void Landscape::drawDebugBounds() {
                 quadrantSize * 0.5F,
             };
             // Debug bounds must remain visible even where the terrain occludes or
-            // shares an edge with the box. Sector seams below remain depth-tested.
+            // shares an edge with the box.
             geometry->addBoundingBox(box, colors[node.level], true, false, false, true, world);
         }
     }
 #endif
 }
 
-void Landscape::drawDebugSectors() {
-#if CC_USE_GEOMETRY_RENDERER
-    if (_scene == nullptr || _node == nullptr || _asset == nullptr) {
-        return;
-    }
-    auto *camera = pickMainCamera();
-    if (camera == nullptr) {
-        return;
-    }
-    camera->initGeometryRenderer();
-    auto *geometry = camera->getGeometryRenderer();
-    if (geometry == nullptr) {
-        return;
-    }
-    static const gfx::Color color{1.0F, 0.15F, 0.90F, 1.0F};
-    const Mat4 &world = _node->getWorldMatrix();
-    const auto &data = _asset->data();
-    const float halfWorldX = data.worldWidth() * 0.5F;
-    const float halfWorldZ = data.worldDepth() * 0.5F;
-    const uint32_t segments = 256U;
-    const float lift = 3.0F;
-    auto emitSeamLine = [&](float x0, float z0, float x1, float z1) {
-        Vec3 previous{x0, data.minHeight() + lift, z0};
-        for (uint32_t i = 1U; i <= segments; ++i) {
-            const float t = static_cast<float>(i) / static_cast<float>(segments);
-            Vec3 current{
-                x0 + (x1 - x0) * t,
-                0.0F,
-                z0 + (z1 - z0) * t,
-            };
-            current.y = data.minHeight() + lift;
-
-            Vec3 worldPrevious;
-            Vec3 worldCurrent;
-            Vec3::transformMat4(previous, world, &worldPrevious);
-            Vec3::transformMat4(current, world, &worldCurrent);
-            geometry->addLine(worldPrevious, worldCurrent, color, true);
-            previous = current;
-        }
-    };
-
-    for (uint32_t i = 0U; i <= data.sectorsX; ++i) {
-        const float p = static_cast<float>(i) * data.sectorSize - halfWorldX;
-        emitSeamLine(p, -halfWorldZ, p, halfWorldZ);
-    }
-    for (uint32_t i = 0U; i <= data.sectorsZ; ++i) {
-        const float p = static_cast<float>(i) * data.sectorSize - halfWorldZ;
-        emitSeamLine(-halfWorldX, p, halfWorldX, p);
-    }
-#endif
-}
-
-RenderTexture *Landscape::getDebugAtlas() const {
-    return _renderer ? _renderer->debugAtlas() : nullptr;
+RenderTexture *Landscape::getVTAtlas() const {
+    return _renderer ? _renderer->vtAtlas() : nullptr;
 }
 
 } // namespace landscape

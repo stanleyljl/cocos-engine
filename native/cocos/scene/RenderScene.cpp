@@ -31,6 +31,7 @@
 #include "base/Log.h"
 #include "core/Root.h"
 #include "core/scene-graph/Node.h"
+#include "landscape/Landscape.h"
 #include "profiler/Profiler.h"
 #include "renderer/pipeline/PipelineSceneData.h"
 #include "renderer/pipeline/custom/RenderInterfaceTypes.h"
@@ -194,6 +195,7 @@ void RenderScene::update(uint32_t stamp) {
 }
 
 void RenderScene::destroy() {
+    while (!_landscapes.empty()) _landscapes.back()->onDisable();
     removeCameras();
     removeSphereLights();
     removeSpotLights();
@@ -396,7 +398,19 @@ void RenderScene::updateOctree(Model *model) {
     }
 }
 
+void RenderScene::addLandscape(landscape::Landscape *terrain) {
+    if (std::find(_landscapes.begin(), _landscapes.end(), terrain) == _landscapes.end()) {
+        _landscapes.push_back(terrain);
+    }
+}
+
+void RenderScene::removeLandscape(landscape::Landscape *terrain) {
+    const auto it = std::find(_landscapes.begin(), _landscapes.end(), terrain);
+    if (it != _landscapes.end()) _landscapes.erase(it);
+}
+
 void RenderScene::onGlobalPipelineStateChanged() {
+    for (auto *terrain : _landscapes) terrain->onGlobalPipelineStateChanged();
     for (const auto &model : _models) {
         model->onGlobalPipelineStateChanged();
     }

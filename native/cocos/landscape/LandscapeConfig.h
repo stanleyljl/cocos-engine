@@ -126,6 +126,12 @@ constexpr uint32_t NODE_KEY_LEVEL_SHIFT = NODE_KEY_COORD_BITS * 2U;
 uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
 uint64_t makeNodeKey(const QuadNode &node);
 uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant);
+// Deduplicate resource requests after independent pass selections; preserve all quadrants.
+void mergeNodeSelections(ccstd::vector<QuadNode> &nodes);
+// Inputs must be sorted/deduplicated by mergeNodeSelections; output must not alias them.
+// Keep geometry quadrants not needed by any color pass, in linear time.
+void collectShadowOnlyNodes(const ccstd::vector<QuadNode> &geometryNodes,
+                            const ccstd::vector<QuadNode> &surfaceNodes, ccstd::vector<QuadNode> &output);
 
 } // namespace landscape
 } // namespace cc

@@ -94,6 +94,7 @@ bool VirtualTexture::init(gfx::Device *device) {
     samplerInfo.mipFilter = gfx::Filter::LINEAR;
     samplerInfo.addressU = gfx::Address::CLAMP;
     samplerInfo.addressV = gfx::Address::CLAMP;
+    samplerInfo.addressW = gfx::Address::CLAMP;
     _sampler = device->getSampler(samplerInfo);
     _pages.resize(config::VT_PAGE_COUNT);
     return valid();

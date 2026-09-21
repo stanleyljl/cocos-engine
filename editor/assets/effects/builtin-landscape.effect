@@ -8,14 +8,15 @@ CCEffect %{
       properties:
         mainColor: { value: [1, 1, 1, 1], linear: true, editor: { type: color } }
         terrainParams: { value: [3000, 0, 0, 0] }
+        sectorParams: { value: [1, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4224, 264, 4, 0] }
         decalControl: { value: [1, 0, 0, 0] }
-        decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp } }
+        decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         rvtNormalParams: { value: [1, 0, 0, 0] }
-        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
-        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
+        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.
@@ -59,6 +60,7 @@ CCProgram landscape-uniforms %{
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
+    vec4 sectorParams; // sector size, half landscape width/depth, unused
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border
@@ -70,6 +72,9 @@ CCProgram landscape-uniforms %{
 }%
 
 CCProgram landscape-macros %{
+  #ifndef LANDSCAPE_SHADOW_PASS
+    #define LANDSCAPE_SHADOW_PASS 0
+  #endif
   // VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
   #pragma define-meta LANDSCAPE_DEBUG_UNLIT
   #pragma define-meta LANDSCAPE_DECAL_MESH
@@ -82,8 +87,10 @@ CCProgram landscape-vertex %{
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
     in vec4 a_quadrantInst; // parent UV offset XY, patch UV size Z
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
-    in vec4 a_normalParentInst; // parent normal region XZ origin, size, array layer
-    in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
+    #if !LANDSCAPE_SHADOW_PASS
+      in vec4 a_normalParentInst; // parent normal region XZ origin, size, array layer
+      in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
+    #endif
     #if LANDSCAPE_DECAL_MESH
       in vec4 a_decalRegion; // minimum XZ, world size, height texture layer
       in vec4 a_decalGrid; // fixed XZ origin, width and depth; independent of LOD
@@ -96,13 +103,17 @@ CCProgram landscape-vertex %{
       uniform sampler2DArray decalHeightMap;
       out float v_decalLift;
     #endif
-    flat out float v_lod;
-    flat out vec4 v_vtParams;
-    out vec4 v_normalUV;
-    flat out vec2 v_normalLayers;
-    out float v_normalMorph;
+    #if !LANDSCAPE_SHADOW_PASS
+      flat out float v_lod;
+      flat out vec4 v_vtParams;
+      out vec4 v_normalUV;
+      flat out vec2 v_normalLayers;
+      out float v_normalMorph;
+    #endif
   #else
-    out float v_lod;
+    #if !LANDSCAPE_SHADOW_PASS
+      out float v_lod;
+    #endif
   #endif
 
   float sampleHeightRegion(vec2 localXZ, vec4 region) {
@@ -186,6 +197,7 @@ CCProgram landscape-vertex %{
     // The RG32F buffer packs terrain XZ into the first two input components.
     // Keep the shared surface input unchanged; reconstruct XYZ on return.
     vec2 localXZ = In.position.xy;
+  #if !LANDSCAPE_SHADOW_PASS
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
@@ -196,10 +208,13 @@ CCProgram landscape-vertex %{
       v_vtParams = a_vtInst;
     #endif
   #endif
+  #endif
   #if USE_INSTANCING
     vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
-    v_lod = a_gridInst.w;
+    #if !LANDSCAPE_SHADOW_PASS
+      v_lod = a_gridInst.w;
+    #endif
   #endif
     float height = sampleHeight(localXZ);
   #if __VERSION__ >= 300 && USE_INSTANCING
@@ -216,9 +231,11 @@ CCProgram landscape-vertex %{
     #endif
     localXZ = base.xz;
     height = base.y;
-    v_normalMorph = base.w;
+    #if !LANDSCAPE_SHADOW_PASS
+      v_normalMorph = base.w;
+    #endif
   #endif
-  #if __VERSION__ >= 300 && USE_INSTANCING
+  #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
     // Identical final world coordinates for geometry and both normal levels.
     float resolution = max(heightParams.y, 2.0);
     v_normalUV = vec4((localXZ - a_tileInst.xy) / a_tileInst.z,
@@ -352,6 +369,14 @@ CCProgram landscape-surface %{
         if (abs(d - lodMorph[i].x) < width) surfaceData.baseColor.rgb = mix(lodPalette(i), vec3(0.95), 0.62);
         if (abs(d - lodMorph[i].y) < width) surfaceData.baseColor.rgb = lodPalette(i) * 0.45;
       }
+      // Use local terrain coordinates so seams follow the rendered surface,
+      // including geomorph and node transforms. Differentiate before wrapping.
+      vec2 sectorUV = (vec2(FSInput_texcoord.x, -FSInput_texcoord.y) + sectorParams.yz) / max(sectorParams.x, 1e-6);
+      vec2 seamDistance = abs(fract(sectorUV + 0.5) - 0.5);
+      vec2 seamWidth = max(fwidth(sectorUV) * 1.5, vec2(1e-6));
+      if (any(lessThan(seamDistance, seamWidth))) {
+        surfaceData.baseColor.rgb = vec3(1.0, 0.3, 0.0);
+      }
     }
   }
 }%
@@ -392,6 +417,7 @@ CCProgram landscape-fs %{
 CCProgram landscape-shadow-vs %{
   precision highp float;
   precision highp int;
+  #define LANDSCAPE_SHADOW_PASS 1
   #include <landscape-macros>
   #include <surfaces/effect-macros/render-to-shadowmap>
   #include <surfaces/includes/common-vs>

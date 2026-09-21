@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "landscape/LandscapeConfig.h"
+#include <algorithm>
 
 namespace cc {
 namespace landscape {
@@ -90,6 +91,38 @@ uint64_t makeNodeKey(const QuadNode &node) {
 
 uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant) {
     return (makeNodeKey(node) << 2U) | static_cast<uint64_t>(quadrant);
+}
+
+void mergeNodeSelections(ccstd::vector<QuadNode> &nodes) {
+    std::sort(nodes.begin(), nodes.end(), [](const QuadNode &a, const QuadNode &b) {
+        return makeNodeKey(a) < makeNodeKey(b);
+    });
+    size_t count = 0;
+    for (const auto &node : nodes) {
+        if (count > 0 && makeNodeKey(nodes[count - 1]) == makeNodeKey(node)) {
+            auto &merged = nodes[count - 1];
+            merged.quadrantMask |= node.quadrantMask;
+            merged.minY = std::min(merged.minY, node.minY);
+            merged.maxY = std::max(merged.maxY, node.maxY);
+        } else {
+            nodes[count++] = node;
+        }
+    }
+    nodes.resize(count);
+}
+
+void collectShadowOnlyNodes(const ccstd::vector<QuadNode> &geometryNodes,
+                            const ccstd::vector<QuadNode> &surfaceNodes, ccstd::vector<QuadNode> &output) {
+    output.clear();
+    auto surface = surfaceNodes.begin();
+    for (auto node : geometryNodes) {
+        const auto key = makeNodeKey(node);
+        while (surface != surfaceNodes.end() && makeNodeKey(*surface) < key) ++surface;
+        if (surface != surfaceNodes.end() && makeNodeKey(*surface) == key) {
+            node.quadrantMask &= static_cast<uint8_t>(~surface->quadrantMask);
+        }
+        if (node.quadrantMask != 0) output.push_back(node);
+    }
 }
 
 } // namespace landscape

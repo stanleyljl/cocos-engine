@@ -30,14 +30,14 @@ CCEffect %{
         decalParams: { value: [0, 0, 0, 0] }
         decalLayerParams: { value: [0, 0, 0, 0] }
         decalIndexMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
-        decalAlbedoMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
-        decalNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
-        globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp } }
+        decalAlbedoMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        decalNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         normalSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
         terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
-        albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
-        normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap } }
+        albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap, addressW: wrap } }
+        normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap, addressW: wrap } }
   - name: downsample
     passes:
     - vert: vt-mip-vs:vert
@@ -53,8 +53,8 @@ CCEffect %{
         - blend: false
       properties:
         mipLayout: { value: [4224, 264, 0, 1] }
-        sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
-        sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
+        sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
+        sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
 }%
 
 CCProgram vt-mip-uniforms %{

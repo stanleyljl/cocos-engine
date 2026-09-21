@@ -4,6 +4,10 @@
 // Note: doesn't support number prefix
 %module(target_namespace="jsb") scene
 
+%ignore cc::scene::RenderScene::addLandscape;
+%ignore cc::scene::RenderScene::removeLandscape;
+%ignore cc::scene::RenderScene::getLandscapes;
+
 // Disable some swig warnings, find warning number reference here ( https://www.swig.org/Doc4.1/Warnings.html )
 #pragma SWIG nowarn=503,302,401,317,402
 

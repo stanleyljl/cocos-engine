@@ -24,6 +24,7 @@
 #pragma once
 
 #include "core/Root.h"
+#include "landscape/Landscape.h"
 #include "landscape/VirtualTexture.h"
 
 namespace cc {
@@ -48,13 +49,14 @@ public:
     VirtualTexture &texture() { return _texture; }
     const VirtualTexture &texture() const { return _texture; }
     bool valid() const;
-    bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
-    bool rvtNormalEnabled() const { return _rvtNormalEnabled; }
+    bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
+    bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
     void render();
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
+    void setGlobalColorMap(Texture2D *texture);
     void setHeightBlendEnabled(bool enabled);
-    void setRVTNormalEnabled(bool enabled);
+    void setBakeNormalEnabled(bool enabled);
     void setCliffEnabled(bool enabled);
     void syncCliffSources(TilePagePool &tiles);
 
@@ -92,8 +94,8 @@ private:
         IntrusivePtr<gfx::PipelineState> pipelineState;
     };
 
-    bool _rvtNormalEnabled{true};
-    bool _cliffEnabled{true};
+    // Applied compose state; deferred requests remain in LandscapeRenderer.
+    LandscapeDebugData _debugData;
     struct CliffReference {
         bool ready{false};
         uint32_t level{0};
@@ -120,12 +122,13 @@ private:
     IntrusivePtr<gfx::RenderPass> _initialPass;
     ccstd::vector<uint32_t> _dirtySlots;
     ccstd::vector<PageInstance> _pageInstances;
-    Root::BeforeRender::EventID _beforeRender;
-    bool _subscribed{false};
     bool _needsClear{true};
-    bool _frozen{false};
     bool _pendingInvalidation{false};
     bool _hasGlobalColorMap{false};
+    IntrusivePtr<Texture2D> _globalColorMap;
+    IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
+    gfx::Sampler *_globalColorSampler{nullptr}; // cached by device
+    float _globalColorStrength{0.0F};
     Vec4 _globalColorParams;
 };
 } // namespace landscape

@@ -32,7 +32,7 @@
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Landscape.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/VTPaging.h"
 #include "landscape/TilePagePool.h"
@@ -80,23 +80,31 @@ public:
     void setLodRanges(const ccstd::vector<float> &morphStart,
                       const ccstd::vector<float> &morphEnd);
     bool setAsset(LandscapeAsset *asset);
-    void setDebugFlags(bool lodColor, bool showRanges);
-    void sync(const ccstd::vector<QuadNode> &selected);
-    void setWireframe(bool wireframe);
+    void setDebugData(const LandscapeDebugData &data);
+    void preparePasses(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
+                           bool shadow, ccstd::vector<const scene::Model *> &models) const;
+    void onGlobalPipelineStateChanged();
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
-    void setUnlit(bool enabled);
-    void setVTMipEnabled(bool enabled);
-    void setHeightBlendEnabled(bool enabled);
-    void setDecal3DEnabled(bool enabled);
-    void setRVTNormalEnabled(bool enabled);
-    void setCliffEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
-    void setFreezeLod(bool frozen);
+    void setGlobalColorMap(Texture2D *texture);
     void setViewPos(const Vec3 &position);
-    RenderTexture *debugAtlas() const;
+    RenderTexture *vtAtlas() const;
 
 private:
+    void sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void rebuildNodeModels();
+    void setLodColor(bool enabled);
+    void setShowRanges(bool enabled);
+    void setWireframe(bool wireframe);
+    void setFreezeLod(bool frozen);
+    void setUnlit(bool enabled);
+    void setHeightBlendEnabled(bool enabled);
+    void setDecal3DEnabled(bool enabled);
+    void setBakeNormalEnabled(bool enabled);
+    void setCliffEnabled(bool enabled);
+
     struct Patch {
         QuadNode node;
         uint32_t x{0}; // cell offset inside the original 16 x 16 node
@@ -104,6 +112,7 @@ private:
         uint32_t meshIndex{0}; // 1, 2, 4 or 8 cells per side
         VTPageAddress page;
         float vtPriority{0.0F}; // visible footprint; ancestors must not inflate it
+        bool needsMaterial{true}; // false for quadrants used exclusively by shadow passes
     };
 
     struct ModelState {
@@ -123,8 +132,8 @@ private:
         VTPageInputs inputs;
     };
     // Frame stages: selection -> residency/source publication -> models -> decals.
-    void buildFramePlan(const ccstd::vector<QuadNode> &selected);
-    void syncPageSources(const ccstd::vector<QuadNode> &selected, bool uploadsPolled);
+    void buildFramePlan(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void syncPageSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled);
     void prepareVTPageUpdates();
     void refreshVTPageInputs();
     void queueVTPageUpdates();
@@ -157,19 +166,24 @@ private:
     ccstd::vector<DecalDraw> _decalDraws;
     size_t _decalActive{0};
     ccstd::vector<Vec3> _decalCenters;
-    bool _decal3DEnabled{true};
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<TilePagePool> _tilePages;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
 
     ccstd::unordered_map<uint64_t, ModelState> _active;
+    struct NodeModel {
+        uint8_t quadrantMask;
+        scene::Model *model;
+    };
+    ccstd::unordered_map<uint64_t, ccstd::vector<NodeModel>> _nodeModels;
     std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
     uint32_t _vtRootLevel{0};
     LandscapeSyncCache _syncCache;
     // Reused across active frames; the stable-camera fast path touches none of these.
     VTRequestPlan _requestPlan;
     ccstd::vector<Patch> _patches;
+    ccstd::vector<QuadNode> _shadowOnlyNodes;
     ccstd::vector<VTPageUpdate> _vtPageUpdates;
     ccstd::unordered_set<uint64_t> _visiblePatches;
     std::unique_ptr<TilePageResolver> _sourceResolver;
@@ -184,16 +198,10 @@ private:
     Vec3 _vtViewPosition;
     ccstd::vector<float> _morphStart;
     ccstd::vector<float> _morphEnd;
-    bool _lodColor{false};
-    bool _showRanges{false};
-    bool _wireframe{false};
+    LandscapeDebugData _debugData;
     bool _castShadow{true};
     bool _receiveShadow{true};
-    bool _unlit{false};
-    bool _freezeLod{false};
     bool _ready{false};
-    bool _rvtNormalEnabled{true};
-    bool _cliffEnabled{true};
 };
 
 } // namespace landscape

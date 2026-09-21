@@ -150,7 +150,7 @@ MaterialLibrary::MaterialLibrary() = default;
 MaterialLibrary::~MaterialLibrary() { destroy(); }
 
 bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
-    CC_ASSERT(_albedoHeight == nullptr && _normalRoughnessAO == nullptr && _globalColorMap == nullptr);
+    CC_ASSERT(_albedoHeight == nullptr && _normalRoughnessAO == nullptr && _whiteTexture == nullptr);
     const auto &layers = asset.materialLayers();
     if (device == nullptr || layers.empty()) {
         return false;
@@ -221,34 +221,24 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         uploadTexture(device, _decalNormal, decalSize, i, std::move(normal), false);
         uploadTexture(device, _decalHeight, decalSize, i, std::move(height), true, true);
     }
-    const auto &global = asset.globalColorMap();
-    uint32_t globalResolution = 1U;
-    ccstd::vector<uint8_t> globalPixels{255, 255, 255, 255};
-    if (!global.file.empty()) {
-        if (decodeRGBA8(global.file, global.resolution, globalPixels)) {
-            globalResolution = global.resolution;
-            _globalColorStrength = global.strength;
-            _hasGlobalColorMap = true;
-        } else {
-            CC_LOG_WARNING("[Landscape] global color map '%s' could not be loaded; using layer colors", global.file.c_str());
-        }
-    }
-    _globalColorMap = createTexture(device, globalResolution, 1U, gfx::TextureType::TEX2D);
-    if (!_globalColorMap) {
+    _whiteTexture = createTexture(device, 1U, 1U, gfx::TextureType::TEX2D);
+    if (!_whiteTexture) {
         destroy();
         return false;
     }
-    uploadTexture(device, _globalColorMap, globalResolution, 0U, std::move(globalPixels), true);
+    uploadTexture(device, _whiteTexture, 1U, 0U, {255, 255, 255, 255}, true);
     gfx::SamplerInfo info;
     info.minFilter = gfx::Filter::LINEAR;
     info.magFilter = gfx::Filter::LINEAR;
     info.mipFilter = gfx::Filter::LINEAR;
     info.addressU = gfx::Address::WRAP;
     info.addressV = gfx::Address::WRAP;
+    info.addressW = gfx::Address::WRAP;
     _sampler = device->getSampler(info);
     info.addressU = gfx::Address::CLAMP;
     info.addressV = gfx::Address::CLAMP;
-    _globalColorSampler = device->getSampler(info);
+    info.addressW = gfx::Address::CLAMP;
+    _clampSampler = device->getSampler(info);
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] %u material layers: paired %ux%u RGBA8 arrays with mips",
                 count, resolution, resolution);
@@ -259,14 +249,12 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
 void MaterialLibrary::destroy() {
     _albedoHeight = nullptr;
     _normalRoughnessAO = nullptr;
-    _globalColorMap = nullptr;
+    _whiteTexture = nullptr;
     _decalAlbedo = nullptr;
     _decalNormal = nullptr;
     _decalHeight = nullptr;
     _sampler = nullptr;
-    _globalColorSampler = nullptr;
-    _globalColorStrength = 0.0F;
-    _hasGlobalColorMap = false;
+    _clampSampler = nullptr;
     _tilingParams.clear();
 }
 

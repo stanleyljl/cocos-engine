@@ -295,10 +295,12 @@ void TilePageResolver::beginFrame() {
     invalidate();
 }
 
-void TilePageResolver::protectGeometrySources(const ccstd::vector<QuadNode> &selected) {
-    for (const auto &node : selected) {
-        const auto heightTile = resolve(node);
-        normalParent(node, heightTile);
+void TilePageResolver::protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes,
+                                             const ccstd::vector<QuadNode> &surfaceNodes) {
+    for (const auto &node : geometryNodes) resolve(node);
+    // Shadow vertices need heights only. Parent normals are a color-pass input.
+    for (const auto &node : surfaceNodes) {
+        normalParent(node, resolve(node));
     }
 }
 

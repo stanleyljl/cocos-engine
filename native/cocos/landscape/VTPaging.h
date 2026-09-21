@@ -202,32 +202,37 @@ public:
     using Positions = std::array<float, 9>; // geometry camera, VT camera, terrain origin
 
     bool matches(const Positions &positions, uint64_t tileRevision, uint64_t vtRevision,
-                 const ccstd::vector<QuadNode> &selected) const {
+                 const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) const {
         return _valid && positions == _positions && tileRevision == _tileRevision &&
-            vtRevision == _vtRevision && selected.size() == _selected.size() &&
-            std::equal(selected.begin(), selected.end(), _selected.begin(), [](const QuadNode &a, const QuadNode &b) {
-                return a.level == b.level && a.ix == b.ix && a.iz == b.iz &&
-                    a.minY == b.minY && a.maxY == b.maxY && a.quadrantMask == b.quadrantMask;
-            });
+            vtRevision == _vtRevision && sameNodes(geometryNodes, _geometryNodes) && sameNodes(surfaceNodes, _surfaceNodes);
     }
 
     void store(const Positions &positions, uint64_t tileRevision, uint64_t vtRevision,
-               const ccstd::vector<QuadNode> &selected) {
+               const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
         _positions = positions;
         _tileRevision = tileRevision;
         _vtRevision = vtRevision;
-        _selected = selected;
+        _geometryNodes = geometryNodes;
+        _surfaceNodes = surfaceNodes;
         _valid = true;
     }
 
     void invalidate() { _valid = false; }
 
 private:
+    static bool sameNodes(const ccstd::vector<QuadNode> &a, const ccstd::vector<QuadNode> &b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](const QuadNode &left, const QuadNode &right) {
+            return left.level == right.level && left.ix == right.ix && left.iz == right.iz &&
+                left.minY == right.minY && left.maxY == right.maxY && left.quadrantMask == right.quadrantMask;
+        });
+    }
+
     bool _valid{false};
     Positions _positions{};
     uint64_t _tileRevision{0};
     uint64_t _vtRevision{0};
-    ccstd::vector<QuadNode> _selected;
+    ccstd::vector<QuadNode> _geometryNodes;
+    ccstd::vector<QuadNode> _surfaceNodes;
 };
 
 } // namespace landscape

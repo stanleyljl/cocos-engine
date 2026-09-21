@@ -98,7 +98,6 @@ struct LandscapeAsset::Manifest {
     ccstd::string assetDir;
     bool imported{false};
     ccstd::unordered_map<ccstd::string, ccstd::string> files;
-    GlobalColorMap globalColorMap;
     ccstd::vector<MaterialLayer> materialLayers;
     uint32_t materialResolution{0};
     CliffMaterial cliffMaterial;
@@ -108,7 +107,7 @@ struct LandscapeAsset::Manifest {
 
     bool read() {
         return readDimensions() && readHeightRanges() && readFileIndex() &&
-               readGlobalColor() && readMaterials() && readCliffMaterial() &&
+               readMaterials() && readCliffMaterial() &&
                readDecalLayers() && readDecals() && validateTileLayout();
     }
 
@@ -120,7 +119,6 @@ struct LandscapeAsset::Manifest {
     bool readDimensions();
     bool readHeightRanges();
     bool readFileIndex();
-    bool readGlobalColor();
     bool readMaterials();
     bool readCliffMaterial();
     bool readDecalLayers();
@@ -238,28 +236,6 @@ bool LandscapeAsset::Manifest::readFileIndex() {
                 return false;
             }
             if (!files.emplace(it->name.GetString(), prefix + suffix).second) return false;
-        }
-    }
-    return true;
-}
-
-bool LandscapeAsset::Manifest::readGlobalColor() {
-    if (document.HasMember("globalColorMap")) {
-        const auto &map = document["globalColorMap"];
-        if (!map.IsObject() || !map.HasMember("file") || !map["file"].IsString() ||
-            !readUnsigned(map, "resolution", globalColorMap.resolution) ||
-            globalColorMap.resolution == 0U || globalColorMap.resolution > 4096U ||
-            !readFloat(map, "strength", globalColorMap.strength) ||
-            globalColorMap.strength < 0.0F || globalColorMap.strength > 1.0F) {
-            CC_LOG_WARNING("[Landscape] invalid globalColorMap in '%s'", manifestPath.c_str());
-            return false;
-        }
-        globalColorMap.file = resolve(map["file"].GetString());
-        if (globalColorMap.file.empty()) {
-            CC_LOG_WARNING("[Landscape] global color map '%s' is missing from the imported file index in '%s'; "
-                           "using layer colors. Reload the landscape-assets extension, reimport the terrain and rebuild assets.",
-                           map["file"].GetString(), manifestPath.c_str());
-            globalColorMap = GlobalColorMap{};
         }
     }
     return true;
@@ -463,7 +439,6 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     _files = std::move(manifest.files);
     _materialLayers = std::move(manifest.materialLayers);
     _materialResolution = manifest.materialResolution;
-    _globalColorMap = std::move(manifest.globalColorMap);
     _cliffMaterial = manifest.cliffMaterial;
     _decalLayers = std::move(manifest.decalLayers);
     _decals = std::move(manifest.decals);

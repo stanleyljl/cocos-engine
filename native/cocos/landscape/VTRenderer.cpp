@@ -30,6 +30,7 @@
 #include "base/Macros.h"
 #include "core/assets/Material.h"
 #include "core/assets/RenderingSubMesh.h"
+#include "core/assets/Texture2D.h"
 #include "landscape/GridMesh.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/LandscapeConfig.h"
@@ -71,10 +72,6 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     }
     _dirtySlots.reserve(config::VT_PAGE_COUNT);
     _pageInstances.reserve(config::VT_PAGE_COUNT);
-    // After device acquire / scene updates, before ANY camera's Base Pass.
-    // No extra camera, visibility layer, scene models or forward-pipeline fork.
-    _beforeRender = root->on<Root::BeforeRender>([this](Root *) { render(); });
-    _subscribed = true;
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] VT enabled: %u cached pages, %u interior texels, two RGBA8 atlases with mip0 + mip1 + mip2",
         config::VT_PAGE_COUNT, config::VT_PAGE_INTERIOR);
@@ -131,22 +128,23 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     bindComposeTexture("terrainHeightMap", tiles.heightArray(), tiles.heightSampler());
     bindComposeTexture("albedoHeightMap", materials.albedoHeight(), materials.sampler());
     bindComposeTexture("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.sampler());
-    bindComposeTexture("globalColorMap", materials.globalColorMap(), materials.globalColorSampler());
-    _hasGlobalColorMap = materials.hasGlobalColorMap();
+    _fallbackGlobalColorMap = materials.whiteTexture();
+    _globalColorSampler = materials.clampSampler();
+    bindComposeTexture("globalColorMap", _fallbackGlobalColorMap, _globalColorSampler);
     _globalColorParams = Vec4{1.0F / data.worldWidth(),
-        1.0F / data.worldDepth(), materials.globalColorStrength(), 0.0F};
+        1.0F / data.worldDepth(), 0.0F, 0.0F};
     _material->setPropertyVec4("globalColorParams", _globalColorParams);
     _material->setPropertyVec4Array("tilingParams", materials.tilingParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
         static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
         device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
-    _material->setPropertyVec4("sourceParams", Vec4{static_cast<float>(asset.data().tileResolution), _rvtNormalEnabled ? 1.0F : 0.0F, 0, 0});
+    _material->setPropertyVec4("sourceParams", Vec4{static_cast<float>(asset.data().tileResolution), _debugData.bakeNormalEnabled ? 1.0F : 0.0F, 0, 0});
     return true;
 }
 
 bool VTRenderer::initDecalResources(const LandscapeAsset &asset, const MaterialLibrary &materials, gfx::Device *device) {
-    bindComposeTexture("decalAlbedoMap", materials.decalAlbedo(), materials.globalColorSampler());
-    bindComposeTexture("decalNormalMap", materials.decalNormal(), materials.globalColorSampler());
+    bindComposeTexture("decalAlbedoMap", materials.decalAlbedo(), materials.clampSampler());
+    bindComposeTexture("decalNormalMap", materials.decalNormal(), materials.clampSampler());
     ccstd::vector<Vec4> decalRegions(config::DECAL_INSTANCE_MAX);
     const auto &decals = asset.decals();
     for (size_t i = 0; i < decals.size(); ++i) {
@@ -170,7 +168,7 @@ bool VTRenderer::initDecalResources(const LandscapeAsset &asset, const MaterialL
     _decalIndices = device->createTexture(indexInfo);
     if (!_decalIndices) return false;
     _decalIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX, 0);
-    bindComposeTexture("decalIndexMap", _decalIndices, materials.globalColorSampler());
+    bindComposeTexture("decalIndexMap", _decalIndices, materials.clampSampler());
     _material->setPropertyVec4Array("decalRegions", decalRegions);
     _material->setPropertyVec4("decalParams", Vec4{static_cast<float>(decals.size()), 0, 0, 0});
     return true;
@@ -286,7 +284,7 @@ bool VTRenderer::initDrawResources(gfx::Device *device) {
 
 bool VTRenderer::initRootPages(const LandscapeData &data, TilePagePool &tiles) {
     // Every sector has a real material fallback, independent of the visible set.
-    // These dirty roots are always composed by BeforeRender, including the first
+    // These dirty roots are composed during pass preparation, including the first
     // frame, before any terrain draw is submitted on the same graphics queue.
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
@@ -309,9 +307,21 @@ bool VTRenderer::initRootPages(const LandscapeData &data, TilePagePool &tiles) {
     return true;
 }
 
+void VTRenderer::setGlobalColorMap(Texture2D *texture) {
+    if (!_material) return;
+    _globalColorMap = texture;
+    auto *gfxTexture = texture ? texture->getGFXTexture() : nullptr;
+    _hasGlobalColorMap = gfxTexture != nullptr;
+    bindComposeTexture("globalColorMap", gfxTexture ? gfxTexture : _fallbackGlobalColorMap.get(), _globalColorSampler);
+    _globalColorParams.z = _hasGlobalColorMap ? _globalColorStrength : 0.0F;
+    _material->setPropertyVec4("globalColorParams", _globalColorParams);
+    invalidateComposedPages();
+}
+
 void VTRenderer::setGlobalColorStrength(float strength) {
     if (!_material || !std::isfinite(strength)) return;
-    const float effectiveStrength = _hasGlobalColorMap ? std::clamp(strength, 0.0F, 1.0F) : 0.0F;
+    _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
+    const float effectiveStrength = _hasGlobalColorMap ? _globalColorStrength : 0.0F;
     if (_globalColorParams.z == effectiveStrength) return;
     _globalColorParams.z = effectiveStrength;
     _material->setPropertyVec4("globalColorParams", _globalColorParams);
@@ -320,7 +330,7 @@ void VTRenderer::setGlobalColorStrength(float strength) {
 }
 
 void VTRenderer::invalidateComposedPages() {
-    if (_frozen) {
+    if (_debugData.freezeLod) {
         _pendingInvalidation = true;
     } else {
         _texture.invalidate();
@@ -328,18 +338,18 @@ void VTRenderer::invalidateComposedPages() {
 }
 
 void VTRenderer::setFrozen(bool frozen) {
-    _frozen = frozen;
+    _debugData.freezeLod = frozen;
     if (!frozen && _pendingInvalidation) {
         _texture.invalidate();
         _pendingInvalidation = false;
     }
 }
 
-void VTRenderer::setRVTNormalEnabled(bool enabled) {
-    if (!_material || _rvtNormalEnabled == enabled) return;
+void VTRenderer::setBakeNormalEnabled(bool enabled) {
+    if (!_material || _debugData.bakeNormalEnabled == enabled) return;
     // The owner defers BOTH composition and decoding while pages are frozen.
-    CC_ASSERT(!_frozen);
-    _rvtNormalEnabled = enabled;
+    CC_ASSERT(!_debugData.freezeLod);
+    _debugData.bakeNormalEnabled = enabled;
     auto *pass = _material->getPasses()->front().get();
     auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("sourceParams")));
     params.y = enabled ? 1.0F : 0.0F;
@@ -348,9 +358,9 @@ void VTRenderer::setRVTNormalEnabled(bool enabled) {
 }
 
 void VTRenderer::setCliffEnabled(bool enabled) {
-    if (_cliffEnabled == enabled) return;
-    CC_ASSERT(!_frozen);
-    _cliffEnabled = enabled;
+    if (_debugData.cliffEnabled == enabled) return;
+    CC_ASSERT(!_debugData.freezeLod);
+    _debugData.cliffEnabled = enabled;
     // An authored material override needs the same slope mask with projection disabled. Keep
     // its references pinned; negative X means ready with planar projection.
     if (_cliff.params.w <= 0.0F) _cliff.ready = false;
@@ -360,7 +370,7 @@ void VTRenderer::setCliffEnabled(bool enabled) {
 }
 
 void VTRenderer::syncCliffSources(TilePagePool &tiles) {
-    if ((!_cliffEnabled && _cliff.params.w <= 0.0F) || _frozen || !_material) return;
+    if ((!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _debugData.freezeLod || !_material) return;
     bool ready = true;
     const float size = computeNodeSize(_cliff.data.sectorSize, _cliff.data.maxLevel, _cliff.level);
     for (uint32_t z = 0; z < _cliff.rows; ++z) {
@@ -382,7 +392,7 @@ void VTRenderer::syncCliffSources(TilePagePool &tiles) {
     const uint8_t *buffers[]{reinterpret_cast<const uint8_t *>(_cliff.sources.data())};
     Root::getInstance()->getDevice()->copyBuffersToTexture(buffers, _cliff.texture, &region, 1);
     _cliff.ready = true;
-    _cliff.params.x = _cliffEnabled ? 1.0F : -1.0F;
+    _cliff.params.x = _debugData.cliffEnabled ? 1.0F : -1.0F;
     _material->setPropertyVec4("cliffParams", _cliff.params);
     _texture.invalidate();
     CC_LOG_INFO("[Landscape] Cliff reference ready: L%u, %ux%u tiles, %.2f m sample spacing",
@@ -396,6 +406,7 @@ void VTRenderer::setHeightBlendEnabled(bool enabled) {
     const float strength = enabled ? 1.0F : 0.0F;
     if (params.x == strength) return;
     // Keep the effect's scale/sharpness when toggling the global blend mode.
+    _debugData.heightBlendEnabled = enabled;
     params.x = strength;
     _material->setPropertyVec4("heightBlendParams", params);
     // Frozen pages can reference source tiles that are no longer resident.
@@ -410,7 +421,7 @@ bool VTRenderer::valid() const {
 }
 
 void VTRenderer::render() {
-    if (_frozen || !valid()) return;
+    if (_debugData.freezeLod || !valid()) return;
     // The residency layer budgets fine updates and always includes dirty roots.
     // Fine pages become eligible for selection after this submission; roots
     // also bootstrap the first frame before any Base Pass can sample them.
@@ -503,12 +514,14 @@ void VTRenderer::destroy() {
     _decalIndices = nullptr;
     _decalRegions.clear();
     _decalIndexData.clear();
-    _frozen = false;
+    _debugData.freezeLod = false;
     _pendingInvalidation = false;
     _hasGlobalColorMap = false;
+    _globalColorMap = nullptr;
+    _fallbackGlobalColorMap = nullptr;
+    _globalColorSampler = nullptr;
+    _globalColorStrength = 0.0F;
     _globalColorParams = Vec4{};
-    if (_subscribed && Root::getInstance()) Root::getInstance()->off(_beforeRender);
-    _subscribed = false;
     _commands = nullptr;
     _pipelineState = nullptr;
     for (auto &mip : _mipPasses) mip.pipelineState = nullptr;

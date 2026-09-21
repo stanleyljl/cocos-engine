@@ -37,6 +37,8 @@
 #include "scene/Shadow.h"
 #include "scene/SpotLight.h"
 #include "shadow/CSMLayers.h"
+#include "landscape/Landscape.h"
+#include "scene/RenderScene.h"
 
 namespace cc {
 namespace pipeline {
@@ -84,6 +86,11 @@ void ShadowMapBatchedQueue::gatherLightPasses(const scene::Camera *camera, const
                 if (spotLight->isShadowEnabled()) {
                     const auto visibility = spotLight->getVisibility();
                     geometry::AABB ab;
+                    for (auto *terrain : camera->getScene()->getLandscapes()) {
+                        for (const auto *model : terrain->getPassModels(spotLight->getFrustum(), true)) {
+                            if ((visibility & model->getNode()->getLayer()) == model->getNode()->getLayer()) add(model);
+                        }
+                    }
                     for (const auto &ro : castShadowObjects) {
                         const auto *model = ro.model;
                         if ((visibility & model->getNode()->getLayer()) != model->getNode()->getLayer() || !model->isEnabled() || !model->isCastShadow() || !model->getNode()) {

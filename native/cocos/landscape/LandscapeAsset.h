@@ -87,13 +87,6 @@ public:
         ccstd::vector<uint8_t> normal; // linear RG8 terrain-local XZ; shader reconstructs +Y
     };
 
-    // One non-repeating, sRGB color map covering the complete landscape XZ extent.
-    struct GlobalColorMap {
-        ccstd::string file;
-        uint32_t resolution{0};
-        float strength{0.0F};
-    };
-
     LandscapeAsset();
     ~LandscapeAsset() override;
 
@@ -121,7 +114,6 @@ public:
     bool valid() const { return _data.valid(); }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
-    const GlobalColorMap &globalColorMap() const { return _globalColorMap; }
     const CliffMaterial &cliffMaterial() const { return _cliffMaterial; }
 
 private:
@@ -149,7 +141,6 @@ private:
     LandscapeData _data;
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
-    GlobalColorMap _globalColorMap;
     CliffMaterial _cliffMaterial;
     ccstd::vector<DecalLayer> _decalLayers;
     ccstd::vector<Decal> _decals;

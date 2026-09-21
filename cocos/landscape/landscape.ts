@@ -25,7 +25,7 @@
 import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin, range, slide, tooltip, group, visible, disallowAnimation, displayName } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
-import { Asset } from '../asset/assets';
+import { Asset, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
 import { Enum } from '../core';
@@ -59,6 +59,86 @@ downloader.register('.lsmanifest', (url, options, onComplete) => {
     }
     onComplete(null, url.replace(/[?#].*$/, ''));
 });
+
+/** Debug settings shared by Inspector, keyboard/touch controls and native rendering. */
+@ccclass('cc.LandscapeDebugData')
+export class LandscapeDebugData {
+    @serializable
+    @editable
+    @displayOrder(0)
+    public wireframe = false;
+
+    @serializable
+    @editable
+    @displayOrder(1)
+    public lodColor = false;
+
+    @serializable
+    @editable
+    @displayOrder(2)
+    @tooltip('显示 LOD 距离范围和 Sector 边界。')
+    public showRanges = false;
+
+    @serializable
+    @editable
+    @displayOrder(3)
+    public showBox = false;
+
+    @serializable
+    @editable
+    @displayOrder(4)
+    @tooltip('就绪后冻结主相机 LOD 位置和 VT 数据，各 Pass 仍按当前视锥剔除。')
+    public freezeLod = false;
+
+    @serializable
+    @editable
+    @displayOrder(5)
+    public unlit = false;
+
+    @serializable
+    @editable
+    @displayOrder(6)
+    public showVTAtlas = false;
+
+    @serializable
+    @editable
+    @displayOrder(7)
+    @tooltip('悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。')
+    public cliffEnabled = true;
+
+    @serializable
+    @editable
+    @displayOrder(8)
+    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。')
+    public heightBlendEnabled = true;
+
+    @serializable
+    @editable
+    @displayOrder(9)
+    @tooltip('将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。冻结期间的切换在解冻后生效。')
+    public bakeNormalEnabled = true;
+
+    @serializable
+    @editable
+    @displayOrder(10)
+    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。')
+    public decal3DEnabled = true;
+
+}
+
+const DEBUG_PROPERTIES = [
+    'wireframe',
+    'lodColor',
+    'showRanges',
+    'showBox',
+    'freezeLod',
+    'unlit',
+    'showVTAtlas',
+    'cliffEnabled',
+    'heightBlendEnabled',
+    'bakeNormalEnabled',
+    'decal3DEnabled',
+] as const;
 
 /**
  * @en Terrain component backed by a native `cc::landscape::Landscape` object.
@@ -134,49 +214,32 @@ export class Landscape extends Component {
     private _landscapeAsset: LandscapeAsset | null = null;
 
     @serializable
+    @type(Texture2D)
+    private _globalColorMap: Texture2D | null = null;
+
+    @serializable
     private _lodQualityScale = 1.0;
 
     @serializable
     private _globalColorStrength = 0.1;
 
     @serializable
-    private _wireframe = false;
+    @type(LandscapeDebugData)
+    private _debugData = new LandscapeDebugData();
 
-    @serializable
-    private _freezeLod = false;
+    private _appliedDebugData: LandscapeDebugData | null = null;
 
-    @serializable
-    private _showBox = false;
-
-    @serializable
-    private _lodColor = false;
-
-    @serializable
-    private _showRanges = false;
-
-    @serializable
-    private _showSectors = false;
-
-    @serializable
-    private _showVTAtlas = false;
-
-    @serializable
-    private _vtMipEnabled = true;
-
-    @serializable
-    private _heightBlendEnabled = true;
-
-    @serializable
-    private _decal3DEnabled = true;
-
-    @serializable
-    private _rvtNormalEnabled = true;
-
-    @serializable
-    private _cliffEnabled = true;
-
-    @serializable
-    private _unlit = false;
+    /** Settings are synchronized before drawing; nested Inspector edits work too. */
+    @editable
+    @type(LandscapeDebugData)
+    @displayOrder(1000)
+    get debugData (): LandscapeDebugData {
+        return this._debugData;
+    }
+    set debugData (value: LandscapeDebugData) {
+        this._debugData = value;
+        this._syncDebugData();
+    }
 
     /** Imported terrain resource; raw height/splat pages are loaded on demand. */
     @editable
@@ -191,193 +254,6 @@ export class Landscape extends Component {
         if (this._native && enabled) this.onDisable();
         this._landscapeAsset = value;
         if (this._native && enabled) this.onEnable();
-    }
-
-    /**
-     * @en Whether the terrain is drawn as wireframe.
-     * @zh 是否以线框模式绘制。
-     */
-    @editable
-    @displayOrder(1)
-    get wireframe (): boolean {
-        return this._wireframe;
-    }
-    set wireframe (v: boolean) {
-        this._wireframe = v;
-        if (this._native) {
-            this._native.setWireframe(v);
-        }
-    }
-
-    /**
-     * @en Freezes terrain geometry, morph and frustum selection, including render culling.
-     * Move the camera freely to inspect a specific seam up close (debug).
-     * @zh 冻结地形几何、morph 和视锥剔除结果；相机仍可自由移动（调试用）。
-     */
-    @editable
-    @displayOrder(6)
-    get freezeLod (): boolean {
-        return this._freezeLod;
-    }
-    set freezeLod (v: boolean) {
-        this._freezeLod = v;
-        if (this._native) {
-            this._native.setFreezeLod(v);
-        }
-    }
-
-    /**
-     * @en Draws a per-LOD-colored wireframe bounding box for every node rendered
-     * this frame (debug). Works together with `freezeLod`.
-     * @zh 为本帧渲染的每个节点绘制按 LOD 层级着色的线框包围盒（调试用）。可与 `freezeLod` 配合使用。
-     */
-    @editable
-    @displayOrder(4)
-    get showBox (): boolean {
-        return this._showBox;
-    }
-    set showBox (v: boolean) {
-        this._showBox = v;
-    }
-
-    /**
-     * @en Tints the terrain surface by its LOD level so the level layout reads
-     * at a glance (debug).
-     * @zh 按 LOD 层级给地表着色，直观看分层（调试用）。
-     */
-    @editable
-    @displayOrder(2)
-    get lodColor (): boolean {
-        return this._lodColor;
-    }
-    set lodColor (v: boolean) {
-        this._lodColor = v;
-        if (this._native) {
-            this._native.setLodColor(v);
-        }
-    }
-
-    /**
-     * @en Draws each LOD level's CDLOD morph/range rings on the terrain surface,
-     * using the same camera distance as selection (debug).
-     * @zh 在地表上画出各级 CDLOD morph/range 距离环（与选层同一相机距离，调试用）。
-     */
-    @editable
-    @displayOrder(3)
-    get showRanges (): boolean {
-        return this._showRanges;
-    }
-    set showRanges (v: boolean) {
-        this._showRanges = v;
-        if (this._native) {
-            this._native.setShowRanges(v);
-        }
-    }
-
-    /**
-     * @en Draws a wireframe box per sector so the multi-sector world partition
-     * reads at a glance (debug).
-     * @zh 为每个 sector 绘制线框盒，直观看世界的多 sector 划分（调试用）。
-     */
-    @editable
-    @displayOrder(5)
-    get showSectors (): boolean {
-        return this._showSectors;
-    }
-    set showSectors (v: boolean) {
-        this._showSectors = v;
-    }
-
-    /** show VT albedo without lighting, normal mapping or AO (debug). */
-    @editable
-    @displayOrder(7)
-    get unlit (): boolean {
-        return this._unlit;
-    }
-    set unlit (value: boolean) {
-        this._unlit = value;
-        if (this._native) {
-            this._native.setUnlit(value);
-        }
-    }
-
-    /** atlas visibility, consumed by the application's debug view. */
-    @editable
-    @displayOrder(8)
-    get showVTAtlas (): boolean {
-        return this._showVTAtlas;
-    }
-    set showVTAtlas (value: boolean) {
-        this._showVTAtlas = value;
-    }
-
-    /** compare three-level VT trilinear filtering with mip0-only bilinear filtering. */
-    @editable
-    @displayOrder(8.5)
-    @tooltip('VT mip 过滤：开启使用 mip0/mip1/mip2（256/128/64）三线性过滤；关闭仅使用 mip0 双线性过滤。冻结后仍可切换，不重新生成 VT。')
-    get vtMipEnabled (): boolean {
-        return this._vtMipEnabled;
-    }
-    set vtMipEnabled (value: boolean) {
-        if (this._vtMipEnabled === value) return;
-        this._vtMipEnabled = value;
-        if (this._native) {
-            this._native.setVTMipEnabled(value);
-        }
-    }
-
-    /** compare height blending with linear material weight blending. */
-    @editable
-    @displayOrder(8.6)
-    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。')
-    get heightBlendEnabled (): boolean {
-        return this._heightBlendEnabled;
-    }
-    set heightBlendEnabled (value: boolean) {
-        if (this._heightBlendEnabled === value) return;
-        this._heightBlendEnabled = value;
-        if (this._native) {
-            this._native.setHeightBlendEnabled(value);
-        }
-    }
-
-    /** compare the raised near mesh with the planar RVT decal. */
-    @editable
-    @displayOrder(8.8)
-    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。')
-    get decal3DEnabled (): boolean {
-        return this._decal3DEnabled;
-    }
-    set decal3DEnabled (value: boolean) {
-        if (this._decal3DEnabled === value) return;
-        this._decal3DEnabled = value;
-        if (this._native) this._native.setDecal3DEnabled(value);
-    }
-
-    /** cache deterministic cliff projections in RVT. */
-    @editable
-    @displayOrder(8.9)
-    @tooltip('悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。')
-    get cliffEnabled (): boolean {
-        return this._cliffEnabled;
-    }
-    set cliffEnabled (value: boolean) {
-        if (this._cliffEnabled === value) return;
-        this._cliffEnabled = value;
-        if (this._native) this._native.setCliffEnabled(value);
-    }
-
-    /** bake terrain normals into RVT independently of geometry LOD. */
-    @editable
-    @displayOrder(8.7)
-    @tooltip('开启 RVT 地形法线烘焙；关闭使用随几何 LOD 变化的原法线。冻结期间的切换在解冻后生效。')
-    get rvtNormalEnabled (): boolean {
-        return this._rvtNormalEnabled;
-    }
-    set rvtNormalEnabled (value: boolean) {
-        if (this._rvtNormalEnabled === value) return;
-        this._rvtNormalEnabled = value;
-        if (this._native) this._native.setRVTNormalEnabled(value);
     }
 
     /**
@@ -396,12 +272,26 @@ export class Landscape extends Component {
         this._lodQualityScale = value;
     }
 
-    /** Blend the global map's broad colors with the tiled materials; overrides the manifest strength. */
+    /** Optional non-repeating color texture covering the whole landscape. */
+    @editable
+    @type(Texture2D)
+    @displayOrder(1)
+    @tooltip('覆盖整个地形的全局颜色图；未指定时使用原图层颜色。')
+    get globalColorMap (): Texture2D | null {
+        return this._globalColorMap;
+    }
+    set globalColorMap (value: Texture2D | null) {
+        if (this._globalColorMap === value) return;
+        this._globalColorMap = value;
+        if (this._native) this._native.setGlobalColorMap(value);
+    }
+
+    /** Blend the global map's broad colors with the tiled materials. */
     @editable
     @displayOrder(10)
     @range([0, 1, 0.01])
     @slide
-    @tooltip('全局颜色混合强度：0 使用原图层颜色，1 完全采用全局图的大范围颜色并保留材质细节。默认 0.1，以原图层颜色为主；不改变 tiling、法线或粗糙度。覆盖地形清单中的 strength。')
+    @tooltip('全局颜色混合强度：0 使用原图层颜色，1 完全采用全局图的大范围颜色并保留材质细节。默认 0.1；未指定全局图时不生效。')
     get globalColorStrength (): number {
         return this._globalColorStrength;
     }
@@ -415,6 +305,25 @@ export class Landscape extends Component {
         }
     }
 
+    private _syncDebugData (force = false): void {
+        if (!this._native) return;
+        const previous = this._appliedDebugData;
+        let changed = force || !previous;
+        if (previous && !changed) {
+            for (const key of DEBUG_PROPERTIES) {
+                if (previous[key] !== this._debugData[key]) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (!changed) return;
+        this._native.setDebugData(this._debugData);
+        const snapshot = previous || new LandscapeDebugData();
+        for (const key of DEBUG_PROPERTIES) snapshot[key] = this._debugData[key];
+        this._appliedDebugData = snapshot;
+    }
+
     public onLoad (): void {
         if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
             this._native = new jsb.Landscape();
@@ -424,26 +333,19 @@ export class Landscape extends Component {
     public onEnable (): void {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
-            this._native.setFreezeLod(this._freezeLod);
-            this._native.setVTMipEnabled(this._vtMipEnabled);
-            this._native.setHeightBlendEnabled(this._heightBlendEnabled);
-            this._native.setDecal3DEnabled(this._decal3DEnabled);
-            this._native.setRVTNormalEnabled(this._rvtNormalEnabled);
-            this._native.setCliffEnabled(this._cliffEnabled);
+            this._syncDebugData(true);
+            this._native.setGlobalColorMap(this._globalColorMap);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.setCastShadow(this._shadowCastingMode === ShadowCastingMode.ON);
             this._native.setReceiveShadow(this._shadowReceivingMode === ShadowReceivingMode.ON);
             this._native.onEnable(this.node, this._lodQualityScale);
-            this._native.setWireframe(this._wireframe);
-            this._native.setLodColor(this._lodColor);
-            this._native.setShowRanges(this._showRanges);
-            this._native.setUnlit(this._unlit);
             // Wait for camera controllers in update/lateUpdate and systems to finish.
             director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         }
     }
 
     public onDisable (): void {
+        this._appliedDebugData = null;
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         if (this._native) {
             this._native.onDisable();
@@ -458,19 +360,17 @@ export class Landscape extends Component {
         if (!this._native) {
             return;
         }
+        this._syncDebugData();
         if (!this._native.isInitialized()) {
             return;
         }
-        // Native captures the initial selection, then holds geometry and both
-        // terrain/render frustum culling while frozen.
+        // Snapshot the main-camera LOD position. Native pass collection traverses
+        // each current frustum independently, including while LOD/VT is frozen.
         this._native.update();
         // Immediate-mode debug boxes must be re-submitted every frame, even while
-        // LOD is frozen (native redraws the last selected node set).
-        if (this._showBox) {
+        // LOD is frozen.
+        if (this._debugData.showBox) {
             this._native.drawDebugBounds();
-        }
-        if (this._showSectors) {
-            this._native.drawDebugSectors();
         }
     }
 
@@ -486,7 +386,7 @@ export class Landscape extends Component {
      * to a 2D Sprite to inspect the composed pages.
      * @zh 返回 VT 物理图集 RenderTexture（调试用），无则 null。可赋给 2D Sprite 查看合成结果。
      */
-    public getDebugAtlas (): any {
-        return this._native ? this._native.getDebugAtlas() : null;
+    public getVTAtlas (): any {
+        return this._native ? this._native.getVTAtlas() : null;
     }
 }

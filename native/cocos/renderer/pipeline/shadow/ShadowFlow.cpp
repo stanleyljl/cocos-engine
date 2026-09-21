@@ -110,7 +110,8 @@ void ShadowFlow::render(scene::Camera *camera) {
 
     lightCollecting();
 
-    if (csmLayers->getCastShadowObjects().empty() && sceneData->getRenderObjects().empty()) {
+    if (csmLayers->getCastShadowObjects().empty() && sceneData->getRenderObjects().empty() &&
+        camera->getScene()->getLandscapes().empty()) {
         clearShadowMap(camera);
         return;
     }

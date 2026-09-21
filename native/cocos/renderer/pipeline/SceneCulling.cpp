@@ -48,6 +48,7 @@
 #include "scene/Skybox.h"
 #include "scene/SpotLight.h"
 #include "shadow/CSMLayers.h"
+#include "landscape/Landscape.h"
 
 namespace cc {
 namespace pipeline {
@@ -132,6 +133,12 @@ void shadowCulling(const RenderPipeline *pipeline, const scene::Camera *camera, 
 
     layer->clearShadowObjects();
 
+    for (auto *terrain : scene->getLandscapes()) {
+        for (const auto *model : terrain->getPassModels(layer->getValidFrustum(), true)) {
+            layer->addShadowObject(genRenderObject(model, camera));
+        }
+    }
+
     if (csmLayers->getLayerObjects().empty()) return;
 
     for (auto it = csmLayers->getLayerObjects().begin(); it != csmLayers->getLayerObjects().end();) {
@@ -151,7 +158,7 @@ void shadowCulling(const RenderPipeline *pipeline, const scene::Camera *camera, 
         }
 
         // frustum culling
-        // Unbounded models explicitly bypass culling (e.g. frozen terrain).
+        // Unbounded models explicitly bypass culling.
         const auto *bounds = model->getWorldBounds();
         const bool accurate = !bounds || bounds->aabbFrustum(layer->getValidFrustum());
         if (!accurate) {
@@ -271,7 +278,13 @@ void sceneCulling(const RenderPipeline *pipeline, scene::Camera *camera) {
         }
     }
 
-    csmLayers = nullptr;
+    // Light frusta are ready. Terrain selects and prepares this camera's passes.
+    for (auto *terrain : scene->getLandscapes()) {
+        terrain->preparePasses(*camera, *sceneData);
+        for (const auto *model : terrain->getPassModels(camera->getFrustum(), false)) {
+            sceneData->addRenderObject(genRenderObject(model, camera));
+        }
+    }
 }
 
 } // namespace pipeline

@@ -23,6 +23,9 @@ using namespace cc;
 %}
 
 %ignore cc::RefCounted;
+%ignore cc::landscape::Landscape::preparePasses;
+%ignore cc::landscape::Landscape::getPassModels;
+%ignore cc::landscape::Landscape::onGlobalPipelineStateChanged;
 %ignore cc::landscape::LandscapeAsset::TileData;
 %ignore cc::landscape::LandscapeAsset::DecalLayer;
 %ignore cc::landscape::LandscapeAsset::Decal;

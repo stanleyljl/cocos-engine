@@ -49,8 +49,8 @@ public:
     // Copies the metadata needed for selection; does not load or retain the asset.
     bool init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
 
-    // Frusta determine visibility only. All passes share the main camera's LOD.
-    const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const ccstd::vector<const geometry::Frustum *> &frusta,
+    // Each pass traverses from the root with its own frustum and the same LOD position.
+    const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const geometry::Frustum &frustum,
                                           const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ);
 
     const ccstd::vector<float> &lodMorphStart() const { return _lodMorphStart; }
@@ -78,7 +78,7 @@ private:
     Vec3 _sectorOrigin;
     uint32_t _sectorX{0};
     uint32_t _sectorZ{0};
-    ccstd::vector<const geometry::Frustum *> _frusta;
+    const geometry::Frustum *_frustum{nullptr};
     IntrusivePtr<geometry::AABB> _box;
     ccstd::vector<QuadNode> _selected;
     ccstd::vector<size_t> _levelOffsets;

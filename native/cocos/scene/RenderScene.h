@@ -36,6 +36,9 @@ namespace cc {
 class Node;
 class SkinningModel;
 class BakedSkinningModel;
+namespace landscape {
+class Landscape;
+}
 
 namespace scene {
 
@@ -104,6 +107,10 @@ public:
     void removeModel(Model *model);
     void removeModels();
 
+    void addLandscape(landscape::Landscape *terrain);
+    void removeLandscape(landscape::Landscape *terrain);
+    const ccstd::vector<landscape::Landscape *> &getLandscapes() const { return _landscapes; }
+
     void addBatch(DrawBatch2D *);
     void removeBatch(DrawBatch2D *);
     void removeBatches();
@@ -132,6 +139,7 @@ private:
     IntrusivePtr<DirectionalLight> _mainLight;
     IntrusivePtr<LodStateCache> _lodStateCache;
     ccstd::vector<IntrusivePtr<Model>> _models;
+    ccstd::vector<landscape::Landscape *> _landscapes;
     ccstd::vector<IntrusivePtr<Camera>> _cameras;
     ccstd::vector<IntrusivePtr<DirectionalLight>> _directionalLights;
     ccstd::vector<IntrusivePtr<LODGroup>> _lodGroups;

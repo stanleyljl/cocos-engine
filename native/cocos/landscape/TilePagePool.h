@@ -129,7 +129,7 @@ public:
     // Reset source protection and the lookup cache together, before resolving
     // any geometry or VT inputs. Cached lookups do not re-protect their tiles.
     void beginFrame();
-    void protectGeometrySources(const ccstd::vector<QuadNode> &selected);
+    void protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
     // Clear after uploads change residency, so finer sources can be discovered.
     void invalidate() { _cache.clear(); }
     Tile resolve(const QuadNode &node);

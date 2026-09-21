@@ -30,15 +30,25 @@
 #include "base/RefCounted.h"
 #include "base/std/container/array.h"
 #include "base/std/container/string.h"
+#include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
+#include "math/Vec3.h"
 
 namespace cc {
 
 class Node;
 class RenderTexture;
+class Texture2D;
+namespace geometry {
+class Frustum;
+}
+namespace pipeline {
+class PipelineSceneData;
+}
 namespace scene {
 class Camera;
+class Model;
 class RenderScene;
 } // namespace scene
 
@@ -47,6 +57,20 @@ namespace landscape {
 class LandscapeAsset;
 class LandscapeRenderer;
 class Quadtree;
+
+struct LandscapeDebugData {
+    bool wireframe{false};
+    bool lodColor{false};
+    bool showRanges{false};
+    bool showBox{false};
+    bool freezeLod{false};
+    bool unlit{false};
+    bool showVTAtlas{false};
+    bool cliffEnabled{true};
+    bool heightBlendEnabled{true};
+    bool bakeNormalEnabled{true};
+    bool decal3DEnabled{true};
+};
 
 class Landscape : public RefCounted {
 public:
@@ -58,56 +82,57 @@ public:
     void onDisable();
     void update();
 
-    void setWireframe(bool wireframe);
+    // Legacy forward entry, called after the pipeline has updated its light frusta.
+    void preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData);
+    const ccstd::vector<const scene::Model *> &getPassModels(const geometry::Frustum &frustum, bool shadow) const;
+    void onGlobalPipelineStateChanged();
+
+    void setDebugData(const LandscapeDebugData &data);
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
-    void setFreezeLod(bool frozen);
-    void setLodColor(bool enabled);
-    void setShowRanges(bool enabled);
-    void setUnlit(bool enabled);
-    void setVTMipEnabled(bool enabled);
-    void setHeightBlendEnabled(bool enabled);
-    void setDecal3DEnabled(bool enabled);
-    void setRVTNormalEnabled(bool enabled);
-    void setCliffEnabled(bool enabled);
     void setGlobalColorStrength(float strength);
+    void setGlobalColorMap(Texture2D *texture);
     void setAssetPath(const ccstd::string &manifestPath);
 
     void drawDebugBounds();
-    void drawDebugSectors();
 
     inline bool isInitialized() const { return _renderer != nullptr; }
     bool isReady() const;
-    RenderTexture *getDebugAtlas() const;
+    RenderTexture *getVTAtlas() const;
 
 private:
-    bool _rvtNormalEnabled{true};
-    bool _cliffEnabled{true};
     void initializeRenderer();
     scene::Camera *pickMainCamera() const;
+    void selectPass(const geometry::Frustum &frustum, bool shadow);
+    void removeCSMDuplicates(uint32_t cascadeCount);
+    bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes);
 
-    bool _wireframe{false};
+    struct PassSelection {
+        const geometry::Frustum *frustum{nullptr};
+        bool shadow{false};
+        ccstd::vector<QuadNode> nodes;
+        ccstd::vector<const scene::Model *> models;
+    };
+    ccstd::vector<PassSelection> _passes;
+    ccstd::unordered_set<const scene::Model *> _coveredShadowModels;
+    size_t _passCount{0};
+    bool _visibilityDistanceWarning{false};
+    Vec3 _lodViewPosition;
+    ccstd::vector<QuadNode> _geometryNodes;
+
+    LandscapeDebugData _debugData;
     bool _castShadow{true};
     bool _receiveShadow{true};
-    bool _freezeLod{false};
-    bool _lodColor{false};
-    bool _showRanges{false};
-    bool _unlit{false};
-    bool _vtMipEnabled{true};
-    bool _heightBlendEnabled{true};
-    bool _decal3DEnabled{true};
     float _lodQualityScale{1.0F};
     float _globalColorStrength{0.1F};
+    IntrusivePtr<Texture2D> _globalColorMap;
     ccstd::string _assetPath;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
-    ccstd::vector<QuadNode> _selected;
-#if CC_LANDSCAPE_DEBUG
-    ccstd::vector<uint32_t> _lastLodNodeCounts;
-#endif
+    ccstd::vector<QuadNode> _debugNodes;
     bool _lastVisibilityDistanceWarning{false};
 };
 
