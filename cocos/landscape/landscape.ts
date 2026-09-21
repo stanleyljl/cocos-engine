@@ -22,12 +22,16 @@
  THE SOFTWARE.
 */
 
-import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin, range, slide, tooltip } from 'cc.decorator';
+import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin, range, slide, tooltip, group, visible, disallowAnimation, displayName } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
 import { Asset } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
+import { Enum } from '../core';
+
+const ShadowCastingMode = Enum({ OFF: 0, ON: 1 });
+const ShadowReceivingMode = Enum({ OFF: 0, ON: 1 });
 
 // The native binding only exists on JSB platforms; guard native access with JSB.
 declare const jsb: any;
@@ -66,8 +70,64 @@ downloader.register('.lsmanifest', (url, options, onComplete) => {
 @executeInEditMode
 @disallowMultiple
 export class Landscape extends Component {
+    public static ShadowCastingMode = ShadowCastingMode;
+    public static ShadowReceivingMode = ShadowReceivingMode;
+
+    @serializable
+    private _shadowCastingMode = ShadowCastingMode.ON;
+
+    @serializable
+    private _shadowReceivingMode = ShadowReceivingMode.ON;
+
+    /** Whether terrain and its displaced decals cast realtime shadows. */
+    @type(ShadowCastingMode)
+    @visible(false)
+    get shadowCastingMode (): number {
+        return this._shadowCastingMode;
+    }
+    set shadowCastingMode (value: number) {
+        this._shadowCastingMode = value;
+        if (this._native) this._native.setCastShadow(value === ShadowCastingMode.ON);
+    }
+
+    @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName', style: 'section' })
+    @displayName('i18n:ENGINE.classes.cc.MeshRenderer.properties.shadowCastingModeForInspector.displayName')
+    @disallowAnimation
+    get shadowCastingModeForInspector (): boolean {
+        return this._shadowCastingMode === ShadowCastingMode.ON;
+    }
+    set shadowCastingModeForInspector (value: boolean) {
+        this.shadowCastingMode = value ? ShadowCastingMode.ON : ShadowCastingMode.OFF;
+    }
+
+    /** Whether realtime shadows from terrain and other models darken the surface. */
+    @type(ShadowReceivingMode)
+    @visible(false)
+    get receiveShadow (): number {
+        return this._shadowReceivingMode;
+    }
+    set receiveShadow (value: number) {
+        this._shadowReceivingMode = value;
+        if (this._native) this._native.setReceiveShadow(value === ShadowReceivingMode.ON);
+    }
+
+    @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName' })
+    @displayName('i18n:ENGINE.classes.cc.MeshRenderer.properties.receiveShadowForInspector.displayName')
+    @disallowAnimation
+    get receiveShadowForInspector (): boolean {
+        return this._shadowReceivingMode === ShadowReceivingMode.ON;
+    }
+    set receiveShadowForInspector (value: boolean) {
+        this.receiveShadow = value ? ShadowReceivingMode.ON : ShadowReceivingMode.OFF;
+    }
+
     /** native cc::landscape::Landscape 句柄（仅 JSB 环境有效） */
     private _native: any = null;
+
+    /** Initial view has reached the configured geometry and VT precision and can render. */
+    public get isReady (): boolean {
+        return this._native ? this._native.isReady() : false;
+    }
 
     @serializable
     @type(LandscapeAsset)
@@ -371,6 +431,8 @@ export class Landscape extends Component {
             this._native.setRVTNormalEnabled(this._rvtNormalEnabled);
             this._native.setCliffEnabled(this._cliffEnabled);
             this._native.setGlobalColorStrength(this._globalColorStrength);
+            this._native.setCastShadow(this._shadowCastingMode === ShadowCastingMode.ON);
+            this._native.setReceiveShadow(this._shadowReceivingMode === ShadowReceivingMode.ON);
             this._native.onEnable(this.node, this._lodQualityScale);
             this._native.setWireframe(this._wireframe);
             this._native.setLodColor(this._lodColor);

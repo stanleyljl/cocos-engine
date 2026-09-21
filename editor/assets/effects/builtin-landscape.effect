@@ -43,7 +43,8 @@ CCEffect %{
       phase: shadow-caster
       propertyIndex: 0
       rasterizerState:
-        cullMode: front
+        # Heightfields are open surfaces: front-face culling loses sun-facing terrain.
+        cullMode: none
     - vert: landscape-vs
       frag: landscape-fs
       phase: deferred-forward
@@ -402,8 +403,42 @@ CCProgram landscape-shadow-vs %{
 CCProgram landscape-shadow-fs %{
   precision highp float;
   precision highp int;
+  #include <landscape-macros>
   #include <surfaces/effect-macros/render-to-shadowmap>
   #include <surfaces/includes/common-fs>
   #include <landscape-uniforms>
-  #include <shading-entries/main-functions/render-to-shadowmap/fs>
+
+  in highp vec2 v_clip_depth;
+  #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
+    in float v_decalLift;
+  #endif
+  layout(location = 0) out vec4 fragColorX;
+
+  void main () {
+    highp float depth = v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5;
+    #if CC_SHADOWMAP_USE_LINEAR_DEPTH
+      if (IS_SPOT_LIGHT(cc_shadowLPNNInfo.x)) {
+        depth = CCGetLinearDepth(FSInput_worldPos.xyz);
+      }
+    #endif
+
+    // An open heightfield must cast its sun-facing surface. Unlike a closed
+    // mesh, front-face culling cannot suppress its self-shadowing. Bias the
+    // stored COLOR depth across the PCF footprint (rasterizer depth bias only
+    // affects the depth attachment, which Cocos does not sample for shadows).
+    // Include half a texel for receiver/caster sample-center disagreement.
+    float radius = cc_shadowWHPBInfo.z > 2.5 ? 2.5 : (cc_shadowWHPBInfo.z > 0.5 ? 1.5 : 0.5);
+    float slope = abs(dFdx(depth)) + abs(dFdy(depth));
+    depth = min(depth + radius * slope, 1.0 - 1.0 / 16777216.0);
+
+    #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
+      // Match the main pass: a flat decal collar is not an extra occluder.
+      if (v_decalLift <= 0.001) discard;
+    #endif
+    #if CC_SHADOWMAP_FORMAT == SHADOWMAP_FORMAT_RGBA8
+      fragColorX = packDepthToRGBA(depth);
+    #else
+      fragColorX = vec4(depth, 1.0, 1.0, 1.0);
+    #endif
+  }
 }%

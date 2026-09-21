@@ -145,21 +145,23 @@ void shadowCulling(const RenderPipeline *pipeline, const scene::Camera *camera, 
             it = csmLayers->getLayerObjects().erase(it);
             continue;
         }
-        if (!model->getWorldBounds() || !model->isCastShadow()) {
+        if (!model->isCastShadow()) {
             it = csmLayers->getLayerObjects().erase(it);
             continue;
         }
 
         // frustum culling
-        const bool accurate = model->getWorldBounds()->aabbFrustum(layer->getValidFrustum());
+        // Unbounded models explicitly bypass culling (e.g. frozen terrain).
+        const auto *bounds = model->getWorldBounds();
+        const bool accurate = !bounds || bounds->aabbFrustum(layer->getValidFrustum());
         if (!accurate) {
             ++it;
             continue;
         }
         layer->addShadowObject(genRenderObject(model, camera));
         if (layer->getLevel() < static_cast<uint32_t>(mainLight->getCSMLevel())) {
-            if (mainLight->getCSMOptimizationMode() == scene::CSMOptimizationMode::REMOVE_DUPLICATES &&
-                aabbFrustumCompletelyInside(*model->getWorldBounds(), layer->getValidFrustum())) {
+            if (bounds && mainLight->getCSMOptimizationMode() == scene::CSMOptimizationMode::REMOVE_DUPLICATES &&
+                aabbFrustumCompletelyInside(*bounds, layer->getValidFrustum())) {
                 it = csmLayers->getLayerObjects().erase(it);
             } else {
                 ++it;

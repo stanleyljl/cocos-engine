@@ -59,6 +59,8 @@ public:
     void update();
 
     void setWireframe(bool wireframe);
+    void setCastShadow(bool enabled);
+    void setReceiveShadow(bool enabled);
     void setFreezeLod(bool frozen);
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
@@ -75,6 +77,7 @@ public:
     void drawDebugSectors();
 
     inline bool isInitialized() const { return _renderer != nullptr; }
+    bool isReady() const;
     RenderTexture *getDebugAtlas() const;
 
 private:
@@ -84,6 +87,8 @@ private:
     scene::Camera *pickMainCamera() const;
 
     bool _wireframe{false};
+    bool _castShadow{true};
+    bool _receiveShadow{true};
     bool _freezeLod{false};
     bool _lodColor{false};
     bool _showRanges{false};

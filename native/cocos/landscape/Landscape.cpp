@@ -29,7 +29,9 @@
 #include <cstdio>
 
 #include "base/Log.h"
+#include "core/Root.h"
 #include "core/geometry/AABB.h"
+#include "core/geometry/Sphere.h"
 #include "core/scene-graph/Node.h"
 #include "core/scene-graph/Scene.h"
 #include "landscape/LandscapeAsset.h"
@@ -39,11 +41,59 @@
 #include "math/Mat4.h"
 #include "math/Vec3.h"
 #include "renderer/pipeline/GeometryRenderer.h"
+#include "renderer/pipeline/PipelineSceneData.h"
+#include "renderer/pipeline/custom/RenderInterfaceTypes.h"
+#include "renderer/pipeline/shadow/CSMLayers.h"
 #include "scene/Camera.h"
+#include "scene/DirectionalLight.h"
 #include "scene/RenderScene.h"
+#include "scene/Shadow.h"
+#include "scene/SpotLight.h"
 
 namespace cc {
 namespace landscape {
+
+namespace {
+
+void appendShadowFrusta(scene::RenderScene *scene, scene::Camera *camera,
+                        ccstd::vector<const geometry::Frustum *> &frusta) {
+    auto *root = Root::getInstance();
+    auto *pipeline = root ? root->getPipeline() : nullptr;
+    auto *sceneData = pipeline ? pipeline->getPipelineSceneData() : nullptr;
+    auto *shadows = sceneData ? sceneData->getShadows() : nullptr;
+    if (!shadows || !shadows->isEnabled() || shadows->getType() != scene::ShadowType::SHADOW_MAP) {
+        return;
+    }
+
+    auto *sun = scene->getMainLight();
+    if (sun && sun->getNode() && sun->isShadowEnabled()) {
+        // BEFORE_DRAW precedes pipeline culling. Update light frusta here so
+        // moving the camera/light never selects casters using last frame's CSM.
+        sun->update();
+        auto *csm = sceneData->getCSMLayers();
+        csm->update(sceneData, camera);
+        if (sun->isShadowFixedArea()) {
+            frusta.push_back(&csm->getSpecialLayer()->getValidFrustum());
+        } else {
+            const auto count = sceneData->getCSMSupported() ? static_cast<uint32_t>(sun->getCSMLevel()) : 1U;
+            for (uint32_t i = 0; i < count; ++i) {
+                frusta.push_back(&csm->getLayers()[i]->getValidFrustum());
+            }
+        }
+    }
+    for (const auto &light : scene->getSpotLights()) {
+        if (!light->getNode() || light->isBaked() || !light->isShadowEnabled()) continue;
+        light->update();
+        geometry::Sphere bounds;
+        bounds.setCenter(light->getPosition());
+        bounds.setRadius(light->getRange());
+        if (bounds.sphereFrustum(camera->getFrustum())) {
+            frusta.push_back(&light->getFrustum());
+        }
+    }
+}
+
+} // namespace
 
 Landscape::Landscape() = default;
 
@@ -101,6 +151,8 @@ void Landscape::initializeRenderer() {
     renderer->setCliffEnabled(_cliffEnabled);
     renderer->setGlobalColorStrength(_globalColorStrength);
     renderer->setWireframe(_wireframe);
+    renderer->setCastShadow(_castShadow);
+    renderer->setReceiveShadow(_receiveShadow);
     renderer->setFreezeLod(_freezeLod);
 
 #if CC_LANDSCAPE_DEBUG
@@ -143,7 +195,7 @@ void Landscape::update() {
     if (_renderer == nullptr || _quadtree == nullptr || !_renderer->valid()) {
         return;
     }
-    if (_freezeLod) {
+    if (_freezeLod && _renderer->isReady()) {
         return; // Keep both geometry selection and VT residency unchanged.
     }
     auto *camera = pickMainCamera();
@@ -154,6 +206,11 @@ void Landscape::update() {
     // view/projection here so culling and geomorph use this frame's camera pose.
     camera->update();
     _renderer->setViewPos(camera->getPosition());
+
+    // Select once using the MAIN camera's distance for both LOD and morph.
+    // Light frusta only retain offscreen casters; shadow passes reuse these models.
+    ccstd::vector<const geometry::Frustum *> frusta{&camera->getFrustum()};
+    if (_castShadow) appendShadowFrusta(_scene, camera, frusta);
 
     _selected.clear();
     const Vec3 base = _node->getWorldPosition();
@@ -168,7 +225,7 @@ void Landscape::update() {
                 base.y,
                 base.z + (static_cast<float>(sectorZ) + 0.5F) * data.sectorSize - halfWorldZ,
             };
-            const auto &local = _quadtree->select(camera->getPosition(), camera->getFrustum(),
+            const auto &local = _quadtree->select(camera->getPosition(), frusta,
                                                   origin, sectorX, sectorZ);
             visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
             for (const auto &node : local) {
@@ -226,6 +283,10 @@ void Landscape::update() {
     _renderer->sync(_selected);
 }
 
+bool Landscape::isReady() const {
+    return _renderer != nullptr && _renderer->isReady();
+}
+
 void Landscape::setFreezeLod(bool frozen) {
     _freezeLod = frozen;
     if (_renderer != nullptr) {
@@ -238,6 +299,16 @@ void Landscape::setWireframe(bool wireframe) {
     if (_renderer != nullptr) {
         _renderer->setWireframe(wireframe);
     }
+}
+
+void Landscape::setCastShadow(bool enabled) {
+    _castShadow = enabled;
+    if (_renderer) _renderer->setCastShadow(enabled);
+}
+
+void Landscape::setReceiveShadow(bool enabled) {
+    _receiveShadow = enabled;
+    if (_renderer) _renderer->setReceiveShadow(enabled);
 }
 
 void Landscape::setLodColor(bool enabled) {

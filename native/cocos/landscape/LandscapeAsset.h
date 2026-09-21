@@ -125,6 +125,7 @@ public:
     const CliffMaterial &cliffMaterial() const { return _cliffMaterial; }
 
 private:
+    struct Manifest;
     struct AsyncState {
         std::mutex mutex;
         std::deque<TileData> ready;

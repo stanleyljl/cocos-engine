@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <map>
+#include <random>
 
 using namespace cc::landscape;
 
@@ -12,6 +13,61 @@ void require(bool condition, const char *message) {
         std::cerr << message << '\n';
         std::exit(1);
     }
+}
+
+// Reference the pre-refactor request loop, including deduplication, priority
+// promotion and root order. Exercise one reused planner across changing frames.
+void testRequestPlanEquivalence() {
+    std::mt19937 generator(0x51A7U);
+    const auto random = [&generator]() -> uint32_t { return generator(); };
+    VTRequestPlan plan;
+    for (uint32_t frame = 0; frame < 400; ++frame) {
+        const uint32_t root = 1U + random() % 11U;
+        const uint32_t sectorsX = frame % 9U == 0 ? 16U : 1U + random() % 4U;
+        const uint32_t sectorsZ = frame % 9U == 0 ? 16U : 1U + random() % 4U;
+        const size_t roots = static_cast<size_t>(sectorsX) * sectorsZ;
+        ccstd::unordered_map<uint64_t, VTPageRequest> unique;
+        plan.begin(root);
+        const uint32_t count = frame % 7U == 0 ? 0U : random() % 1200U;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t level = random() % (root + 1U);
+            const VTPageAddress visible{level, random() % (sectorsX << (root - level)),
+                                       random() % (sectorsZ << (root - level))};
+            // Include equal/zero priorities and duplicates with different weights.
+            for (float weight : {static_cast<float>(random() % 32U) / 8.0F, 0.5F}) {
+                plan.addVisible(visible, weight);
+                auto page = visible;
+                for (; page.level < root; ++page.level, page.x >>= 1U, page.z >>= 1U) {
+                    const float priority = vtAncestorPriority(weight, page.level - visible.level);
+                    const uint64_t key = makeNodeKey(page.level, page.x, page.z);
+                    auto inserted = unique.emplace(key, VTPageRequest{page, priority, key});
+                    inserted.first->second.priority = std::max(inserted.first->second.priority, priority);
+                    inserted.first->second.required |= page.level == visible.level;
+                }
+            }
+        }
+        ccstd::vector<VTPageRequest> expected;
+        for (const auto &entry : unique) expected.push_back(entry.second);
+        budgetVTRequests(expected, root, config::VT_PAGE_COUNT - roots);
+        const auto dynamicCount = expected.size();
+        for (uint32_t z = 0; z < sectorsZ; ++z) {
+            for (uint32_t x = 0; x < sectorsX; ++x) {
+                expected.push_back({VTPageAddress{root, x, z}, 0.0F, makeNodeKey(root, x, z)});
+            }
+        }
+        plan.finish(sectorsX, sectorsZ);
+        require(plan.requests().size() == expected.size(), "Request count changed after refactor");
+        require(plan.dynamicKeys().size() == dynamicCount, "Pinned roots entered the dynamic protection set");
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const auto &a = plan.requests()[i];
+            const auto &b = expected[i];
+            require(a.key == b.key && a.page.level == b.page.level && a.page.x == b.page.x &&
+                    a.page.z == b.page.z && a.priority == b.priority && a.required == b.required,
+                    "Request selection/order/priority changed after refactor");
+            if (i < dynamicCount) require(plan.dynamicKeys()[i] == a.key, "Protection set does not match selected pages");
+        }
+    }
+    std::cout << "PASS: request planner matches the original loop across 400 changing frames\n";
 }
 
 void testNearGroundCoverage() {
@@ -131,6 +187,7 @@ void testSyncCache() {
 }
 
 int main() {
+    testRequestPlanEquivalence();
     testNearGroundCoverage();
     testSyncCache();
     constexpr float sectorSize = 4096.0F;

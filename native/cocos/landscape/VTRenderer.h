@@ -48,6 +48,7 @@ public:
     VirtualTexture &texture() { return _texture; }
     const VirtualTexture &texture() const { return _texture; }
     bool valid() const;
+    bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool rvtNormalEnabled() const { return _rvtNormalEnabled; }
     void render();
     void setFrozen(bool frozen);
@@ -58,20 +59,55 @@ public:
     void syncCliffSources(TilePagePool &tiles);
 
 private:
+    bool initComposeResources(const LandscapeAsset &asset, TilePagePool &tiles,
+                              const MaterialLibrary &materials, gfx::Device *device);
+    bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles,
+                             const MaterialLibrary &materials, gfx::Device *device);
+    bool initDecalResources(const LandscapeAsset &asset, const MaterialLibrary &materials, gfx::Device *device);
+    bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
+    bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
+    void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
+    bool initDrawResources(gfx::Device *device);
+    bool initRootPages(const LandscapeData &data, TilePagePool &tiles);
+    void buildPageBatch();
+    uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
+    void uploadSourceTables();
+    void submitPageBatch();
+    void recordPagePass(Material *material, gfx::PipelineState *pipelineState,
+                        gfx::Framebuffer *framebuffer, uint32_t atlasSize);
+    void invalidateComposedPages();
+
+    // Exactly the three vec4 attributes consumed by the compose/mip shaders.
+    struct PageInstance {
+        Vec4 atlas; // physical slot, decal count, unused ZW
+        Vec4 region;
+        Vec4 splatSource;
+    };
+    static_assert(sizeof(PageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
+
+    // Each mip has its own descriptors: recording a later mip must not overwrite
+    // the preceding pass's source texture bindings.
+    struct MipPass {
+        IntrusivePtr<Material> material;
+        IntrusivePtr<gfx::PipelineState> pipelineState;
+    };
+
     bool _rvtNormalEnabled{true};
     bool _cliffEnabled{true};
-    bool _cliffReady{false};
-    uint32_t _cliffLevel{0};
-    uint32_t _cliffColumns{0};
-    uint32_t _cliffRows{0};
-    Vec4 _cliffParams;
-    LandscapeData _cliffData;
-    IntrusivePtr<gfx::Texture> _cliffSources;
-    ccstd::vector<Vec4> _cliffSourceData;
+    struct CliffReference {
+        bool ready{false};
+        uint32_t level{0};
+        uint32_t columns{0};
+        uint32_t rows{0};
+        Vec4 params; // shader state, height scale/bias, optional material ID + 1
+        LandscapeData data;
+        IntrusivePtr<gfx::Texture> texture;
+        ccstd::vector<Vec4> sources;
+    } _cliff;
     VirtualTexture _texture;
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;
-    std::array<IntrusivePtr<Material>, config::VT_MIP_LEVELS - 1> _mipMaterials;
+    std::array<MipPass, config::VT_MIP_LEVELS - 1> _mipPasses;
     IntrusivePtr<gfx::Buffer> _instances;
     IntrusivePtr<gfx::Texture> _normalSources;
     ccstd::vector<Vec4> _normalSourceData;
@@ -81,10 +117,9 @@ private:
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
     IntrusivePtr<gfx::CommandBuffer> _commands;
     IntrusivePtr<gfx::PipelineState> _pipelineState;
-    std::array<IntrusivePtr<gfx::PipelineState>, config::VT_MIP_LEVELS - 1> _mipPipelineStates;
     IntrusivePtr<gfx::RenderPass> _initialPass;
     ccstd::vector<uint32_t> _dirtySlots;
-    ccstd::vector<float> _instanceData;
+    ccstd::vector<PageInstance> _pageInstances;
     Root::BeforeRender::EventID _beforeRender;
     bool _subscribed{false};
     bool _needsClear{true};

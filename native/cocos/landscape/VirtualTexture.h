@@ -31,6 +31,7 @@
 #include "base/std/container/vector.h"
 #include "math/Vec4.h"
 #include "landscape/LandscapeConfig.h"
+#include "landscape/VTPaging.h"
 
 namespace cc {
 class RenderTexture;
@@ -51,9 +52,7 @@ public:
         uint64_t key{0};
         uint64_t lastUsed{0};
         float priority{0.0F};
-        Vec4 region; // landscape-local XZ origin, size, unused
-        Vec4 source; // source tile XZ origin, size, splat array layer
-        std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources; // 4x4 source regions, including the filtering gutter ring.
+        VTPageInputs inputs;
         bool occupied{false};
         bool dirty{true};
         bool permanent{false}; // Sector roots never enter the eviction candidates.
@@ -80,10 +79,15 @@ public:
     // Protect ALL requested keys before allocating anything, so selection order
     // cannot evict pages that another visible node requests later this frame.
     void beginFrame(const ccstd::vector<uint64_t> &keys);
-    int acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, const std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &normalSources, bool permanent = false, float priority = 0.0F);
-    bool requested(uint64_t key) const { return _requested.count(key) != 0; }
+    // Allocation only schedules composition. A dirty page cannot be sampled
+    // until markRendered publishes its completed base level AND mip levels.
+    int acquirePage(const VTPageRequest &request, const VTPageInputs &inputs, bool permanent = false);
+    bool requested(uint64_t key) const { return _requestedPages.count(key) != 0; }
     int findPage(uint64_t key) const;
     int findReadyPage(uint64_t key) const;
+    // The finest ready page still protected by this frame's request plan, or
+    // the permanent sector root (composed by BeforeRender before terrain draws).
+    int findReadyPageOrRoot(VTPageAddress desired, uint32_t rootLevel) const;
     void collectDirtyPages(ccstd::vector<uint32_t> &slots) const;
     void markRendered(const ccstd::vector<uint32_t> &slots);
     void invalidate();
@@ -91,6 +95,7 @@ public:
     const Page &page(uint32_t slot) const { return _pages[slot]; }
 
 private:
+    int allocatePageSlot(uint64_t key);
     IntrusivePtr<RenderTexture> _atlas;
     struct MipTarget {
         IntrusivePtr<gfx::Texture> albedo;
@@ -103,8 +108,8 @@ private:
     gfx::Sampler *_sampler{nullptr}; // device-owned
     ccstd::vector<Page> _pages;
     ccstd::unordered_map<uint64_t, uint32_t> _lookup;
-    ccstd::unordered_set<uint64_t> _requested;
-    ccstd::unordered_set<uint64_t> _updates; // Sources refreshed by acquirePage this frame.
+    ccstd::unordered_set<uint64_t> _requestedPages;
+    ccstd::unordered_set<uint64_t> _resolvedThisFrame; // Sources refreshed by acquirePage this frame.
     uint64_t _frame{0};
     uint64_t _contentRevision{0};
     bool _warnedFull{false};

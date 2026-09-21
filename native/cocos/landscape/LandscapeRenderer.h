@@ -24,16 +24,18 @@
 
 #pragma once
 
-#include <memory>
 #include <array>
+#include <memory>
 
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
+#include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
 #include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/VTPaging.h"
+#include "landscape/TilePagePool.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
 #include "scene/Model.h"
@@ -55,14 +57,14 @@ class RenderScene;
 
 namespace landscape {
 
-class TilePagePool;
 class MaterialLibrary;
 class VTRenderer;
 
 /**
- * The quadtree owns visibility and LOD selection. This class only turns the
- * selected node quadrants into material-page patches without adding triangles.
- * Four shared grids batch patches while VT residency follows its own hierarchy.
+ * Coordinates the frame plan, source residency, terrain models and 3D decals.
+ * The quadtree owns visibility/LOD; VTRequestPlan owns material-page budgeting;
+ * TilePageResolver owns source lookup. Four shared grids split selected node
+ * quadrants into material-page patches without adding triangles.
  */
 class LandscapeRenderer {
 public:
@@ -72,6 +74,8 @@ public:
     bool init(Node *node, scene::RenderScene *scene);
     void destroy();
     bool valid() const;
+    // Latched after the initial view's source and composed pages reach target LOD.
+    bool isReady() const { return _ready; }
 
     void setLodRanges(const ccstd::vector<float> &morphStart,
                       const ccstd::vector<float> &morphEnd);
@@ -79,6 +83,8 @@ public:
     void setDebugFlags(bool lodColor, bool showRanges);
     void sync(const ccstd::vector<QuadNode> &selected);
     void setWireframe(bool wireframe);
+    void setCastShadow(bool enabled);
+    void setReceiveShadow(bool enabled);
     void setUnlit(bool enabled);
     void setVTMipEnabled(bool enabled);
     void setHeightBlendEnabled(bool enabled);
@@ -91,14 +97,6 @@ public:
     RenderTexture *debugAtlas() const;
 
 private:
-    bool _rvtNormalEnabled{true};
-    struct TilePage {
-        uint32_t level{0};
-        uint32_t x{0};
-        uint32_t z{0};
-        int layer{-1};
-    };
-
     struct Patch {
         QuadNode node;
         uint32_t x{0}; // cell offset inside the original 16 x 16 node
@@ -119,8 +117,24 @@ private:
         uint32_t decal{0};
         Vec4 grid; // fixed landscape-local XZ origin and width/depth
     };
+    // Keep each request and its resolved inputs together across source uploads.
+    struct VTPageUpdate {
+        VTPageRequest request;
+        VTPageInputs inputs;
+    };
+    // Frame stages: selection -> residency/source publication -> models -> decals.
+    void buildFramePlan(const ccstd::vector<QuadNode> &selected);
+    void syncPageSources(const ccstd::vector<QuadNode> &selected, bool uploadsPolled);
+    void prepareVTPageUpdates();
+    void refreshVTPageInputs();
+    void queueVTPageUpdates();
+    bool initialDataReady() const;
+    void syncTerrainModels();
+    void initDecalCenters();
+    void bindRuntimeTextures();
     void syncDecals(const ccstd::vector<Patch> &patches);
     void updateDecalInstance(const DecalDraw &draw);
+    void appendDecalDraw(const Patch &patch, uint32_t decal, const Vec4 &grid);
     IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
     void updateMaterialProperties();
     void updateMorphCameraProperty();
@@ -131,12 +145,6 @@ private:
     void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
                        ccstd::vector<Patch> &patches);
     float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
-    TilePage resolveTilePage(const QuadNode &node);
-    TilePage resolveNormalParent(const QuadNode &node, const TilePage &tile);
-    TilePage resolveVTSource(const VTPageAddress &page);
-    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> resolveVTNormalSources(const VTPageAddress &page);
-    Vec4 tileParams(const TilePage &tile) const;
-    int resolveVTPage(VTPageAddress page) const;
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -159,7 +167,12 @@ private:
     std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
     uint32_t _vtRootLevel{0};
     LandscapeSyncCache _syncCache;
-    ccstd::unordered_map<uint64_t, TilePage> _tileResolveCache;
+    // Reused across active frames; the stable-camera fast path touches none of these.
+    VTRequestPlan _requestPlan;
+    ccstd::vector<Patch> _patches;
+    ccstd::vector<VTPageUpdate> _vtPageUpdates;
+    ccstd::unordered_set<uint64_t> _visiblePatches;
+    std::unique_ptr<TilePageResolver> _sourceResolver;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
     // Float32Array-to-TypedArray copies when setting instance attributes.
@@ -174,8 +187,12 @@ private:
     bool _lodColor{false};
     bool _showRanges{false};
     bool _wireframe{false};
+    bool _castShadow{true};
+    bool _receiveShadow{true};
     bool _unlit{false};
     bool _freezeLod{false};
+    bool _ready{false};
+    bool _rvtNormalEnabled{true};
     bool _cliffEnabled{true};
 };
 

@@ -119,9 +119,9 @@ gfx::Texture *VirtualTexture::normalRoughnessAO() const {
 
 void VirtualTexture::beginFrame(const ccstd::vector<uint64_t> &keys) {
     ++_frame;
-    _requested.clear();
-    _requested.insert(keys.begin(), keys.end());
-    _updates.clear();
+    _requestedPages.clear();
+    _requestedPages.insert(keys.begin(), keys.end());
+    _resolvedThisFrame.clear();
 }
 
 int VirtualTexture::findPage(uint64_t key) const {
@@ -134,52 +134,66 @@ int VirtualTexture::findReadyPage(uint64_t key) const {
     return slot >= 0 && !_pages[slot].dirty ? slot : -1;
 }
 
-int VirtualTexture::acquirePage(uint64_t key, const Vec4 &region, const Vec4 &source, const std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &normalSources, bool permanent, float priority) {
-    if (!valid()) return -1;
-    _requested.insert(key);
-    auto found = _lookup.find(key);
-    int slot = found != _lookup.end() ? static_cast<int>(found->second) : -1;
-    if (slot < 0) {
-        int emptySlot = -1;
-        uint64_t oldest = std::numeric_limits<uint64_t>::max();
-        for (uint32_t i = 0; i < _pages.size(); ++i) {
-            const auto &p = _pages[i];
-            if (!p.occupied) {
-                if (emptySlot < 0) emptySlot = static_cast<int>(i);
-                continue;
-            }
-            if (!p.permanent && _requested.count(p.key) == 0 && p.lastUsed < oldest) {
-                oldest = p.lastUsed;
-                slot = static_cast<int>(i);
-            }
-        }
-        // Recycle the least recently used, unrequested page before growing into
-        // an unused slot. All pages requested this frame remain protected.
-        if (slot < 0) slot = emptySlot;
-        if (slot < 0) {
-            if (!_warnedFull) {
-                CC_LOG_WARNING("[Landscape] VT cache full; using resident ancestor VT pages");
-                _warnedFull = true;
-            }
-            return -1;
-        }
-        auto &p = _pages[slot];
-        if (p.occupied) _lookup.erase(p.key);
-        p = Page{};
-        p.key = key;
-        p.occupied = true;
-        _lookup.emplace(key, static_cast<uint32_t>(slot));
+int VirtualTexture::findReadyPageOrRoot(VTPageAddress desired, uint32_t rootLevel) const {
+    for (; desired.level < rootLevel; desired = desired.parent()) {
+        const int slot = findReadyPage(desired.key());
+        if (slot >= 0 && requested(desired.key())) return slot;
     }
-    auto &p = _pages[slot];
-    p.permanent |= permanent;
-    p.priority = priority;
-    p.dirty |= !same(p.region, region) || !same(p.source, source);
-    for (size_t i = 0; i < normalSources.size(); ++i) p.dirty |= !same(p.normalSources[i], normalSources[i]);
-    p.normalSources = normalSources;
-    p.region = region;
-    p.source = source;
-    p.lastUsed = _frame;
-    _updates.insert(key);
+    // Roots bootstrap startup/invalidation on the same queue before Base Pass.
+    // Fine pages do not have that guarantee: never bind a dirty fine page.
+    return findPage(desired.key());
+}
+
+int VirtualTexture::allocatePageSlot(uint64_t key) {
+    int emptySlot = -1;
+    int evictionSlot = -1;
+    uint64_t oldestUse = std::numeric_limits<uint64_t>::max();
+    for (uint32_t slot = 0; slot < _pages.size(); ++slot) {
+        const auto &page = _pages[slot];
+        if (!page.occupied) {
+            if (emptySlot < 0) emptySlot = static_cast<int>(slot);
+        } else if (!page.permanent && !requested(page.key) && page.lastUsed < oldestUse) {
+            oldestUse = page.lastUsed;
+            evictionSlot = static_cast<int>(slot);
+        }
+    }
+    // Preserve the existing reuse policy: recycle unused content before growing
+    // into an empty slot. This frame's requested pages and roots are protected.
+    const int slot = evictionSlot >= 0 ? evictionSlot : emptySlot;
+    if (slot < 0) {
+        if (!_warnedFull) {
+            CC_LOG_WARNING("[Landscape] VT cache full; using resident ancestor VT pages");
+            _warnedFull = true;
+        }
+        return -1;
+    }
+    auto &page = _pages[slot];
+    if (page.occupied) _lookup.erase(page.key);
+    page = Page{};
+    page.key = key;
+    page.occupied = true;
+    _lookup.emplace(key, static_cast<uint32_t>(slot));
+    return slot;
+}
+
+int VirtualTexture::acquirePage(const VTPageRequest &request, const VTPageInputs &inputs, bool permanent) {
+    if (!valid()) return -1;
+    _requestedPages.insert(request.key);
+    int slot = findPage(request.key);
+    if (slot < 0) slot = allocatePageSlot(request.key);
+    if (slot < 0) return -1;
+
+    auto &page = _pages[slot];
+    const auto &previous = page.inputs;
+    const bool sameNormals = std::equal(previous.normalSources.begin(), previous.normalSources.end(),
+                                        inputs.normalSources.begin(), same);
+    page.dirty |= !same(previous.region, inputs.region) ||
+                  !same(previous.splatSource, inputs.splatSource) || !sameNormals;
+    page.inputs = inputs;
+    page.permanent |= permanent;
+    page.priority = request.priority;
+    page.lastUsed = _frame;
+    _resolvedThisFrame.insert(request.key);
     return slot;
 }
 
@@ -189,7 +203,7 @@ void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
         const auto &p = _pages[i];
         // A protected ancestor may refer to a source tile that has since been
         // recycled. Only roots or pages with a freshly resolved source can bake.
-        if (p.occupied && p.dirty && (p.permanent || _updates.count(p.key) != 0)) slots.push_back(i);
+        if (p.occupied && p.dirty && (p.permanent || _resolvedThisFrame.count(p.key) != 0)) slots.push_back(i);
     }
     std::sort(slots.begin(), slots.end(), [this](uint32_t a, uint32_t b) {
         const auto &pa = _pages[a];
@@ -224,8 +238,8 @@ void VirtualTexture::destroy() {
     _sampler = nullptr;
     _pages.clear();
     _lookup.clear();
-    _requested.clear();
-    _updates.clear();
+    _requestedPages.clear();
+    _resolvedThisFrame.clear();
     _frame = 0;
     _warnedFull = false;
 }

@@ -89,10 +89,8 @@ void ShadowMapBatchedQueue::gatherLightPasses(const scene::Camera *camera, const
                         if ((visibility & model->getNode()->getLayer()) != model->getNode()->getLayer() || !model->isEnabled() || !model->isCastShadow() || !model->getNode()) {
                             continue;
                         }
-                        if (model->getWorldBounds()) {
-                            if (model->getWorldBounds()->aabbFrustum(spotLight->getFrustum())) {
-                                add(model);
-                            }
+                        if (!model->getWorldBounds() || model->getWorldBounds()->aabbFrustum(spotLight->getFrustum())) {
+                            add(model);
                         }
                     }
                 }

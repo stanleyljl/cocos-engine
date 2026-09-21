@@ -143,10 +143,10 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
     maxY = range.maxY;
 }
 
-const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum,
+const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const ccstd::vector<const geometry::Frustum *> &frusta,
                                                 const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ) {
     _camPos = camPos;
-    _frustum = &frustum;
+    _frusta = frusta;
     _sectorOrigin = sectorOrigin;
     _sectorX = sectorX;
     _sectorZ = sectorZ;
@@ -169,7 +169,9 @@ Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t 
     _box->setCenter(x + size * 0.5F, (minY + maxY) * 0.5F + _sectorOrigin.y, z + size * 0.5F);
     _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
 
-    if (!_box->aabbFrustum(*_frustum)) {
+    if (std::none_of(_frusta.begin(), _frusta.end(), [this](const geometry::Frustum *frustum) {
+            return _box->aabbFrustum(*frustum);
+        })) {
         return SelectResult::CULLED;
     }
 

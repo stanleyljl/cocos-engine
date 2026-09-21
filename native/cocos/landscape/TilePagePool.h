@@ -24,12 +24,16 @@
 
 #pragma once
 
+#include <array>
 #include <list>
 
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
+#include "landscape/LandscapeConfig.h"
+#include "landscape/VTPaging.h"
+#include "math/Vec4.h"
 
 namespace cc {
 namespace gfx {
@@ -72,6 +76,8 @@ public:
     // from the LandscapeAsset and uploads them to the GPU (LRU-evicting when
     // full).
     void update(uint32_t maxUploads);
+    // Exact source requests must be resident; ancestor fallbacks do not count.
+    bool requestsReady() const;
     // Changes when async work completes (including failed/dropped loads).
     uint64_t updateRevision() const { return _updateRevision; }
 
@@ -102,8 +108,45 @@ private:
     ccstd::unordered_map<uint64_t, std::list<uint64_t>::iterator> _lruIter;
     ccstd::vector<uint32_t> _freeLayers;
     ccstd::unordered_set<uint64_t> _inUse;   // requested this frame (evict-protected)
+    ccstd::unordered_set<uint64_t> _missingRequests; // exact query() misses, excluding resident fallbacks
     bool _warnedFull{false};
     uint64_t _updateRevision{0};
+};
+
+// Resolves source coordinates and resident fallbacks. The pool owns storage;
+// this resolver only caches lookups within one protected residency interval.
+// Geometry, splat composition and normal baking all use the same tile identity.
+class TilePageResolver {
+public:
+    struct Tile {
+        uint32_t level{0};
+        uint32_t x{0};
+        uint32_t z{0};
+        int layer{-1};
+    };
+    TilePageResolver(TilePagePool &pool, const LandscapeData &data);
+
+    // Reset source protection and the lookup cache together, before resolving
+    // any geometry or VT inputs. Cached lookups do not re-protect their tiles.
+    void beginFrame();
+    void protectGeometrySources(const ccstd::vector<QuadNode> &selected);
+    // Clear after uploads change residency, so finer sources can be discovered.
+    void invalidate() { _cache.clear(); }
+    Tile resolve(const QuadNode &node);
+    Tile normalParent(const QuadNode &node, const Tile &tile);
+    Vec4 params(const Tile &tile) const;
+    VTPageInputs resolvePage(const VTPageAddress &page, bool bakeNormals);
+
+private:
+    uint32_t sourceLevelForWorldSize(float size) const;
+    Tile resolveSplat(const VTPageAddress &page);
+    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> resolveNormals(const VTPageAddress &page, bool bakeNormals);
+    uint32_t resolveNormalNeighborhood(const VTPageAddress &page, float pageSize, uint32_t level,
+                                      std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &sources);
+    TilePagePool &_pool; // owner destroys the resolver before the pool
+    LandscapeData _data;
+    uint32_t _vtRootLevel;
+    ccstd::unordered_map<uint64_t, Tile> _cache;
 };
 
 } // namespace landscape

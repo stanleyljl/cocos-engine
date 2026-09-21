@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include "base/std/container/unordered_set.h"
+#include "base/std/container/unordered_map.h"
 #include "landscape/LandscapeConfig.h"
+#include "math/Vec4.h"
 
 namespace cc {
 namespace landscape {
@@ -17,6 +19,18 @@ struct VTPageAddress {
     uint32_t level{0};
     uint32_t x{0};
     uint32_t z{0};
+
+    uint64_t key() const { return makeNodeKey(level, x, z); }
+    VTPageAddress parent() const { return {level + 1U, x >> 1U, z >> 1U}; }
+};
+
+// Resolved inputs for ONE material page, shared by source lookup, the cache,
+// and the compose pass. These are shader records, not VT addresses or slots.
+struct VTPageInputs {
+    Vec4 region;      // output page: landscape-local XZ origin, world size, unused
+    Vec4 splatSource; // input tile: landscape-local XZ origin, world size, array layer
+    // 4x4 input tiles: 2x2 interior plus a one-tile ring for filtering gutters.
+    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources;
 };
 
 inline uint32_t vtRootLevel(float sectorSize) {
@@ -71,6 +85,26 @@ struct VTPageRequest {
     bool required{false}; // directly requested by a visible patch
 };
 
+// Find a common ancestor bias whose view-wide coverage fits the reserved budget.
+// Sector roots need no dynamic slots and are omitted from this set.
+inline ccstd::unordered_set<uint64_t> collectVTCoveragePages(
+    const ccstd::vector<VTPageRequest> &requests, uint32_t rootLevel, size_t capacity) {
+    ccstd::unordered_set<uint64_t> coverage;
+    for (uint32_t bias = 0; bias <= rootLevel; ++bias) {
+        coverage.clear();
+        for (const auto &request : requests) {
+            if (!request.required) continue;
+            const auto &page = request.page;
+            const auto level = std::min(page.level + bias, rootLevel);
+            if (level == rootLevel) continue;
+            const auto shift = level - page.level;
+            coverage.insert(makeNodeKey(level, page.x >> shift, page.z >> shift));
+        }
+        if (coverage.size() <= capacity) break;
+    }
+    return coverage;
+}
+
 inline void budgetVTRequests(ccstd::vector<VTPageRequest> &requests, uint32_t rootLevel, size_t capacity) {
     if (capacity == 0U) {
         requests.clear();
@@ -81,20 +115,8 @@ inline void budgetVTRequests(ccstd::vector<VTPageRequest> &requests, uint32_t ro
         // patch. Its only remaining fallback is then a whole-sector root page.
         // Reserve a bounded, view-wide coverage set before spending on detail.
         // All non-root ancestors already exist in the input request set.
-        ccstd::unordered_set<uint64_t> coverage;
         const size_t coverageBudget = std::max(size_t{1}, capacity / 2U);
-        for (uint32_t bias = 0; bias <= rootLevel; ++bias) {
-            coverage.clear();
-            for (const auto &request : requests) {
-                if (!request.required) continue;
-                const auto &page = request.page;
-                const auto level = std::min(page.level + bias, rootLevel);
-                if (level == rootLevel) continue; // roots have permanent slots
-                const auto shift = level - page.level;
-                coverage.insert(makeNodeKey(level, page.x >> shift, page.z >> shift));
-            }
-            if (coverage.size() <= coverageBudget) break;
-        }
+        const auto coverage = collectVTCoveragePages(requests, rootLevel, coverageBudget);
         float maximumPriority = 0.0F;
         for (const auto &request : requests) maximumPriority = std::max(maximumPriority, request.priority);
         for (auto &request : requests) {
@@ -108,6 +130,55 @@ inline void budgetVTRequests(ccstd::vector<VTPageRequest> &requests, uint32_t ro
     });
     if (requests.size() > capacity) requests.resize(capacity);
 }
+
+// CPU-only request planning. Does not query, protect or allocate physical pages.
+// Build the complete candidate set, apply the budget, then append pinned roots.
+class VTRequestPlan {
+public:
+    void begin(uint32_t rootLevel) {
+        _rootLevel = rootLevel;
+        _unique.clear();
+        _requests.clear();
+        _dynamicKeys.clear();
+    }
+
+    void addVisible(VTPageAddress page, float priority) {
+        const auto desiredLevel = page.level;
+        for (; page.level < _rootLevel; page = page.parent()) {
+            const auto key = page.key();
+            const float ancestorPriority = vtAncestorPriority(priority, page.level - desiredLevel);
+            auto inserted = _unique.emplace(key, VTPageRequest{page, ancestorPriority, key});
+            auto &request = inserted.first->second;
+            request.priority = std::max(request.priority, ancestorPriority);
+            request.required |= page.level == desiredLevel;
+        }
+    }
+
+    void finish(uint32_t sectorsX, uint32_t sectorsZ) {
+        const size_t roots = static_cast<size_t>(sectorsX) * sectorsZ;
+        _requests.reserve(_unique.size() + roots);
+        for (const auto &entry : _unique) _requests.push_back(entry.second);
+        budgetVTRequests(_requests, _rootLevel, roots < config::VT_PAGE_COUNT ? config::VT_PAGE_COUNT - roots : 0U);
+        _dynamicKeys.reserve(_requests.size());
+        for (const auto &request : _requests) _dynamicKeys.push_back(request.key);
+        // Roots always need refreshed normal sources, even when their geometry
+        // is not visible. Root source height/splat tiles are permanently resident.
+        for (uint32_t z = 0; z < sectorsZ; ++z) {
+            for (uint32_t x = 0; x < sectorsX; ++x) {
+                _requests.push_back({VTPageAddress{_rootLevel, x, z}, 0.0F, makeNodeKey(_rootLevel, x, z)});
+            }
+        }
+    }
+
+    const ccstd::vector<VTPageRequest> &requests() const { return _requests; }
+    const ccstd::vector<uint64_t> &dynamicKeys() const { return _dynamicKeys; }
+
+private:
+    uint32_t _rootLevel{0};
+    ccstd::unordered_map<uint64_t, VTPageRequest> _unique;
+    ccstd::vector<VTPageRequest> _requests;
+    ccstd::vector<uint64_t> _dynamicKeys;
+};
 
 // Coordinates are relative to the landscape's minimum XZ, not its center.
 // Expand to an ancestor until the ENTIRE (possibly morphed) primitive fits.

@@ -169,9 +169,29 @@ try {
     if(feedback)gl.transformFeedbackVaryings(p,['probe'],gl.INTERLEAVED_ATTRIBS);
     gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));return p;
   };
-  for(const shader of baseEffect.shaders)for(const unlit of [0,1])for(const decal of [0,1]){
-    const defines=shader.defines.map(d=>'#define '+d.name+' '+(d.name==='USE_INSTANCING'?1:d.name==='LANDSCAPE_DEBUG_UNLIT'?unlit:d.name==='LANDSCAPE_DECAL_MESH'?decal:(d.default??d.range?.[0]??0))).join('\n');
-    const prefix='precision highp sampler2DArray;\n#define CC_DEVICE_SUPPORT_FLOAT_TEXTURE 0\n#define CC_PLATFORM_ANDROID_AND_WEBGL 0\n#define CC_ENABLE_WEBGL_HIGHP_STRUCT_VALUES 0\n'+defines+'\n';
+  const shaderPrefix=(shader,overrides)=>'precision highp sampler2DArray;\n#define CC_DEVICE_SUPPORT_FLOAT_TEXTURE 0\n#define CC_PLATFORM_ANDROID_AND_WEBGL 0\n#define CC_ENABLE_WEBGL_HIGHP_STRUCT_VALUES 0\n'
+    +shader.defines.map(d=>'#define '+d.name+' '+(overrides[d.name]??d.default??d.range?.[0]??0)).join('\n')+'\n';
+  // Creator validates the GLSL 100 fallback during Effect import too. A varying
+  // declared only by the fragment stage can invalidate the ENTIRE terrain asset,
+  // even when the native runtime itself uses GLSL 300/450.
+  const gl1=document.createElement('canvas').getContext('webgl');
+  if(!gl1)throw Error('WebGL1 import-compatibility context unavailable');
+  gl1.getExtension('OES_standard_derivatives');
+  for(const shader of baseEffect.shaders)for(const decal of [0,1]){
+    const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DECAL_MESH:decal}).replace('precision highp sampler2DArray;\n','');
+    const program=gl1.createProgram();
+    for(const [stage,source]of [[gl1.VERTEX_SHADER,shader.glsl1.vert],[gl1.FRAGMENT_SHADER,shader.glsl1.frag]]){
+      const s=gl1.createShader(stage);gl1.shaderSource(s,prefix+source);gl1.compileShader(s);
+      if(!gl1.getShaderParameter(s,gl1.COMPILE_STATUS))throw Error('GLSL100: '+gl1.getShaderInfoLog(s));
+      gl1.attachShader(program,s);
+    }
+    gl1.linkProgram(program);
+    if(!gl1.getProgramParameter(program,gl1.LINK_STATUS))throw Error('GLSL100: '+gl1.getProgramInfoLog(program));
+    gl1.deleteProgram(program);
+  }
+  for(const shader of baseEffect.shaders)for(const unlit of [0,1])for(const decal of [0,1])for(const shadow of [0,1,2]){
+    const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DEBUG_UNLIT:unlit,LANDSCAPE_DECAL_MESH:decal,
+      CC_RECEIVE_SHADOW:shadow?1:0,CC_SHADOW_TYPE:2,CC_DIR_LIGHT_SHADOW_TYPE:shadow,CC_SUPPORT_CASCADED_SHADOW_MAP:1});
     link(prefix+shader.glsl3.vert+'\n',prefix+shader.glsl3.frag+'\n');
   }
   const probeSource=decal=>[
@@ -273,6 +293,117 @@ try {
       approx([raised[0],raised[2]],uv.map(v=>v*8),'camera motion preserves stone XZ');
     }
   }
-  if(gl.getError()!==gl.NO_ERROR)throw Error('GPU probe error');
-  result.textContent='PASS: all base/decal/unlit/shadow variants linked; '+checks+' pixel checks passed.';
+  // Execute the complete production vertex entries, capturing world positions
+  // before projection. A light camera may differ arbitrarily from the main
+  // camera: neither the shadow entry nor cc_cameraPos may change CDLOD morph.
+  const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+  for(const decal of [0,1]){
+    const programs=baseEffect.shaders.map(shader=>{
+      const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DECAL_MESH:decal,CC_RECEIVE_SHADOW:1,CC_USE_FOG:4});
+      const vs=prefix+shader.glsl3.vert.replace(/void main\(\)/,'void terrainEntry()')
+        +'\nout vec4 probe;void main(){terrainEntry();probe=vec4(VSOutput_worldPos,1.0);}';
+      const p=link(vs,'precision highp float;out vec4 c;void main(){c=vec4(1);}',true);
+      const blocks=[];
+      for(let i=0;i<gl.getProgramParameter(p,gl.ACTIVE_UNIFORM_BLOCKS);i++){
+        const buffer=gl.createBuffer(),data=new Float32Array(gl.getActiveUniformBlockParameter(p,i,gl.UNIFORM_BLOCK_DATA_SIZE)/4);
+        const indices=gl.getActiveUniformBlockParameter(p,i,gl.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES);
+        const offsets=gl.getActiveUniforms(p,indices,gl.UNIFORM_OFFSET),members={};
+        indices.forEach((index,j)=>{const u=gl.getActiveUniform(p,index);members[u.name.split('.').pop()]=offsets[j]/4;
+          if(u.type===gl.FLOAT_MAT4)data.set(identity,offsets[j]/4);});
+        gl.uniformBlockBinding(p,i,i);blocks.push({buffer,data,members});
+      }
+      return {p,blocks};
+    });
+    const execute=({p,blocks},uv,camera,passCamera,range)=>{
+      gl.useProgram(p);
+      const values={heightParams:[1,17,0,0],terrainParams:[10,0,0,0],morphCameraPos:[...camera,0],
+        decalControl:[1,0,0,0],'lodMorph[0]':[...range,0,0],cc_cameraPos:[...passCamera,1]};
+      blocks.forEach(({buffer,data,members},i)=>{
+        for(const [name,value]of Object.entries(values))if(name in members)data.set(value,members[name]);
+        // The projection really changes with the pass, while geometry must not.
+        if('cc_matLightViewProj' in members)data[members.cc_matLightViewProj+12]=passCamera[0];
+        gl.bindBuffer(gl.UNIFORM_BUFFER,buffer);gl.bufferData(gl.UNIFORM_BUFFER,data,gl.DYNAMIC_DRAW);
+        gl.bindBufferBase(gl.UNIFORM_BUFFER,i,buffer);
+      });
+      const attributes={a_position:[...uv,0,1],a_normal:[0,1,0,0],a_tangent:[1,0,0,1],
+        a_matWorld0:[1,0,0,0],a_matWorld1:[0,1,0,0],a_matWorld2:[0,0,1,0],
+        a_gridInst:[0,0,16,0],a_quadrantInst:[0,0,1,0],a_tileInst:[0,0,16,0],
+        a_normalParentInst:[0,0,16,0],a_vtInst:[0,0,16,0],a_decalRegion:[0,0,16,0],
+        a_decalGrid:[0,0,8,8],a_decalFade:[.6,1,0,0],a_localShadowBiasAndProbeId:[0,0,0,0]};
+      for(const [name,value]of Object.entries(attributes)){
+        const l=gl.getAttribLocation(p,name);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...value);}
+      }
+      gl.uniform1i(gl.getUniformLocation(p,'heightmap'),7);gl.uniform1i(gl.getUniformLocation(p,'decalHeightMap'),8);
+      gl.enable(gl.RASTERIZER_DISCARD);gl.beginTransformFeedback(gl.POINTS);gl.drawArrays(gl.POINTS,0,1);
+      gl.endTransformFeedback();gl.disable(gl.RASTERIZER_DISCARD);
+      const out=new Float32Array(4);gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER,0,out);return [...out].slice(0,3);
+    };
+    for(const range of [[100,200],[2,12],[0,.001]])for(const camera of [[-2,4,-2],[6,3,4]])for(const uv of sampleUVs.slice(0,5)){
+      const reference=execute(programs[0],uv,camera,camera,range);
+      approx(reference,probe(uv,{decal,scale:.6,range,camera,quadrant:[0,0,1,0]}).slice(0,3),'full entry preserves displaced geometry');
+      for(const lightCamera of [[-100,200,-70],[500,800,400]]){
+        approx(execute(programs[1],uv,camera,lightCamera,range),reference,'shadow entry reuses main-camera geometry');
+      }
+    }
+    for(const {p,blocks}of programs){gl.deleteProgram(p);for(const b of blocks)gl.deleteBuffer(b.buffer);}
+  }
+
+  // Exercise the production shadow fragment and PCF with a plane that cannot
+  // shadow itself. Different sampling positions represent a moving CSM grid.
+  const depthShader=baseEffect.shaders[1];
+  if(!gl.getExtension('EXT_color_buffer_float'))throw Error('Shadow float rendering unavailable');
+  for(const format of [0,1]){
+    const depthPrefix=shaderPrefix(depthShader,{USE_INSTANCING:1,CC_USE_FOG:4,CC_SHADOWMAP_FORMAT:format});
+    const replaceMain=s=>s.replace(/void main\s*\(\s*\)/,'void unusedEntry()');
+    const depthVS=replaceMain(depthShader.glsl3.vert)+`
+      void main(){vec2 uv=a_position.xy;gl_Position=vec4(uv*2.0-1.0,0,1);
+      v_clip_depth=vec2((0.2+uv.x*0.4+uv.y*0.2)*2.0-1.0,1.0);}`;
+    const depthProgram=link(depthPrefix+depthVS,depthPrefix+depthShader.glsl3.frag);
+    const shadowBlocks=[];
+    for(let i=0;i<gl.getProgramParameter(depthProgram,gl.ACTIVE_UNIFORM_BLOCKS);i++){
+      const buffer=gl.createBuffer(),data=new Float32Array(gl.getActiveUniformBlockParameter(depthProgram,i,gl.UNIFORM_BLOCK_DATA_SIZE)/4);
+      const ids=gl.getActiveUniformBlockParameter(depthProgram,i,gl.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES);
+      const offsets=gl.getActiveUniforms(depthProgram,ids,gl.UNIFORM_OFFSET);
+      const whpb=[...ids].findIndex(id=>gl.getActiveUniform(depthProgram,id).name.endsWith('cc_shadowWHPBInfo'));
+      gl.uniformBlockBinding(depthProgram,i,i);gl.bindBufferBase(gl.UNIFORM_BUFFER,i,buffer);
+      shadowBlocks.push({buffer,data,pcf:whpb<0?-1:offsets[whpb]/4+2});
+    }
+    const shadowTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE10);gl.bindTexture(gl.TEXTURE_2D,shadowTexture);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D,0,format?gl.RGBA8:gl.RGBA32F,32,32,0,gl.RGBA,format?gl.UNSIGNED_BYTE:gl.FLOAT,null);
+    const shadowFBO=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,shadowFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,shadowTexture,0);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Shadow float framebuffer unavailable');
+    gl.useProgram(depthProgram);const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,1,0,1,1,0,1]),gl.STATIC_DRAW);
+    const depthPos=gl.getAttribLocation(depthProgram,'a_position');gl.enableVertexAttribArray(depthPos);gl.vertexAttribPointer(depthPos,2,gl.FLOAT,false,0,0);
+    gl.viewport(0,0,32,32);
+    const depths=format?new Uint8Array(32*32*4):new Float32Array(32*32*4);
+    for(const pcf of [0,1,2,3]){
+      for(const {buffer,data,pcf:offset}of shadowBlocks){
+        if(offset>=0)data[offset]=pcf;
+        gl.bindBuffer(gl.UNIFORM_BUFFER,buffer);gl.bufferData(gl.UNIFORM_BUFFER,data,gl.DYNAMIC_DRAW);
+      }
+      gl.drawArrays(gl.TRIANGLES,0,6);gl.readPixels(0,0,32,32,gl.RGBA,format?gl.UNSIGNED_BYTE:gl.FLOAT,depths);
+      const taps=pcf===0?[0]:pcf===1?[0,1]:pcf===2?[-1,0,1]:[-2,-1,0,1,2];
+      for(const uv of [[.41,.37],[.42,.38],[.43,.39],[.47,.44]]){
+        const planeDepth=.2+uv[0]*.4+uv[1]*.2-0.00001;
+        let lit=0,occluded=0;
+        for(const y of taps)for(const x of taps){
+          const tx=Math.floor(uv[0]*32)+x,ty=Math.floor(uv[1]*32)+y;
+          const at=(ty*32+tx)*4;
+          const stored=format?[1,255,65025,16581375].reduce((sum,weight,i)=>sum+depths[at+i]/255/weight,0):depths[at];
+          lit+=stored>=planeDepth?1:0;
+          // A receiver behind this plane must still see a real shadow.
+          occluded+=stored<planeDepth+.15?1:0;
+        }
+        close([lit,occluded],[taps.length**2,taps.length**2],'format '+format+' PCF '+pcf+' suppresses plane acne but preserves occlusion',0);
+      }
+    }
+    gl.disableVertexAttribArray(depthPos);
+    gl.deleteFramebuffer(shadowFBO);gl.deleteTexture(shadowTexture);gl.deleteBuffer(quad);gl.deleteProgram(depthProgram);
+    for(const {buffer}of shadowBlocks)gl.deleteBuffer(buffer);
+  }
+  if(gl.getError()!==gl.NO_ERROR)throw Error('Shadow depth GPU error');
+  result.textContent='PASS: slope shadow depth and occlusion; base/decal/unlit/receive-shadow/CSM variants linked; main and shadow geometry match; '+checks+' GPU checks passed.';
 } catch(e) { result.textContent='FAIL: '+e.stack; }
