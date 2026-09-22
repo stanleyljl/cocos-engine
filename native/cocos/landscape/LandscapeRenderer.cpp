@@ -62,11 +62,12 @@ Material *createLandscapeMaterial(bool wireframe, bool decal = false) {
     defines["USE_INSTANCING"] = true;
     defines["LANDSCAPE_DEBUG_UNLIT"] = false;
     defines["LANDSCAPE_DECAL_MESH"] = decal;
+    // Compile debug edges out of the normal material entirely.
+    defines["LANDSCAPE_WIREFRAME"] = wireframe;
     info.defines = IMaterialInfo::DefinesType{defines};
 
     if (wireframe) {
         RasterizerStateInfo rasterizer;
-        rasterizer.polygonMode = gfx::PolygonMode::LINE;
         rasterizer.cullMode = gfx::CullMode::NONE;
         PassOverrides overrides;
         overrides.rasterizerState = rasterizer;

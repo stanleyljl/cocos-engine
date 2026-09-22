@@ -80,7 +80,8 @@ private:
     EGLSurface _eglCurrentDrawSurface{EGL_NO_SURFACE};
     EGLSurface _eglCurrentReadSurface{EGL_NO_SURFACE};
     EGLContext _eglCurrentContext{EGL_NO_CONTEXT};
-    EGLint _eglCurrentInterval{0};
+    // Unknown until explicitly set on the current draw surface.
+    EGLint _eglCurrentInterval{-1};
 
     GLES2GPUStateCache *_stateCache{nullptr};
     GLES2GPUConstantRegistry *_constantRegistry{nullptr};

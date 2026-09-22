@@ -254,7 +254,7 @@ CCProgram vt-compose-fs %{
     // Match the importer's 00->11 diagonal. Only three integer splat fetches.
     bool lowerTriangle = f.x >= f.y;
     ivec2 third = lowerTriangle ? ivec2(1, 0) : ivec2(0, 1);
-    uvec3 packed = uvec3(texelFetch(splatmap, ivec3(origin, page), 0).r,
+    uvec3 splatSamples = uvec3(texelFetch(splatmap, ivec3(origin, page), 0).r,
       texelFetch(splatmap, ivec3(origin + third, page), 0).r,
       texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
     vec3 spatialWeights = lowerTriangle ? vec3(1.0-f.x, f.x-f.y, f.y)
@@ -263,8 +263,8 @@ CCProgram vt-compose-fs %{
     int minId = 31;
     int maxId = 0;
     for (int i = 0; i < 3; ++i) {
-      ids[i*2] = int(packed[i] & 31u);
-      ids[i*2+1] = int((packed[i] >> 5u) & 31u);
+      ids[i*2] = int(splatSamples[i] & 31u);
+      ids[i*2+1] = int((splatSamples[i] >> 5u) & 31u);
       minId = min(minId, min(ids[i*2], ids[i*2+1]));
       maxId = max(maxId, max(ids[i*2], ids[i*2+1]));
     }
@@ -289,7 +289,7 @@ CCProgram vt-compose-fs %{
       sampleIndices[i] = ids[i] == minId ? 0 : (ids[i] == maxId ? 2 : 1);
     }
     for (int i = 0; i < 3; ++i) {
-      float blend = float(packed[i] >> 10u) / 63.0;
+      float blend = float(splatSamples[i] >> 10u) / 63.0;
       weights[sampleIndices[i*2]] += spatialWeights[i] * (1.0-blend);
       weights[sampleIndices[i*2+1]] += spatialWeights[i] * blend;
     }
@@ -372,7 +372,7 @@ CCProgram vt-compose-fs %{
       for (int i = 0; i < 3; ++i) {
         int bottom = sampleIndices[i*2];
         int top = sampleIndices[i*2+1];
-        float blend = float(packed[i] >> 10u) / 63.0;
+        float blend = float(splatSamples[i] >> 10u) / 63.0;
         if (bottom != top && spatialWeights[i] > 0.0) {
           blend = heightBlend(blend, albedoHeights[bottom].a, albedoHeights[top].a);
         }
