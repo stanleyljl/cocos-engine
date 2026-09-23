@@ -88,7 +88,7 @@ public:
     // The finest ready page still protected by this frame's request plan, or
     // the permanent sector root (composed during pass preparation before draws).
     int findReadyPageOrRoot(VTPageAddress desired, uint32_t rootLevel) const;
-    void collectDirtyPages(ccstd::vector<uint32_t> &slots) const;
+    void collectDirtyPages(ccstd::vector<uint32_t> &slots, uint32_t maxUpdates = config::VT_PAGE_UPDATE_BUDGET) const;
     void markRendered(const ccstd::vector<uint32_t> &slots);
     void invalidate();
     uint64_t contentRevision() const { return _contentRevision; }

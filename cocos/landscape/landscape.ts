@@ -28,7 +28,33 @@ import { Component } from '../scene-graph/component';
 import { Asset, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
-import { Enum } from '../core';
+import { Enum, isValid, Vec3 } from '../core';
+import { Node } from '../scene-graph/node';
+
+/** Synchronous CPU query status. Only Hit makes the output valid. */
+export enum LandscapeQueryStatus {
+    Hit = 0,
+    Miss = 1,
+    NotReady = 2,
+    Error = 3,
+}
+
+/** Reusable world-space result. Surface type is the dominant painted material ID.
+ * Visual cliff overrides, detail normals and decals are not part of this query.
+ */
+export class LandscapeSurfaceResult {
+    public readonly position = new Vec3();
+    public readonly normal = new Vec3(0, 1, 0);
+    public surfaceType = -1;
+    public surfaceWeight = 0;
+    public get height (): number { return this.position.y; }
+}
+
+interface QuerySource {
+    node: Node;
+    radius: number;
+    status: LandscapeQueryStatus;
+}
 
 const ShadowCastingMode = Enum({ OFF: 0, ON: 1 });
 const ShadowReceivingMode = Enum({ OFF: 0, ON: 1 });
@@ -204,6 +230,105 @@ export class Landscape extends Component {
     /** native cc::landscape::Landscape 句柄（仅 JSB 环境有效） */
     private _native: any = null;
 
+    private readonly _querySources = new Map<number, QuerySource>();
+    private readonly _queryOutput = new Float32Array(8);
+    private _nextQuerySource = 1;
+
+    @serializable
+    private _queryCacheCapacity = 64;
+
+    /** Independent CPU tile budget, set before enabling terrain. At 129x129,
+     * 64 tiles hold about 7.1 MiB of height/RGB normals/splat data, plus at most
+     * two in-flight decodes and their temporary memory. No GPU allocation.
+     */
+    @editable
+    @range([1, 4096, 1])
+    get queryCacheCapacity (): number { return this._queryCacheCapacity; }
+    set queryCacheCapacity (value: number) {
+        if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError('Invalid query cache capacity');
+        if (this._native?.isInitialized()) throw new Error('Set queryCacheCapacity before enabling Landscape');
+        this._queryCacheCapacity = value;
+    }
+
+    /** Register a node to preload/pin a square XZ region around its world position.
+     * Follows the node automatically. Inactive nodes stop pinning; destroyed
+     * nodes are removed automatically. Multiple sources share overlapping tiles.
+     * Over-budget regions remain NotReady instead of evicting another source.
+     * Native platforms only; independent of camera LOD and VT readiness.
+     */
+    public addQuerySource (node: Node, preloadRadius = 64): number {
+        if (!isValid(node, true)) throw new Error('Query source requires a valid node');
+        this._validateQueryRadius(preloadRadius);
+        const id = this._nextQuerySource++;
+        this._querySources.set(id, { node, radius: preloadRadius, status: LandscapeQueryStatus.NotReady });
+        return id;
+    }
+
+    public setQuerySourceRadius (id: number, preloadRadius: number): boolean {
+        this._validateQueryRadius(preloadRadius);
+        const source = this._querySources.get(id);
+        if (!source) return false;
+        source.radius = preloadRadius;
+        source.status = LandscapeQueryStatus.NotReady;
+        return true;
+    }
+
+    public removeQuerySource (id: number): void {
+        this._querySources.delete(id);
+        this._native?.removeQuerySource(id);
+    }
+
+    /** Hit means the entire requested region is ready; Error means invalid
+     * input/placement or a failed source decode. Miss means no terrain overlap.
+     */
+    public getQuerySourceStatus (id: number): LandscapeQueryStatus {
+        const source = this._querySources.get(id);
+        return source ? this._syncQuerySource(id, source) : LandscapeQueryStatus.Miss;
+    }
+
+    public isQuerySourceReady (id: number): boolean {
+        return this.getQuerySourceStatus(id) === LandscapeQueryStatus.Hit;
+    }
+
+    /** Sample the highest source resolution at world XZ (Y is ignored).
+     * Reads resident CPU memory only; never starts disk I/O or GPU work.
+     * On non-Hit, output remains unchanged. Normals are decoded/interpolated
+     * source RGB normals. Height uses bilinear interpolation of source samples.
+     * Like terrain selection, supports translation-only landscape placement.
+     */
+    public sampleSurface (worldPosition: Readonly<Vec3>, output: LandscapeSurfaceResult): LandscapeQueryStatus {
+        if (!Number.isFinite(worldPosition.x) || !Number.isFinite(worldPosition.z)) return LandscapeQueryStatus.Error;
+        if (!this._native || !this.enabledInHierarchy) return LandscapeQueryStatus.NotReady;
+        const status = this._native.sampleSurface(worldPosition.x, worldPosition.z, this._queryOutput) as LandscapeQueryStatus;
+        if (status === LandscapeQueryStatus.Hit) {
+            const data = this._queryOutput;
+            output.position.set(data[0], data[1], data[2]);
+            output.normal.set(data[3], data[4], data[5]);
+            output.surfaceType = data[6];
+            output.surfaceWeight = data[7];
+        }
+        return status;
+    }
+
+    private _validateQueryRadius (radius: number): void {
+        if (!Number.isFinite(radius) || radius < 0) throw new RangeError('Query radius must be finite and nonnegative');
+    }
+
+    private _syncQuerySource (id: number, source: QuerySource): LandscapeQueryStatus {
+        if (!isValid(source.node, true)) {
+            this.removeQuerySource(id);
+            return LandscapeQueryStatus.Miss;
+        }
+        if (!this._native || !this.enabledInHierarchy || !source.node.activeInHierarchy) {
+            this._native?.removeQuerySource(id);
+            source.status = LandscapeQueryStatus.NotReady;
+        } else {
+            const position = source.node.worldPosition;
+            source.status = this._native.setQuerySource(id, position.x, position.z, source.radius);
+        }
+        return source.status;
+    }
+
     /** Initial view has reached the configured geometry and VT precision and can render. */
     public get isReady (): boolean {
         return this._native ? this._native.isReady() : false;
@@ -333,6 +458,7 @@ export class Landscape extends Component {
     public onEnable (): void {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
+            this._native.setQueryCacheCapacity(this._queryCacheCapacity);
             this._syncDebugData(true);
             this._native.setGlobalColorMap(this._globalColorMap);
             this._native.setGlobalColorStrength(this._globalColorStrength);
@@ -361,6 +487,7 @@ export class Landscape extends Component {
             return;
         }
         this._syncDebugData();
+        for (const [id, source] of this._querySources) this._syncQuerySource(id, source);
         if (!this._native.isInitialized()) {
             return;
         }
@@ -379,6 +506,7 @@ export class Landscape extends Component {
             this._native.onDisable();
         }
         this._native = null;
+        this._querySources.clear();
     }
 
     /**

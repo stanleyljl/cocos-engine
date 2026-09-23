@@ -198,7 +198,7 @@ int VirtualTexture::acquirePage(const VTPageRequest &request, const VTPageInputs
     return slot;
 }
 
-void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
+void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots, uint32_t maxUpdates) const {
     slots.clear();
     for (uint32_t i = 0; i < _pages.size(); ++i) {
         const auto &p = _pages[i];
@@ -216,7 +216,7 @@ void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots) const {
         [this](uint32_t slot) { return _pages[slot].permanent; }));
     // Roots bootstrap the first frame and invalidation. Fine pages only become
     // sampleable after composition, so deferring them cannot expose empty data.
-    if (slots.size() > roots + config::VT_PAGE_UPDATE_BUDGET) slots.resize(roots + config::VT_PAGE_UPDATE_BUDGET);
+    if (slots.size() > roots + maxUpdates) slots.resize(roots + maxUpdates);
 }
 void VirtualTexture::markRendered(const ccstd::vector<uint32_t> &slots) {
     for (uint32_t slot : slots) _pages[slot].dirty = false;

@@ -40,7 +40,8 @@ using namespace cc;
 %ignore cc::landscape::LandscapeAsset::takeReadyTile;
 %ignore cc::landscape::LandscapeAsset::takeFailedTile;
 %ignore cc::landscape::LandscapeAsset::loadTile;
-%ignore cc::landscape::LandscapeAsset::loadRootTile;
+%ignore cc::landscape::LandscapeAsset::loadTileSet;
+%ignore cc::landscape::LandscapeAsset::requestQueryTile;
 
 // Imported for type resolution only (no bindings generated).
 %import "base/Macros.h"

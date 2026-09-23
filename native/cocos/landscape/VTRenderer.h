@@ -51,7 +51,7 @@ public:
     bool valid() const;
     bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
-    void render();
+    void render(uint32_t maxUpdates = config::VT_PAGE_UPDATE_BUDGET);
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);

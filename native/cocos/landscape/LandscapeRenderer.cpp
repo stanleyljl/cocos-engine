@@ -460,8 +460,9 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patc
 }
 
 void LandscapeRenderer::preparePasses(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
-    if (!valid()) return;
+    if (!valid() || _initializationFailed) return;
     sync(geometryNodes, surfaceNodes);
+    if (_initializationFailed) return;
     // All pass requests are now protected. Compose once before any pass consumes VT.
     _vtRenderer->render();
     if (!_ready) return;
@@ -535,14 +536,24 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
     }
 
     buildFramePlan(geometryNodes, surfaceNodes);
-    syncPageSources(geometryNodes, surfaceNodes, uploadsPolled);
+    if (!syncPageSources(geometryNodes, surfaceNodes, uploadsPolled)) {
+        _initializationFailed = true;
+        CC_LOG_ERROR("[Landscape] Initial synchronous warmup failed while loading source tiles. Fix assets/capacity and re-enable Landscape to retry.");
+        return;
+    }
     if (!_ready) {
-        // Keep streaming/composition active, but publish no terrain or shadow
-        // casters until the whole current plan has its final source precision.
-        if (!initialDataReady()) return;
+        // Submit all initial VT pages and mips BEFORE models bind the atlas.
+        // The same graphics queue orders these writes before the first scene
+        // draws, so no extra present, GPU idle wait, or later frame is needed.
+        _vtRenderer->render(config::VT_PAGE_COUNT);
+        if (!initialDataReady()) {
+            _initializationFailed = true;
+            CC_LOG_ERROR("[Landscape] Initial synchronous warmup failed: cliff sources or VT pages are unavailable. Check atlas capacity and re-enable Landscape to retry.");
+            return;
+        }
         _ready = true;
         _vtRenderer->setFrozen(_debugData.freezeLod);
-        CC_LOG_INFO("[Landscape] Initial view ready: %zu geometry nodes, %zu composed VT pages",
+        CC_LOG_INFO("[Landscape] Initial view ready (synchronous): %zu geometry nodes, %zu composed VT pages",
                     geometryNodes.size(), _requestPlan.requests().size());
     }
     syncTerrainModels();
@@ -576,33 +587,48 @@ void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNo
     }
 }
 
-void LandscapeRenderer::syncPageSources(const ccstd::vector<QuadNode> &geometryNodes,
+bool LandscapeRenderer::syncPageSources(const ccstd::vector<QuadNode> &geometryNodes,
                                         const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled) {
     // 1. Protect the complete material working set before allocating VT slots.
     _vtRenderer->texture().beginFrame(_requestPlan.dynamicKeys());
 
     // 2. Request and protect ALL source consumers before uploads may recycle
     //    array layers: cliff references, geometry, and material composition.
-    _sourceResolver->beginFrame();
+    _sourceResolver->beginFrame(!_ready);
     _vtRenderer->syncCliffSources(*_tilePages);
     _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
     prepareVTPageUpdates();
 
-    // 3. Publish asynchronous source loads once per frame. The stationary-camera
-    //    path may already have polled them using the previous frame's protection.
-    const auto beforeUpload = _tilePages->updateRevision();
-    if (!uploadsPolled) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
-    if (_tilePages->updateRevision() != beforeUpload) {
-        _vtRenderer->syncCliffSources(*_tilePages);
-        _sourceResolver->invalidate();
-        // Newly resident geometry can introduce its real parent-normal source.
-        _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
-        refreshVTPageInputs();
+    // 3. Initial preparation stays inside the first scene frame. Re-resolve
+    // after residency changes: exact geometry can introduce its normal parent,
+    // and finer VT normal neighborhoods can introduce additional source tiles.
+    if (!_ready) {
+        for (uint32_t round = 0; round <= config::MAX_LOD_LEVELS; ++round) {
+            if (!_tilePages->loadRequestedTiles()) return false;
+            _vtRenderer->syncCliffSources(*_tilePages);
+            _sourceResolver->invalidate();
+            _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
+            refreshVTPageInputs();
+            if (_tilePages->requestsReady()) break;
+        }
+        // Bound the dependency expansion even if future source rules change.
+        if (!_tilePages->requestsReady()) return false;
+    } else {
+        // Normal streaming keeps the per-frame upload budget and worker I/O.
+        const auto beforeUpload = _tilePages->updateRevision();
+        if (!uploadsPolled) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+        if (_tilePages->updateRevision() != beforeUpload) {
+            _vtRenderer->syncCliffSources(*_tilePages);
+            _sourceResolver->invalidate();
+            _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
+            refreshVTPageInputs();
+        }
     }
 
     // 4. Allocate/update material pages with the final resident source layers.
     //    Dirty pages are queued here; preparePasses composes them after sync.
     queueVTPageUpdates();
+    return true;
 }
 
 void LandscapeRenderer::prepareVTPageUpdates() {
@@ -870,6 +896,7 @@ bool LandscapeRenderer::valid() const {
 
 void LandscapeRenderer::destroy() {
     _ready = false;
+    _initializationFailed = false;
     _syncCache.invalidate();
     _sourceResolver.reset();
     _requestPlan = VTRequestPlan{};

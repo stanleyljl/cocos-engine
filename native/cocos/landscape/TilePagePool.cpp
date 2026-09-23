@@ -111,7 +111,7 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
             LandscapeAsset::TileData tile;
-            if (!_asset->loadRootTile(x, z, tile)) {
+            if (!_asset->loadTileSet(data.maxLevel, x, z, tile)) {
                 CC_LOG_WARNING("[Landscape] cannot initialize height/splat/normal root L%u (%u,%u)", data.maxLevel, x, z);
                 destroy();
                 return false;
@@ -148,7 +148,8 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
     _device->copyBuffersToTexture(buffers, array, &region, 1);
 }
 
-void TilePagePool::beginFrame() {
+void TilePagePool::beginFrame(bool synchronous) {
+    _synchronous = synchronous;
     _inUse.clear();
     _missingRequests.clear();
 }
@@ -164,10 +165,10 @@ int TilePagePool::query(uint32_t level, uint32_t x, uint32_t z) {
         touchLRU(key);
         return static_cast<int>(it->second);
     }
-    // Not resident yet: ask the asset to decode it asynchronously. Return -1
-    // so the caller can fall back to a resident ancestor tile.
+    // Warmup collects the entire protected set before synchronous loading.
+    // Normal streaming queues a worker and temporarily uses a resident ancestor.
     _missingRequests.insert(key);
-    if (_asset != nullptr) {
+    if (_asset != nullptr && !_synchronous) {
         _asset->requestTile(level, x, z);
     }
     return -1;
@@ -192,6 +193,34 @@ bool TilePagePool::requestsReady() const {
     return std::all_of(_missingRequests.begin(), _missingRequests.end(), [this](uint64_t key) {
         return _resident.count(key) != 0;
     });
+}
+
+bool TilePagePool::loadRequestedTiles() {
+    if (!valid() || !_asset || !_synchronous) return false;
+    const size_t missing = static_cast<size_t>(std::count_if(_missingRequests.begin(), _missingRequests.end(),
+        [this](uint64_t key) { return !_resident.count(key); }));
+    const size_t available = _freeLayers.size() + static_cast<size_t>(std::count_if(_lru.begin(), _lru.end(),
+        [this](uint64_t key) { return !_inUse.count(key); }));
+    if (missing > available) {
+        CC_LOG_ERROR("[Landscape] Initial warmup needs %zu source layers, only %zu available (%u total).", missing, available, _layerCount);
+        return false;
+    }
+    LandscapeAsset::TileData tile;
+    for (const auto key : _missingRequests) {
+        if (_resident.count(key)) continue;
+        if (!_asset->loadTileSet(static_cast<uint32_t>(key >> NODE_KEY_LEVEL_SHIFT),
+                static_cast<uint32_t>((key >> NODE_KEY_COORD_BITS) & NODE_KEY_COORD_MASK),
+                static_cast<uint32_t>(key & NODE_KEY_COORD_MASK), tile)) return false;
+        const int layer = acquireLayer();
+        if (layer < 0) return false;
+        uploadLayer(_heightArray, static_cast<uint32_t>(layer), tile.height.data());
+        uploadLayer(_splatArray, static_cast<uint32_t>(layer), tile.splat.data());
+        uploadLayer(_normalArray, static_cast<uint32_t>(layer), tile.normal.data());
+        _resident[key] = static_cast<uint32_t>(layer);
+        touchLRU(key);
+        ++_updateRevision;
+    }
+    return true;
 }
 
 void TilePagePool::update(uint32_t maxUploads) {
@@ -271,6 +300,7 @@ int TilePagePool::acquireLayer() {
 }
 
 void TilePagePool::destroy() {
+    _synchronous = false;
     _missingRequests.clear();
     _resident.clear();
     _lru.clear();
@@ -290,8 +320,8 @@ void TilePagePool::destroy() {
 TilePageResolver::TilePageResolver(TilePagePool &pool, const LandscapeData &data)
 : _pool(pool), _data(data), _vtRootLevel(vtRootLevel(data.sectorSize)) {}
 
-void TilePageResolver::beginFrame() {
-    _pool.beginFrame();
+void TilePageResolver::beginFrame(bool synchronous) {
+    _pool.beginFrame(synchronous);
     invalidate();
 }
 

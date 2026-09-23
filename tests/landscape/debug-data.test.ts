@@ -46,7 +46,7 @@ describe('Landscape debug data', () => {
         const native = {
             setDebugData: jest.fn(data => submitted.push({ ...data })),
             setAssetPath: jest.fn(), setGlobalColorStrength: jest.fn(), setGlobalColorMap: jest.fn(),
-            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(),
+            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setQueryCacheCapacity: jest.fn(),
             onEnable: jest.fn(), onDisable: jest.fn(),
             isInitialized: jest.fn(() => true), update: jest.fn(),
             drawDebugBounds: jest.fn(),

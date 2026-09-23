@@ -63,8 +63,9 @@ public:
     inline bool valid() const { return _heightArray != nullptr && _splatArray != nullptr && _normalArray != nullptr; }
 
     // Marks the start of a frame: clears the "in use this frame" set that
-    // protects visible tiles from LRU eviction.
-    void beginFrame();
+    // protects visible tiles from LRU eviction. Synchronous warmup collects
+    // misses without queuing workers, then loads them via loadRequestedTiles().
+    void beginFrame(bool synchronous = false);
     // Non-blocking: returns the tile's resident layer (touched for LRU) or -1
     // while it streams in. Requests a decode from the LandscapeAsset on first
     // miss. Callers use a resident ancestor tile as the fallback for a -1.
@@ -76,6 +77,9 @@ public:
     // from the LandscapeAsset and uploads them to the GPU (LRU-evicting when
     // full).
     void update(uint32_t maxUploads);
+    // Initial warmup only: decode/upload missing protected tiles one at a time.
+    // Fails immediately on insufficient capacity or a source decode error.
+    bool loadRequestedTiles();
     // Exact source requests must be resident; ancestor fallbacks do not count.
     bool requestsReady() const;
     // Changes when async work completes (including failed/dropped loads).
@@ -110,6 +114,7 @@ private:
     ccstd::unordered_set<uint64_t> _inUse;   // requested this frame (evict-protected)
     ccstd::unordered_set<uint64_t> _missingRequests; // exact query() misses, excluding resident fallbacks
     bool _warnedFull{false};
+    bool _synchronous{false};
     uint64_t _updateRevision{0};
 };
 
@@ -128,7 +133,7 @@ public:
 
     // Reset source protection and the lookup cache together, before resolving
     // any geometry or VT inputs. Cached lookups do not re-protect their tiles.
-    void beginFrame();
+    void beginFrame(bool synchronous = false);
     void protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
     // Clear after uploads change residency, so finer sources can be discovered.
     void invalidate() { _cache.clear(); }

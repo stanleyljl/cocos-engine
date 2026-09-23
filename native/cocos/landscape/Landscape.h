@@ -34,6 +34,7 @@
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
 #include "math/Vec3.h"
+#include "core/TypedArray.h"
 
 namespace cc {
 
@@ -57,6 +58,7 @@ namespace landscape {
 class LandscapeAsset;
 class LandscapeRenderer;
 class Quadtree;
+class LandscapeQuery;
 
 struct LandscapeDebugData {
     bool wireframe{false};
@@ -100,12 +102,21 @@ public:
     bool isReady() const;
     RenderTexture *getVTAtlas() const;
 
+    // World-space, translation-only placement, matching landscape selection.
+    // Query result buffer: position XYZ, normal XYZ, material ID, weight.
+    uint32_t sampleSurface(float worldX, float worldZ, Float32Array output);
+    uint32_t setQuerySource(uint32_t id, float worldX, float worldZ, float radius);
+    void removeQuerySource(uint32_t id);
+    uint32_t getQuerySourceStatus(uint32_t id) const;
+    void setQueryCacheCapacity(uint32_t capacity);
+
 private:
     void initializeRenderer();
     scene::Camera *pickMainCamera() const;
     void selectPass(const geometry::Frustum &frustum, bool shadow);
     void removeCSMDuplicates(uint32_t cascadeCount);
     bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes);
+    bool queryTransformValid() const;
 
     struct PassSelection {
         const geometry::Frustum *frustum{nullptr};
@@ -132,6 +143,8 @@ private:
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
+    std::unique_ptr<LandscapeQuery> _query;
+    uint32_t _queryCacheCapacity{64};
     ccstd::vector<QuadNode> _debugNodes;
     bool _lastVisibilityDistanceWarning{false};
 };

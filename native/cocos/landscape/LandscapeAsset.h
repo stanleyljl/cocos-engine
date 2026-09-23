@@ -37,6 +37,7 @@
 #include "base/std/container/vector.h"
 #include "base/RefCounted.h"
 #include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeQuery.h"
 
 namespace cc {
 namespace gfx {
@@ -91,14 +92,17 @@ public:
     ~LandscapeAsset() override;
 
     bool load(const ccstd::string &dataDir);
-    // Synchronously loads sector root height/splat/normal tiles before rendering.
-    bool loadRootTile(uint32_t x, uint32_t z, TileData &tile) const;
+    // Main-thread synchronous decode for roots and the initial view warmup.
+    bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const;
     // Call on the main thread: resolves absolute file paths before scheduling
     // background I/O, bypassing FileUtils' unsynchronized relative-path cache.
     // Only complete height/splat/normal sets are available through takeReadyTile().
     bool requestTile(uint32_t level, uint32_t x, uint32_t z);
     bool takeReadyTile(TileData &tile);
     bool takeFailedTile(uint64_t &key);
+    // Independent CPU query decode. Paths are resolved on the calling/main
+    // thread; completion receives source RGB normals and never uploads to GPU.
+    void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                         float &minY, float &maxY) const;
     float getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const;

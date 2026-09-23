@@ -458,7 +458,7 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
         CC_LOG_WARNING("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
                        heightPath.c_str(), splatPath.c_str(), normalPath.c_str());
     } else {
-        // Disk PNGs retain RGB XYZ. Compact to RG XZ on the decoding worker,
+        // Disk PNGs retain RGB XYZ. Compact to RG XZ during decoding,
         // before upload; height-field normals always lie in the +Y hemisphere.
         // Forward compaction is safe because each destination precedes the next
         // unread RGB pixel. No extra allocation or per-frame conversion needed.
@@ -478,12 +478,14 @@ ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) cons
     return it == _files.end() ? ccstd::string{} : it->second;
 }
 
-bool LandscapeAsset::loadRootTile(uint32_t x, uint32_t z, TileData &tile) const {
-    if (!valid() || x >= _data.sectorsX || z >= _data.sectorsZ) {
+bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const {
+    const uint32_t side = computeNodesPerSide(_data.maxLevel, level);
+    if (!valid() || level < _data.minTileLevel || side == 0 ||
+        x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         return false;
     }
-    tile.key = makeNodeKey(_data.maxLevel, x, z);
-    const ccstd::string directory = "nodes/L" + std::to_string(_data.maxLevel) + "/";
+    tile.key = makeNodeKey(level, x, z);
+    const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
     return decodeTileSet(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
                           resolveFile(directory + "n_" + suffix), _data.tileResolution, tile);
@@ -540,6 +542,38 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
         },
         LegacyThreadPool::TaskType::IO);
     return true;
+}
+
+void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
+    const uint32_t side = computeNodesPerSide(_data.maxLevel, _data.minTileLevel);
+    if (!valid() || x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
+        completion({}, false);
+        return;
+    }
+    auto *files = FileUtils::getInstance();
+    const ccstd::string directory = "nodes/L" + std::to_string(_data.minTileLevel) + "/";
+    const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
+    const auto height = files->fullPathForFilename(resolveFile(directory + "h_" + suffix));
+    const auto normal = files->fullPathForFilename(resolveFile(directory + "n_" + suffix));
+    const auto splat = files->fullPathForFilename(resolveFile(directory + "s_" + suffix));
+    if (height.empty() || normal.empty() || splat.empty() || !files->isAbsolutePath(height) ||
+        !files->isAbsolutePath(normal) || !files->isAbsolutePath(splat)) {
+        completion({}, false);
+        return;
+    }
+    const auto resolution = _data.tileResolution;
+    if (!_async) _async = std::make_shared<AsyncState>();
+    const auto lifetime = _async;
+    LegacyThreadPool::getDefaultThreadPool()->pushTask(
+        [height, normal, splat, resolution, lifetime, completion = std::move(completion)](int) {
+            if (lifetime && lifetime->cancelled.load()) return;
+            LandscapeQueryTile tile;
+            const bool ok = loadTile(height, gfx::Format::RG8, resolution, tile.height) &&
+                loadTile(normal, gfx::Format::RGB8, resolution, tile.normal) &&
+                loadTile(splat, gfx::Format::R16UI, resolution, tile.splat);
+            if (lifetime && lifetime->cancelled.load()) return;
+            completion(std::move(tile), ok);
+        }, LegacyThreadPool::TaskType::IO);
 }
 
 bool LandscapeAsset::takeReadyTile(TileData &tile) {

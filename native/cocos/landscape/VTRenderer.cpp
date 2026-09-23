@@ -420,12 +420,12 @@ bool VTRenderer::valid() const {
             [](const MipPass &pass) { return pass.pipelineState != nullptr; });
 }
 
-void VTRenderer::render() {
+void VTRenderer::render(uint32_t maxUpdates) {
     if (_debugData.freezeLod || !valid()) return;
     // The residency layer budgets fine updates and always includes dirty roots.
     // Fine pages become eligible for selection after this submission; roots
     // also bootstrap the first frame before any Base Pass can sample them.
-    _texture.collectDirtyPages(_dirtySlots);
+    _texture.collectDirtyPages(_dirtySlots, maxUpdates);
     if (_dirtySlots.empty()) return;
     buildPageBatch();
     uploadSourceTables();

@@ -39,6 +39,7 @@
 #include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeRenderer.h"
 #include "landscape/Quadtree.h"
+#include "landscape/LandscapeQuery.h"
 #include "math/Mat4.h"
 #include "math/Vec3.h"
 #include "renderer/pipeline/GeometryRenderer.h"
@@ -140,6 +141,7 @@ void Landscape::onDisable() {
     _geometryNodes.clear();
     _renderer = nullptr;
     _quadtree = nullptr;
+    _query = nullptr;
     _asset = nullptr;
     _debugNodes.clear();
     _lastVisibilityDistanceWarning = false;
@@ -148,6 +150,7 @@ void Landscape::onDisable() {
 }
 
 void Landscape::update() {
+    if (_query) _query->update(); // No camera or render-readiness dependency.
     if (!_node || !_renderer || !_quadtree || !_renderer->valid()) return;
     if (_debugData.freezeLod && _renderer->isReady()) return;
     auto *camera = pickMainCamera();
@@ -165,6 +168,64 @@ void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
     pass.nodes.clear();
     pass.models.clear();
     _visibilityDistanceWarning |= selectNodes(frustum, pass.nodes);
+}
+
+bool Landscape::queryTransformValid() const {
+    if (!_node) return false;
+    const auto &m = _node->getWorldMatrix();
+    for (uint32_t i = 0; i < 12; ++i) {
+        const float expected = (i == 0 || i == 5 || i == 10) ? 1.0F : 0.0F;
+        if (!std::isfinite(m.m[i]) || std::abs(m.m[i] - expected) > 1e-5F) return false;
+    }
+    return std::isfinite(m.m[12]) && std::isfinite(m.m[13]) && std::isfinite(m.m[14]);
+}
+
+void Landscape::setQueryCacheCapacity(uint32_t capacity) {
+    if (!_query && capacity > 0 && capacity <= 4096) _queryCacheCapacity = capacity;
+}
+
+uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
+    if (!_asset || !_node) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    if (!queryTransformValid()) {
+        removeQuerySource(id);
+        return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    }
+    if (!_query) {
+        _query = std::make_unique<LandscapeQuery>(_asset->data(),
+            [this](uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
+                _asset->requestQueryTile(x, z, std::move(completion));
+            }, _queryCacheCapacity);
+    }
+    const auto &origin = _node->getWorldPosition();
+    return static_cast<uint32_t>(_query->setSource(id, worldX - origin.x, worldZ - origin.z, radius));
+}
+
+void Landscape::removeQuerySource(uint32_t id) {
+    if (_query) _query->removeSource(id);
+}
+
+uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
+    return static_cast<uint32_t>(_query ? _query->sourceStatus(id) : LandscapeQueryStatus::NOT_READY);
+}
+
+uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array output) {
+    if (output.length() < 8 || !std::isfinite(worldX) || !std::isfinite(worldZ))
+        return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    if (!_asset || !_node) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    if (!queryTransformValid()) return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    const auto &origin = _node->getWorldPosition();
+    const auto &data = _asset->data();
+    const float x = worldX - origin.x, z = worldZ - origin.z;
+    if (std::abs(x) > data.worldWidth() * 0.5F || std::abs(z) > data.worldDepth() * 0.5F)
+        return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
+    if (!_query) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    const auto result = _query->sample(x, z);
+    if (result.status == LandscapeQueryStatus::HIT) {
+        output[0] = worldX; output[1] = result.position.y + origin.y; output[2] = worldZ;
+        output[3] = result.normal.x; output[4] = result.normal.y; output[5] = result.normal.z;
+        output[6] = static_cast<float>(result.surfaceType); output[7] = result.surfaceWeight;
+    }
+    return static_cast<uint32_t>(result.status);
 }
 
 bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes) {

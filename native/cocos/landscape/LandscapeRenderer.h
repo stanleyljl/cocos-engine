@@ -133,7 +133,7 @@ private:
     };
     // Frame stages: selection -> residency/source publication -> models -> decals.
     void buildFramePlan(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
-    void syncPageSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled);
+    bool syncPageSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled);
     void prepareVTPageUpdates();
     void refreshVTPageInputs();
     void queueVTPageUpdates();
@@ -202,6 +202,7 @@ private:
     bool _castShadow{true};
     bool _receiveShadow{true};
     bool _ready{false};
+    bool _initializationFailed{false};
 };
 
 } // namespace landscape
