@@ -270,6 +270,8 @@ export enum Format {
     ASTC_SRGBA_12X10,
     ASTC_SRGBA_12X12,
 
+    R16_UNORM,
+
     // Total count
     COUNT,
 }
@@ -2245,6 +2247,7 @@ export const FormatInfos = Object.freeze([
     createFormatInfo_ASTC_SRGBA('10x10'),
     createFormatInfo_ASTC_SRGBA('12x10'),
     createFormatInfo_ASTC_SRGBA('12x12'),
+    createFormatInfo('R16_UNORM', 2, 1, FormatType.UNORM),
 ]);
 
 export const DESCRIPTOR_BUFFER_TYPE = DescriptorType.UNIFORM_BUFFER | DescriptorType.DYNAMIC_UNIFORM_BUFFER

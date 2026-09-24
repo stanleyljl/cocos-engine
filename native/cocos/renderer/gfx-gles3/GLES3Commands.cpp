@@ -68,6 +68,7 @@ GLenum mapGLInternalFormat(Format format) {
         case Format::R16I: return GL_R16I;
         case Format::R16UI: return GL_R16UI;
         case Format::R16F: return GL_R16F;
+        case Format::R16_UNORM: return GL_R16_EXT;
         case Format::RG16I: return GL_RG16I;
         case Format::RG16UI: return GL_RG16UI;
         case Format::RG16F: return GL_RG16F;
@@ -174,6 +175,7 @@ GLenum mapGLFormat(Format format) {
         case Format::R8:
         case Format::R8SN:
         case Format::R16F:
+        case Format::R16_UNORM:
         case Format::R32F: return GL_RED;
         case Format::RG8:
         case Format::RG8SN:
@@ -369,6 +371,7 @@ GLenum formatToGLType(Format format) {
         case Format::R8UI: return GL_UNSIGNED_BYTE;
         case Format::R8I: return GL_BYTE;
         case Format::R16F: return GL_HALF_FLOAT;
+        case Format::R16_UNORM:
         case Format::R16UI: return GL_UNSIGNED_SHORT;
         case Format::R16I: return GL_SHORT;
         case Format::R32F: return GL_FLOAT;

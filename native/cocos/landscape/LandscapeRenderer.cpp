@@ -54,7 +54,7 @@ namespace cc {
 namespace landscape {
 
 namespace {
-Material *createLandscapeMaterial(bool wireframe, bool decal = false) {
+Material *createLandscapeMaterial(bool wireframe, bool decal, bool heightUnorm) {
     auto *material = ccnew Material();
     IMaterialInfo info;
     info.effectName = ccstd::string{"builtin-landscape"};
@@ -62,6 +62,7 @@ Material *createLandscapeMaterial(bool wireframe, bool decal = false) {
     defines["USE_INSTANCING"] = true;
     defines["LANDSCAPE_DEBUG_UNLIT"] = false;
     defines["LANDSCAPE_DECAL_MESH"] = decal;
+    defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
     // Compile debug edges out of the normal material entirely.
     defines["LANDSCAPE_WIREFRAME"] = wireframe;
     info.defines = IMaterialInfo::DefinesType{defines};
@@ -97,10 +98,11 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     _node = node;
     _scene = scene;
     for (uint32_t i = 0; i < _meshes.size(); ++i) _meshes[i] = GridMesh::create(device, 1U << i);
-    _materialSolid = createLandscapeMaterial(false);
-    _materialWire = createLandscapeMaterial(true);
-    _decalSolid = createLandscapeMaterial(false, true);
-    _decalWire = createLandscapeMaterial(true, true);
+    const bool heightUnorm = TilePagePool::supportsHeightUnorm(device);
+    _materialSolid = createLandscapeMaterial(false, false, heightUnorm);
+    _materialWire = createLandscapeMaterial(true, false, heightUnorm);
+    _decalSolid = createLandscapeMaterial(false, true, heightUnorm);
+    _decalWire = createLandscapeMaterial(true, true, heightUnorm);
     _decalMesh = GridMesh::create(device, 16);
     if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
         _decalMesh == nullptr ||

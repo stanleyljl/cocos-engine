@@ -187,6 +187,7 @@ CCProgram vt-compose-vs %{
 }%
 
 CCProgram vt-compose-fs %{
+  #pragma define-meta LANDSCAPE_HEIGHT_UNORM
   precision highp float;
   precision highp int;
   #include <vt-compose-uniforms>
@@ -307,9 +308,13 @@ CCProgram vt-compose-fs %{
           ivec2(0), textureSize(cliffSourceMap, 0) - ivec2(1));
       vec4 source = texelFetch(cliffSourceMap, cell, 0);
       // Unlike geometry/normal LOD sources, this reference never changes with
-      // camera distance. RG8 interpolation preserves the complete uint16 height.
+      // camera distance. Decode the format selected by TilePagePool.
       vec2 h = textureLod(terrainHeightMap, vec3(sourceUV(v_localXZ, source), source.w), 0.0).rg;
+      #if LANDSCAPE_HEIGHT_UNORM
+      position.y = h.r * cliffParams.y + cliffParams.z;
+      #else
       position.y = dot(h, vec2(256.0, 1.0)) / 257.0 * cliffParams.y + cliffParams.z;
+      #endif
       referenceNormal = sourceNormal(v_localXZ, source);
       if (sourceParams.y < 0.5) shadingNormal = referenceNormal;
       float cliff = 1.0 - smoothstep(0.55, 0.8, referenceNormal.y);

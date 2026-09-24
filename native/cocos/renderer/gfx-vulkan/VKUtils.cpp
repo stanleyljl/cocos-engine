@@ -64,6 +64,7 @@ VkFormat mapVkFormat(Format format, const CCVKGPUDevice *gpuDevice) {
         case Format::R16I: return VK_FORMAT_R16_SINT;
         case Format::R16UI: return VK_FORMAT_R16_UINT;
         case Format::R16F: return VK_FORMAT_R16_SFLOAT;
+        case Format::R16_UNORM: return VK_FORMAT_R16_UNORM;
         case Format::RG16I: return VK_FORMAT_R16G16_SINT;
         case Format::RG16UI: return VK_FORMAT_R16G16_UINT;
         case Format::RG16F: return VK_FORMAT_R16G16_SFLOAT;

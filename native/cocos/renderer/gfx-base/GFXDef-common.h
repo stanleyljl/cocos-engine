@@ -334,6 +334,8 @@ enum class Format : uint32_t {
     ASTC_SRGBA_12X10,
     ASTC_SRGBA_12X12,
 
+    R16_UNORM,
+
     // Total count
     COUNT,
 };

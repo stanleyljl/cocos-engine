@@ -105,6 +105,7 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     _material = ccnew Material();
     IMaterialInfo info;
     info.effectName = ccstd::string{"builtin-landscape-vt-compose"};
+    info.defines = IMaterialInfo::DefinesType{MacroRecord{{"LANDSCAPE_HEIGHT_UNORM", tiles.heightIsUnorm()}}};
     _material->initialize(info);
     if (!_mesh || !_material->getPasses() || _material->getPasses()->empty()) {
         return false;

@@ -441,6 +441,12 @@ void GLES3Device::initFormatFeature() {
     _textureExclusive[toNumber(Format::DEPTH)] = false;
     _textureExclusive[toNumber(Format::DEPTH_STENCIL)] = false;
 
+    if (checkExtension("GL_EXT_texture_norm16")) {
+        _formatFeatures[toNumber(Format::R16_UNORM)] = FormatFeature::SAMPLED_TEXTURE |
+            FormatFeature::LINEAR_FILTER | FormatFeature::RENDER_TARGET;
+        _textureExclusive[toNumber(Format::R16_UNORM)] = false;
+    }
+
     if (checkExtension("render_snorm")) {
         // https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_render_snorm.txt
         // For 16, see https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_texture_norm16.txt

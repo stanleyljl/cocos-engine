@@ -47,7 +47,7 @@ namespace landscape {
 class LandscapeAsset;
 
 /**
- * One LRU cache for height (RG8), splat (R16UI) and normal XZ (RG8) arrays.
+ * One LRU cache for height (R16_UNORM or RG8), splat (R16UI) and normal XZ (RG8) arrays.
  * A node has one request, readiness state and array layer for all textures.
  * All uploads finish before residency is published; eviction replaces all.
  * Sector roots are loaded during init and never enter the eviction LRU.
@@ -59,6 +59,8 @@ public:
     ~TilePagePool();
 
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount);
+    static bool supportsHeightUnorm(gfx::Device *device);
+    bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();
     inline bool valid() const { return _heightArray != nullptr && _splatArray != nullptr && _normalArray != nullptr; }
 
@@ -93,6 +95,7 @@ public:
     inline uint32_t layerCount() const { return _layerCount; }
 
 private:
+    void uploadHeight(uint32_t layer, const uint8_t *data);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     void touchLRU(uint64_t key);
     int acquireLayer(); // free layer, else evict LRU non-in-use; -1 if none
@@ -106,6 +109,8 @@ private:
     gfx::Sampler *_splatSampler{nullptr};
     uint32_t _tileRes{129};
     uint32_t _layerCount{0};
+    bool _heightUnorm{false};
+    ccstd::vector<uint16_t> _heightUpload; // one reusable tile in native byte order
 
     ccstd::unordered_map<uint64_t, uint32_t> _resident; // node key -> layer
     std::list<uint64_t> _lru;                           // front = LRU (oldest), back = MRU

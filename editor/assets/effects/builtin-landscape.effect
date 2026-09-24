@@ -79,6 +79,7 @@ CCProgram landscape-macros %{
   #pragma define-meta LANDSCAPE_DEBUG_UNLIT
   #pragma define-meta LANDSCAPE_DECAL_MESH
   #pragma define-meta LANDSCAPE_WIREFRAME
+  #pragma define-meta LANDSCAPE_HEIGHT_UNORM
   #define CC_SURFACES_USE_TANGENT_SPACE 1
   #include <surfaces/effect-macros/terrain>
 }%
@@ -120,13 +121,39 @@ CCProgram landscape-vertex %{
     #endif
   #endif
 
-  float sampleHeightRegion(vec2 localXZ, vec4 region) {
+  #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_HEIGHT_UNORM
+  highp float fetchHeightSample(ivec2 texel, int layer) {
+    highp vec2 bytes = floor(texelFetch(heightmap, ivec3(texel, layer), 0).rg * 255.0 + 0.5);
+    return dot(bytes, vec2(256.0, 1.0));
+  }
+  #endif
+
+  highp float sampleHeightRegion(highp vec2 localXZ, highp vec4 region) {
   #if __VERSION__ >= 300 && USE_INSTANCING
-    vec2 tileUv = (localXZ - region.xy) / max(region.z, 1e-6);
-    float resolution = max(heightParams.y, 2.0);
-    tileUv = tileUv * ((resolution - 1.0) / resolution) + 0.5 / resolution;
-    vec2 encoded = textureLod(heightmap, vec3(clamp(tileUv, vec2(0.0), vec2(1.0)), region.w), 0.0).rg;
-    return dot(encoded, vec2(256.0, 1.0)) / 257.0 * terrainParams.x + terrainParams.y;
+    #if LANDSCAPE_HEIGHT_UNORM
+    highp vec2 tileUv = clamp((localXZ - region.xy) / max(region.z, 1e-6), vec2(0.0), vec2(1.0));
+    highp float resolution = max(heightParams.y, 2.0);
+    tileUv = (tileUv * (resolution - 1.0) + 0.5) / resolution;
+    return textureLod(heightmap, vec3(tileUv, region.w), 0.0).r * terrainParams.x + terrainParams.y;
+    #else
+    // RG stores the high/low bytes of one uint16 height, not two colors.
+    // Decode before filtering: limited-precision UNORM filtering can amplify
+    // rounding across a byte carry (e.g. 0x7fff -> 0x8000) into height spikes
+    // as CDLOD morph moves vertices between samples on mobile GPUs.
+    highp vec2 tileUv = clamp((localXZ - region.xy) / max(region.z, 1e-6), vec2(0.0), vec2(1.0));
+    int lastTexel = max(int(heightParams.y), 2) - 1;
+    highp vec2 grid = tileUv * float(lastTexel);
+    ivec2 p0 = ivec2(floor(grid));
+    ivec2 p1 = min(p0 + ivec2(1), ivec2(lastTexel));
+    highp vec2 weight = fract(grid);
+    int layer = int(region.w + 0.5);
+    highp float h00 = fetchHeightSample(p0, layer);
+    highp float h10 = fetchHeightSample(ivec2(p1.x, p0.y), layer);
+    highp float h01 = fetchHeightSample(ivec2(p0.x, p1.y), layer);
+    highp float h11 = fetchHeightSample(p1, layer);
+    highp float height = mix(mix(h00, h10, weight.x), mix(h01, h11, weight.x), weight.y);
+    return height / 65535.0 * terrainParams.x + terrainParams.y;
+    #endif
   #else
     return terrainParams.y;
   #endif

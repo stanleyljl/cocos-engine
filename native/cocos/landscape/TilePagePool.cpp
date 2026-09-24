@@ -48,6 +48,11 @@ TilePagePool::~TilePagePool() {
     destroy();
 }
 
+bool TilePagePool::supportsHeightUnorm(gfx::Device *device) {
+    return device != nullptr && hasAllFlags(device->getFormatFeatures(gfx::Format::R16_UNORM),
+        gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
+}
+
 bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount) {
     CC_ASSERT(_device == nullptr);
     if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
@@ -60,7 +65,7 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         return false;
     }
     // Check capabilities before createTexture reaches the validator assertion.
-    // Height and normal arrays both require linearly filtered RG8 sampling.
+    // Normal arrays require linearly filtered RG8 sampling.
     const auto filtered = gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER;
     if (!hasAllFlags(device->getFormatFeatures(gfx::Format::RG8), filtered) ||
         !hasAllFlags(device->getFormatFeatures(gfx::Format::R16UI), gfx::FormatFeature::SAMPLED_TEXTURE)) {
@@ -71,11 +76,13 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _asset = asset;
     _tileRes = data.tileResolution;
     _layerCount = layerCount;
+    _heightUnorm = supportsHeightUnorm(device);
+    if (_heightUnorm) _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
 
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
-    info.format = gfx::Format::RG8;
+    info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
     info.width = _tileRes;
     info.height = _tileRes;
     info.layerCount = _layerCount;
@@ -92,9 +99,8 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     }
 
     gfx::SamplerInfo si;
-    // RG8 unpacking is a linear combination of both normalized channels, so
-    // hardware filtering the packed channels is equivalent to filtering the
-    // reconstructed 16-bit height.
+    // R16_UNORM heights and normals use hardware filtering. RG8 heights are
+    // decoded before interpolation with texelFetch, which ignores the sampler.
     si.minFilter = gfx::Filter::LINEAR;
     si.magFilter = gfx::Filter::LINEAR;
     si.mipFilter = gfx::Filter::NONE;
@@ -117,7 +123,7 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
                 return false;
             }
             const uint32_t layer = z * data.sectorsX + x;
-            uploadLayer(_heightArray, layer, tile.height.data());
+            uploadHeight(layer, tile.height.data());
             uploadLayer(_splatArray, layer, tile.splat.data());
             uploadLayer(_normalArray, layer, tile.normal.data());
             _resident[tile.key] = layer;
@@ -128,9 +134,23 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         _freeLayers.push_back(layer - 1);
     }
 #if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
+        _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
     CC_LOG_INFO("[Landscape] %zu root height/splat/normal pages resident; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
 #endif
     return true;
+}
+
+void TilePagePool::uploadHeight(uint32_t layer, const uint8_t *data) {
+    if (_heightUnorm) {
+        // Source PNG bytes remain high/low for CPU queries and physics. Only
+        // the GPU upload needs native uint16 values; no second GPU array exists.
+        for (size_t i = 0; i < _heightUpload.size(); ++i) {
+            _heightUpload[i] = static_cast<uint16_t>((static_cast<uint16_t>(data[2 * i]) << 8U) | data[2 * i + 1]);
+        }
+        data = reinterpret_cast<const uint8_t *>(_heightUpload.data());
+    }
+    uploadLayer(_heightArray, layer, data);
 }
 
 void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
@@ -213,7 +233,7 @@ bool TilePagePool::loadRequestedTiles() {
                 static_cast<uint32_t>(key & NODE_KEY_COORD_MASK), tile)) return false;
         const int layer = acquireLayer();
         if (layer < 0) return false;
-        uploadLayer(_heightArray, static_cast<uint32_t>(layer), tile.height.data());
+        uploadHeight(static_cast<uint32_t>(layer), tile.height.data());
         uploadLayer(_splatArray, static_cast<uint32_t>(layer), tile.splat.data());
         uploadLayer(_normalArray, static_cast<uint32_t>(layer), tile.normal.data());
         _resident[key] = static_cast<uint32_t>(layer);
@@ -252,7 +272,7 @@ void TilePagePool::update(uint32_t maxUploads) {
             }
             continue;
         }
-        uploadLayer(_heightArray, static_cast<uint32_t>(layer), rt.height.data());
+        uploadHeight(static_cast<uint32_t>(layer), rt.height.data());
         uploadLayer(_splatArray, static_cast<uint32_t>(layer), rt.splat.data());
         uploadLayer(_normalArray, static_cast<uint32_t>(layer), rt.normal.data());
         // Publish only after all three textures occupy the same layer.
@@ -300,6 +320,8 @@ int TilePagePool::acquireLayer() {
 }
 
 void TilePagePool::destroy() {
+    _heightUnorm = false;
+    ccstd::vector<uint16_t>().swap(_heightUpload);
     _synchronous = false;
     _missingRequests.clear();
     _resident.clear();

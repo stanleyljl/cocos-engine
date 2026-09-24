@@ -360,6 +360,8 @@ const FormatInfo GFX_FORMAT_INFOS[] = {
     {"ETC2_SRGB8", 1, 3, FormatType::UNORM, false, false, false, true},
     {"ETC2_RGB8_A1", 1, 4, FormatType::UNORM, true, false, false, true},
     {"ETC2_SRGB8_A1", 1, 4, FormatType::UNORM, true, false, false, true},
+    {"ETC2_RGBA8", 2, 4, FormatType::UNORM, true, false, false, true},
+    {"ETC2_SRGB8_A8", 2, 4, FormatType::UNORM, true, false, false, true},
     {"EAC_R11", 1, 1, FormatType::UNORM, false, false, false, true},
     {"EAC_R11SN", 1, 1, FormatType::SNORM, false, false, false, true},
     {"EAC_RG11", 2, 2, FormatType::UNORM, false, false, false, true},
@@ -401,7 +403,10 @@ const FormatInfo GFX_FORMAT_INFOS[] = {
     {"ASTC_SRGBA_10X10", 1, 4, FormatType::UNORM, true, false, false, true},
     {"ASTC_SRGBA_12X10", 1, 4, FormatType::UNORM, true, false, false, true},
     {"ASTC_SRGBA_12X12", 1, 4, FormatType::UNORM, true, false, false, true},
+    {"R16_UNORM", 2, 1, FormatType::UNORM, false, false, false, false},
 };
+static_assert(sizeof(GFX_FORMAT_INFOS) / sizeof(GFX_FORMAT_INFOS[0]) == static_cast<size_t>(Format::COUNT),
+              "GFX_FORMAT_INFOS must contain one entry per Format, in enum order");
 
 bool isCombinedImageSampler(Type type) { return type >= Type::SAMPLER1D && type <= Type::SAMPLER_CUBE; }
 bool isSampledImage(Type type) { return type >= Type::TEXTURE1D && type <= Type::TEXTURE_CUBE; }
