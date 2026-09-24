@@ -30,6 +30,7 @@ import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
 import { Enum, isValid, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
+import { LandscapePhysics } from './landscape-physics';
 
 /** Synchronous CPU query status. Only Hit makes the output valid. */
 export enum LandscapeQueryStatus {
@@ -229,6 +230,16 @@ export class Landscape extends Component {
 
     /** native cc::landscape::Landscape 句柄（仅 JSB 环境有效） */
     private _native: any = null;
+    private _physics: LandscapePhysics | null = null;
+
+    /** Explicit world-space collision regions, independent of rendering LOD. */
+    public get physics (): LandscapePhysics {
+        if (!this._physics) {
+            this._physics = new LandscapePhysics(this);
+            this._physics._setEnabled(this.enabledInHierarchy);
+        }
+        return this._physics;
+    }
 
     private readonly _querySources = new Map<number, QuerySource>();
     private readonly _queryOutput = new Float32Array(8);
@@ -293,7 +304,7 @@ export class Landscape extends Component {
     /** Sample the highest source resolution at world XZ (Y is ignored).
      * Reads resident CPU memory only; never starts disk I/O or GPU work.
      * On non-Hit, output remains unchanged. Normals are decoded/interpolated
-     * source RGB normals. Height uses bilinear interpolation of source samples.
+     * source RGB normals. Height uses the collision grid's B-C triangle split.
      * Like terrain selection, supports translation-only landscape placement.
      */
     public sampleSurface (worldPosition: Readonly<Vec3>, output: LandscapeSurfaceResult): LandscapeQueryStatus {
@@ -376,9 +387,9 @@ export class Landscape extends Component {
     set landscapeAsset (value: LandscapeAsset | null) {
         if (this._landscapeAsset === value) return;
         const enabled = this.enabledInHierarchy;
-        if (this._native && enabled) this.onDisable();
+        if (enabled) this.onDisable();
         this._landscapeAsset = value;
-        if (this._native && enabled) this.onEnable();
+        if (enabled) this.onEnable();
     }
 
     /**
@@ -456,6 +467,7 @@ export class Landscape extends Component {
     }
 
     public onEnable (): void {
+        this._physics?._setEnabled(true);
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setQueryCacheCapacity(this._queryCacheCapacity);
@@ -471,6 +483,7 @@ export class Landscape extends Component {
     }
 
     public onDisable (): void {
+        this._physics?._setEnabled(false);
         this._appliedDebugData = null;
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         if (this._native) {
@@ -502,6 +515,7 @@ export class Landscape extends Component {
     }
 
     public onDestroy (): void {
+        this._physics?._destroy();
         if (this._native) {
             this._native.onDisable();
         }

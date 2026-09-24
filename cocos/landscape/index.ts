@@ -23,3 +23,5 @@
 */
 
 export * from './landscape';
+export { LandscapePhysics, LandscapePhysicsStatus } from './landscape-physics';
+export type { LandscapePhysicsBounds, LandscapePhysicsOptions } from './landscape-physics';

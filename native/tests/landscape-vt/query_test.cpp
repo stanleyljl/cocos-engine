@@ -141,7 +141,21 @@ void failureAndSplat() {
     require(hit.surfaceType==7,"splat triangle interpolation"); close(hit.surfaceWeight,0.5F,"splat spatial weights");
 }
 
+void triangleHeight() {
+    Loading loading;
+    LandscapeQuery q(data(),loading.loader(),1);
+    q.setSource(1,-3,-1,0); q.update();
+    auto t=tile(0,0);
+    for (const auto &pair : {std::pair<size_t,uint16_t>{0,100}, {1,102}, {3,104}, {4,110}}) {
+        t.height[pair.first*2]=pair.second>>8; t.height[pair.first*2+1]=pair.second&255;
+    }
+    loading.jobs.front().complete(std::move(t),true); loading.jobs.pop_front(); q.update();
+    close(q.sample(-3.5F,-1.5F).position.y,3,"B-C diagonal, not bilinear or A-D");
+    close(q.sample(-3.8F,-1.7F).position.y,1.6F,"first triangle");
+    close(q.sample(-3.2F,-1.3F).position.y,6.4F,"second triangle");
+}
+
 int main() {
-    sampling(); budgetAndSharing(); completionLifetime(); failureAndSplat();
+    sampling(); budgetAndSharing(); completionLifetime(); failureAndSplat(); triangleHeight();
     std::cout << "Landscape CPU query tests passed\n";
 }

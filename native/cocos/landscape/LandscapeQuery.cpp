@@ -179,12 +179,16 @@ LandscapeSurfaceResult LandscapeQuery::sample(float x, float z) {
     const float fx = static_cast<float>(gx - ix), fz = static_cast<float>(gz - iz);
     const size_t a = size_t(iz) * _data.tileResolution + ix;
     const std::array<size_t, 4> at{a, a + 1U, a + _data.tileResolution, a + _data.tileResolution + 1U};
-    // Bilinear height sampling matches the source height texture sampler.
+    // Shading normals retain smooth bilinear interpolation. Physical height
+    // follows GridMesh's B-C diagonal: triangles (A,C,B) and (B,C,D).
     const std::array<float, 4> weights{(1-fx)*(1-fz), fx*(1-fz), (1-fx)*fz, fx*fz};
+    const std::array<float, 4> heightWeights = fx + fz <= 1.0F
+        ? std::array<float, 4>{1-fx-fz, fx, fz, 0}
+        : std::array<float, 4>{0, 1-fz, 1-fx, fx+fz-1};
     double height = 0, nx = 0, ny = 0, nz = 0;
     for (size_t i = 0; i < at.size(); ++i) {
         const auto h = at[i] * 2U, n = at[i] * 3U;
-        height += weights[i] * (uint32_t(entry.tile.height[h]) * 256U + entry.tile.height[h + 1U]);
+        height += heightWeights[i] * (uint32_t(entry.tile.height[h]) * 256U + entry.tile.height[h + 1U]);
         nx += weights[i] * (entry.tile.normal[n] * (2.0 / 255.0) - 1.0);
         ny += weights[i] * (entry.tile.normal[n + 1U] * (2.0 / 255.0) - 1.0);
         nz += weights[i] * (entry.tile.normal[n + 2U] * (2.0 / 255.0) - 1.0);

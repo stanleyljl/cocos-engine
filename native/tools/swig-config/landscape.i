@@ -10,6 +10,7 @@
 #include "bindings/manual/jsb_conversions.h"
 #include "landscape/Landscape.h"
 #include "landscape/LandscapeAsset.h"
+#include "landscape/LandscapeHeightfield.h"
 %}
 
 // Prepended to the generated source (.cpp)
@@ -53,3 +54,4 @@ using namespace cc;
 // Generate bindings for classes in these headers.
 %include "landscape/Landscape.h"
 %include "landscape/LandscapeAsset.h"
+%include "landscape/LandscapeHeightfield.h"
