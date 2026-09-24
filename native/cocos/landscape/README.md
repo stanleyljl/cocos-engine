@@ -87,14 +87,20 @@ pass resource plan is ready. Source readiness checks exact height/splat/normal
 requests (including normal parents and gutters), not resident ancestors. Cliff
 references must be complete, and every budgeted VT page, including roots, must
 have submitted its composition and all mip levels with the final inputs.
-Streaming and composition continue during this preparation; a requested
-freeze takes effect after preparation so it cannot prevent the first reveal.
+Initial preparation synchronously loads the exact source working set, resolves
+new dependencies with a bounded loop, and submits all initial VT pages/mips
+before models bind the atlas. Graphics queue ordering provides write-before-read
+without an extra present or GPU-idle wait. A requested freeze takes effect after
+preparation so it cannot prevent the first reveal. Normal streaming remains
+asynchronous and budgeted after this first preparation.
 `Landscape.isReady` is false until this one-time barrier passes, then remains true
 for normal streaming. Disabling/reloading the terrain resets it. The plan follows
 the current camera during preparation and retains the existing LOD/cache budgets;
 it does not preload the whole world at maximum resolution or use a timed delay.
-Failed source requests or insufficient residency cannot satisfy the barrier;
-the terrain stays hidden and the existing asset/pool diagnostics report the issue.
+Failed source requests or insufficient residency stop initial preparation;
+the terrain stays hidden and diagnostics instruct the caller to fix assets or
+capacity and re-enable Landscape. This render readiness does not imply query
+cache or collision-region readiness.
 
 `LandscapeRenderer::sync()` runs these stages in order:
 
@@ -108,6 +114,9 @@ the terrain stays hidden and the existing asset/pool diagnostics report the issu
    protect cliff references, all geometry heights and color-pass parent normals; resolve composition
    inputs; publish up to the source upload budget; re-resolve if residency changed;
    acquire/update the requested VT pages.
+   Initial preparation instead uses `loadRequestedTiles()` synchronously, repeats
+   dependency resolution within its bound, then submits all initial VT pages and
+   mips and checks `initialDataReady()` before continuing to model publication.
 4. `syncTerrainModels()`: retire invisible patches before reusing/creating models,
    then bind resident source tiles and, only for color coverage, ready VT pages
    (or ancestors).
@@ -166,3 +175,72 @@ shared quadrant masks from shadow-only geometry.
 Native compilation and these tests do not establish visual or frame-time parity.
 Runtime acceptance should compare startup streaming, near-ground travel, distant
 terrain, cache pressure, freeze/unfreeze, normal/cliff toggles and decal fades.
+
+## CPU surface queries
+
+The component exposes `addQuerySource(node, preloadRadius = 64)`,
+`setQuerySourceRadius`, `removeQuerySource`, `getQuerySourceStatus`,
+`isQuerySourceReady` and `sampleSurface(worldPosition, output)`.
+Sources follow nodes and preload/pin square world-XZ regions independently of
+camera LOD. Overlapping sources share tiles; removing one source only releases
+its own protection. Unprotected entries can be evicted. Inactive sources stop
+pinning and destroyed nodes are removed.
+
+`sampleSurface` reads resident CPU memory only, ignoring input Y. It returns
+`Hit`, `Miss`, `NotReady` or `Error`; only `Hit` writes the output position,
+normal, surface type and weight. Height uses the fixed finest source grid and
+B-C triangle interpolation; normals are decoded/interpolated stored geometry
+normals. No readback, GPU resource or synchronous disk I/O is required by a
+sample call. No Landscape raycast API is provided.
+
+Set `queryCacheCapacity` before enabling the component. The default 64 tiles at
+129x129 require about 7.1 MiB for height/RGB normals/splat, excluding at most two
+in-flight decodes and temporary allocations. An over-budget source stays
+`NotReady` rather than evicting another source's protected tiles. This native
+query path supports translation-only placement and excludes displaced decals.
+
+## Regional physics
+
+`landscape.physics` owns a separate `LandscapePhysics` manager. Configure it
+before registering regions; defaults are `maxTiles: 64`,
+`maxConcurrentLoads: 1`, `maxCreationsPerStep: 1`, `group: 1`, `mask: -1`,
+`material: null`. These are count limits, not millisecond guarantees.
+
+| API | Contract |
+| --- | --- |
+| `addRegion(bounds)` / `setRegionBounds(id, bounds)` | World-XZ `{minX, minZ, maxX, maxZ}`, clipped to terrain and rounded outward to complete source tiles |
+| `removeRegion(id)` / `clearRegions()` | Release ownership; overlapping regions keep shared tiles alive |
+| `getRegionStatus(id)` / `isRegionReady(id)` | Report whole-region readiness, including explicit `OutOfCapacity` and `Error` states |
+| `isAreaReady(bounds)` | Check existing collision for a local movement guard; does not load or pin data |
+| `getRegionBounds(id, output)` / `getRegionError(id)` | Inspect actual aligned coverage and diagnostics |
+| `getStats()` | Resident tiles, raw source bytes, in-flight loads and queued tiles; excludes backend allocations |
+| `forEachCollider(visitor)` | Visit submitted colliders for optional debug rendering; creates no geometry or GPU resources itself |
+| `update()` | Automatic simulation calls this before physics; manual simulation must call it before scene synchronization/step, outside contact callbacks |
+
+Physics uses fixed finest-source height data and B-C triangles independently of
+camera LOD, with translation-only placement and no displaced-decal collision.
+Applications control regions and wait for collision readiness before birth or
+teleport. The manager does not move or pause gameplay objects. Loads are
+asynchronous, backend creation is budgeted, and obsolete completions cannot
+restore unloaded data. Query, physics and render caches have separate budgets
+and lifetimes despite reading the same dataset.
+
+Backend adaptations stay in `cocos/landscape/landscape-physics-collider.ts`.
+Bullet reuses the existing heightfield implementation; Cannon coordinate/sample
+mapping and Web PhysX cooking/ownership are Landscape-specific. Native
+`LandscapeHeightfield` owns its resources while reusing existing JSB shape
+registration. The global physics factory, original Terrain interfaces/caches,
+and public backend destruction paths are unchanged.
+
+At 64 tiles of 129x129 Uint16 samples, raw physics source data is about 2.03 MiB;
+backend representations, acceleration structures and cooking temporaries are
+additional. In particular, Cannon JS arrays cannot be counted as Uint16 storage.
+The project F12 overlay creates debug meshes only when enabled and uses shader
+depth offset without global GLES/WebGL polygon-offset changes.
+
+As of 2026-09-24, automated checks cover Bullet, Cannon and Web PhysX, plus JSB
+adapter tests with mocked native SDK calls. Windows Release compilation/linking
+passed with native PhysX disabled; the added C++ source also compiled separately
+with PhysX enabled. Full native PhysX linking/simulation, long-running resource
+reclamation and Release frame-time/memory measurements remain delivery checks.
+Editor terrain preview/editing is deferred to version two.

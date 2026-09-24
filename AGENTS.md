@@ -14,6 +14,7 @@
 
 # Keyboard shortcuts and window title
 
+- Whenever PC controls are added or changed, update the mobile touch controls in the same change. Keep actions, camera modes, labels, debug options and input-reset behavior consistent across both, and verify keyboard/touch parity.
 - Whenever a shortcut is added, removed, renamed, or changes behavior, update the native window title in D:\work\editors\projects\landscape\native\engine\common\Classes\Game.cpp in the same change.
 - Keep the title consistent with the project shortcut definitions in assets/scripts/LandscapeDebug.ts and assets/scripts/FreeCamera.ts.
 - Do not display mouse-operation hints in the title bar.
