@@ -57,6 +57,11 @@ public:
     const ccstd::vector<Vec4> &tilingParams() const { return _tilingParams; }
 
 private:
+    bool initMaterialLayers(gfx::Device *device, const LandscapeAsset &asset);
+    bool initDecalLayers(gfx::Device *device, const LandscapeAsset &asset);
+    bool initWhiteTexture(gfx::Device *device);
+    void initSamplers(gfx::Device *device);
+
     IntrusivePtr<gfx::Texture> _albedoHeight;
     IntrusivePtr<gfx::Texture> _normalRoughnessAO;
     IntrusivePtr<gfx::Texture> _whiteTexture;

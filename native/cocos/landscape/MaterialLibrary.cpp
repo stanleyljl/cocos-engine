@@ -68,41 +68,88 @@ uint8_t encode(float value) {
     return static_cast<uint8_t>(std::round(std::clamp(value, 0.0F, 1.0F) * 255.0F));
 }
 
-void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, bool albedo, ccstd::vector<uint8_t> &dst, bool linearColor) {
+enum class MipContent {
+    SRGB_COLOR,
+    LINEAR_COLOR,
+    NORMAL,
+};
+
+struct MipAccumulator {
+    float channels[4]{};
+    float normal[3]{};
+    uint32_t sampleCount{0};
+};
+
+void accumulateMipSample(const uint8_t *pixel, MipContent content, MipAccumulator &sum) {
+    for (uint32_t channel = 0; channel < 4U; ++channel) {
+        const float value = static_cast<float>(pixel[channel]) / 255.0F;
+        sum.channels[channel] += content == MipContent::SRGB_COLOR && channel < 3U ? srgbToLinear(value) : value;
+    }
+    if (content == MipContent::NORMAL) {
+        const float nx = static_cast<float>(pixel[0]) / 127.5F - 1.0F;
+        const float ny = static_cast<float>(pixel[1]) / 127.5F - 1.0F;
+        sum.normal[0] += nx;
+        sum.normal[1] += ny;
+        sum.normal[2] += std::sqrt(std::max(0.0F, 1.0F - nx * nx - ny * ny));
+    }
+    ++sum.sampleCount;
+}
+
+void writeMipSample(const MipAccumulator &sum, MipContent content, uint8_t *pixel) {
+    for (uint32_t channel = 0; channel < 4U; ++channel) {
+        float value = sum.channels[channel] / static_cast<float>(sum.sampleCount);
+        if (content == MipContent::SRGB_COLOR && channel < 3U) value = linearToSrgb(value);
+        pixel[channel] = encode(value);
+    }
+    if (content == MipContent::NORMAL) {
+        const float length = std::sqrt(sum.normal[0] * sum.normal[0] + sum.normal[1] * sum.normal[1] +
+                                       sum.normal[2] * sum.normal[2]);
+        pixel[0] = encode(length > 1e-6F ? sum.normal[0] / length * 0.5F + 0.5F : 0.5F);
+        pixel[1] = encode(length > 1e-6F ? sum.normal[1] / length * 0.5F + 0.5F : 0.5F);
+    }
+}
+
+Vec4 computeTilingParams(const ccstd::vector<uint8_t> &albedo, float pixelsPerMeter, uint32_t resolution) {
+    // A layer's mean lets the global color replace its broad color while
+    // retaining the tiled texture's fine contrast.
+    double mean[3]{};
+    const size_t pixelCount = albedo.size() / 4U;
+    for (size_t pixel = 0U; pixel < pixelCount; ++pixel) {
+        for (size_t c = 0U; c < 3U; ++c) {
+            mean[c] += srgbToLinear(static_cast<float>(albedo[pixel * 4U + c]) / 255.0F);
+        }
+    }
+    float shaderMean[3];
+    for (size_t c = 0U; c < 3U; ++c) {
+        // Mips encode the linear average as sRGB; common/color/gamma uses
+        // gamma * gamma when decoding. Match that shader convention here.
+        const float encodedMean = linearToSrgb(static_cast<float>(mean[c] / pixelCount));
+        shaderMean[c] = encodedMean * encodedMean;
+    }
+    // The shader samples normalized UVs, so convert source pixels/m to repeats/m.
+    const float uvScale = std::min(pixelsPerMeter, static_cast<float>(config::VT_PAGE_INTERIOR)) /
+                          static_cast<float>(resolution);
+    return Vec4{uvScale, shaderMean[0], shaderMean[1], shaderMean[2]};
+}
+
+void downsample(const ccstd::vector<uint8_t> &src, uint32_t size, MipContent content, ccstd::vector<uint8_t> &dst) {
     const uint32_t nextSize = std::max(1U, size / 2U);
     dst.resize(static_cast<size_t>(nextSize) * nextSize * 4U);
     for (uint32_t y = 0; y < nextSize; ++y) {
         for (uint32_t x = 0; x < nextSize; ++x) {
-            float sum[4]{};
-            float normal[3]{};
-            uint32_t count = 0U;
-            for (uint32_t sy = y * size / nextSize; sy < (y + 1U) * size / nextSize; ++sy) {
-                for (uint32_t sx = x * size / nextSize; sx < (x + 1U) * size / nextSize; ++sx) {
-                    const auto *pixel = src.data() + (static_cast<size_t>(sy) * size + sx) * 4U;
-                    for (uint32_t c = 0; c < 4U; ++c) {
-                        const float value = static_cast<float>(pixel[c]) / 255.0F;
-                        sum[c] += albedo && !linearColor && c < 3U ? srgbToLinear(value) : value;
-                    }
-                    if (!albedo) {
-                        const float nx = static_cast<float>(pixel[0]) / 127.5F - 1.0F;
-                        const float ny = static_cast<float>(pixel[1]) / 127.5F - 1.0F;
-                        normal[0] += nx;
-                        normal[1] += ny;
-                        normal[2] += std::sqrt(std::max(0.0F, 1.0F - nx * nx - ny * ny));
-                    }
-                    ++count;
+            const uint32_t beginY = y * size / nextSize;
+            const uint32_t endY = (y + 1U) * size / nextSize;
+            const uint32_t beginX = x * size / nextSize;
+            const uint32_t endX = (x + 1U) * size / nextSize;
+            MipAccumulator sum;
+            for (uint32_t sourceY = beginY; sourceY < endY; ++sourceY) {
+                for (uint32_t sourceX = beginX; sourceX < endX; ++sourceX) {
+                    const auto *pixel = src.data() + (static_cast<size_t>(sourceY) * size + sourceX) * 4U;
+                    accumulateMipSample(pixel, content, sum);
                 }
             }
             auto *pixel = dst.data() + (static_cast<size_t>(y) * nextSize + x) * 4U;
-            for (uint32_t c = 0; c < 4U; ++c) {
-                const float value = sum[c] / static_cast<float>(count);
-                pixel[c] = encode(albedo && !linearColor && c < 3U ? linearToSrgb(value) : value);
-            }
-            if (!albedo) {
-                const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-                pixel[0] = encode(length > 1e-6F ? normal[0] / length * 0.5F + 0.5F : 0.5F);
-                pixel[1] = encode(length > 1e-6F ? normal[1] / length * 0.5F + 0.5F : 0.5F);
-            }
+            writeMipSample(sum, content, pixel);
         }
     }
 }
@@ -126,7 +173,7 @@ IntrusivePtr<gfx::Texture> createTexture(gfx::Device *device, uint32_t resolutio
 }
 
 void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
-                   uint32_t layer, ccstd::vector<uint8_t> pixels, bool albedo, bool linearColor = false) {
+                   uint32_t layer, ccstd::vector<uint8_t> pixels, MipContent content) {
     ccstd::vector<uint8_t> next;
     uint32_t size = resolution;
     for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
@@ -138,7 +185,7 @@ void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resoluti
         const uint8_t *buffers[]{pixels.data()};
         device->copyBuffersToTexture(buffers, texture, &region, 1U);
         if (mip + 1U < texture->getInfo().levelCount) {
-            downsample(pixels, size, albedo, next, linearColor);
+            downsample(pixels, size, content, next);
             pixels.swap(next);
             size = std::max(1U, size / 2U);
         }
@@ -151,16 +198,29 @@ MaterialLibrary::~MaterialLibrary() { destroy(); }
 
 bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     CC_ASSERT(_albedoHeight == nullptr && _normalRoughnessAO == nullptr && _whiteTexture == nullptr);
-    const auto &layers = asset.materialLayers();
-    if (device == nullptr || layers.empty()) {
+    if (device == nullptr || asset.materialLayers().empty()) {
         return false;
     }
+    // Keep failure cleanup in one place, including partially loaded decals.
+    if (!initMaterialLayers(device, asset) || !initDecalLayers(device, asset) || !initWhiteTexture(device)) {
+        destroy();
+        return false;
+    }
+    initSamplers(device);
+#if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] %u material layers: paired %ux%u RGBA8 arrays with mips",
+                static_cast<uint32_t>(asset.materialLayers().size()), asset.materialResolution(), asset.materialResolution());
+#endif
+    return true;
+}
+
+bool MaterialLibrary::initMaterialLayers(gfx::Device *device, const LandscapeAsset &asset) {
+    const auto &layers = asset.materialLayers();
     const uint32_t resolution = asset.materialResolution();
     const uint32_t count = static_cast<uint32_t>(layers.size());
     _albedoHeight = createTexture(device, resolution, count);
     _normalRoughnessAO = createTexture(device, resolution, count);
     if (!valid()) {
-        destroy();
         return false;
     }
     _tilingParams.resize(config::MATERIAL_LIBRARY_MAX);
@@ -168,32 +228,16 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         ccstd::vector<uint8_t> albedo, normal;
         if (!decodeRGBA8(layer.albedoHeight, resolution, albedo) ||
             !decodeRGBA8(layer.normalRoughnessAO, resolution, normal)) {
-            destroy();
             return false;
         }
-        // A layer's mean lets the global color replace its broad color while
-        // retaining the tiled texture's fine contrast.
-        double mean[3]{};
-        const size_t pixelCount = albedo.size() / 4U;
-        for (size_t pixel = 0U; pixel < pixelCount; ++pixel) {
-            for (size_t c = 0U; c < 3U; ++c) {
-                mean[c] += srgbToLinear(static_cast<float>(albedo[pixel * 4U + c]) / 255.0F);
-            }
-        }
-        uploadTexture(device, _albedoHeight, resolution, layer.id, std::move(albedo), true);
-        uploadTexture(device, _normalRoughnessAO, resolution, layer.id, std::move(normal), false);
-        // The shader samples normalized UVs, so convert source pixels/m to repeats/m.
-        const float uvScale = std::min(layer.pixelsPerMeter, static_cast<float>(config::VT_PAGE_INTERIOR)) /
-                              static_cast<float>(resolution);
-        float shaderMean[3];
-        for (size_t c = 0U; c < 3U; ++c) {
-            // Mips encode the linear average as sRGB; common/color/gamma uses
-            // gamma * gamma when decoding. Match that shader convention here.
-            const float encodedMean = linearToSrgb(static_cast<float>(mean[c] / pixelCount));
-            shaderMean[c] = encodedMean * encodedMean;
-        }
-        _tilingParams[layer.id] = Vec4{uvScale, shaderMean[0], shaderMean[1], shaderMean[2]};
+        _tilingParams[layer.id] = computeTilingParams(albedo, layer.pixelsPerMeter, resolution);
+        uploadTexture(device, _albedoHeight, resolution, layer.id, std::move(albedo), MipContent::SRGB_COLOR);
+        uploadTexture(device, _normalRoughnessAO, resolution, layer.id, std::move(normal), MipContent::NORMAL);
     }
+    return true;
+}
+
+bool MaterialLibrary::initDecalLayers(gfx::Device *device, const LandscapeAsset &asset) {
     // Decal color is premultiplied linear RGB: mip filtering cannot introduce
     // dark borders through transparent texels. Height RG is a uint16 scalar.
     const auto &decalLayers = asset.decalLayers();
@@ -205,7 +249,7 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     auto heightInfo = _decalAlbedo->getInfo();
     heightInfo.levelCount = 1;
     _decalHeight = device->createTexture(heightInfo);
-    if (!_decalAlbedo || !_decalNormal || !_decalHeight) return false;
+    if (!_decalHeight) return false;
     for (uint32_t i = 0; i < decalCount; ++i) {
         ccstd::vector<uint8_t> color{0, 0, 0, 0}, normal{128, 128, 255, 255}, height{0, 0, 0, 255};
         if (!decalLayers.empty()) {
@@ -217,16 +261,23 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
             const float alpha = color[p + 3] / 255.0F;
             for (size_t c = 0; c < 3; ++c) color[p + c] = encode(srgbToLinear(color[p + c] / 255.0F) * alpha);
         }
-        uploadTexture(device, _decalAlbedo, decalSize, i, std::move(color), true, true);
-        uploadTexture(device, _decalNormal, decalSize, i, std::move(normal), false);
-        uploadTexture(device, _decalHeight, decalSize, i, std::move(height), true, true);
+        uploadTexture(device, _decalAlbedo, decalSize, i, std::move(color), MipContent::LINEAR_COLOR);
+        uploadTexture(device, _decalNormal, decalSize, i, std::move(normal), MipContent::NORMAL);
+        uploadTexture(device, _decalHeight, decalSize, i, std::move(height), MipContent::LINEAR_COLOR);
     }
+    return true;
+}
+
+bool MaterialLibrary::initWhiteTexture(gfx::Device *device) {
     _whiteTexture = createTexture(device, 1U, 1U, gfx::TextureType::TEX2D);
     if (!_whiteTexture) {
-        destroy();
         return false;
     }
-    uploadTexture(device, _whiteTexture, 1U, 0U, {255, 255, 255, 255}, true);
+    uploadTexture(device, _whiteTexture, 1U, 0U, {255, 255, 255, 255}, MipContent::SRGB_COLOR);
+    return true;
+}
+
+void MaterialLibrary::initSamplers(gfx::Device *device) {
     gfx::SamplerInfo info;
     info.minFilter = gfx::Filter::LINEAR;
     info.magFilter = gfx::Filter::LINEAR;
@@ -239,11 +290,6 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     info.addressV = gfx::Address::CLAMP;
     info.addressW = gfx::Address::CLAMP;
     _clampSampler = device->getSampler(info);
-#if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] %u material layers: paired %ux%u RGBA8 arrays with mips",
-                count, resolution, resolution);
-#endif
-    return true;
 }
 
 void MaterialLibrary::destroy() {

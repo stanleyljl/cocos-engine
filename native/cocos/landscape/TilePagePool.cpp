@@ -78,7 +78,25 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _layerCount = layerCount;
     _heightUnorm = supportsHeightUnorm(device);
     if (_heightUnorm) _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
+    if (!initTextures()) {
+        destroy();
+        return false;
+    }
+    initSamplers();
+    if (!loadRootPages()) {
+        destroy();
+        return false;
+    }
+    initFreeLayers(rootCount);
+#if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
+        _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
+    CC_LOG_INFO("[Landscape] %zu root height/splat/normal pages resident; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
+#endif
+    return true;
+}
 
+bool TilePagePool::initTextures() {
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
@@ -94,10 +112,12 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _normalArray = _device->createTexture(info);
     if (!valid()) {
         CC_LOG_WARNING("[Landscape] failed to create height/splat/normal arrays");
-        destroy();
         return false;
     }
+    return true;
+}
 
+void TilePagePool::initSamplers() {
     gfx::SamplerInfo si;
     // R16_UNORM heights and normals use hardware filtering. RG8 heights are
     // decoded before interpolation with texelFetch, which ignores the sampler.
@@ -111,7 +131,10 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     si.minFilter = gfx::Filter::POINT;
     si.magFilter = gfx::Filter::POINT;
     _splatSampler = _device->getSampler(si);
+}
 
+bool TilePagePool::loadRootPages() {
+    const auto &data = _asset->data();
     // Fill all three arrays with root data before any model can render.
     // Roots deliberately stay out of the LRU, even when outside the view.
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
@@ -119,7 +142,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
             LandscapeAsset::TileData tile;
             if (!_asset->loadTileSet(data.maxLevel, x, z, tile)) {
                 CC_LOG_WARNING("[Landscape] cannot initialize height/splat/normal root L%u (%u,%u)", data.maxLevel, x, z);
-                destroy();
                 return false;
             }
             const uint32_t layer = z * data.sectorsX + x;
@@ -129,16 +151,14 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
             _resident[tile.key] = layer;
         }
     }
+    return true;
+}
+
+void TilePagePool::initFreeLayers(size_t rootCount) {
     _freeLayers.reserve(_layerCount);
     for (uint32_t layer = _layerCount; layer > rootCount; --layer) {
         _freeLayers.push_back(layer - 1);
     }
-#if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
-        _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
-    CC_LOG_INFO("[Landscape] %zu root height/splat/normal pages resident; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
-#endif
-    return true;
 }
 
 void TilePagePool::uploadHeight(uint32_t layer, const uint8_t *data) {

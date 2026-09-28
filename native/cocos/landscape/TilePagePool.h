@@ -95,6 +95,10 @@ public:
     inline uint32_t layerCount() const { return _layerCount; }
 
 private:
+    bool initTextures();
+    void initSamplers();
+    bool loadRootPages();
+    void initFreeLayers(size_t rootCount);
     void uploadHeight(uint32_t layer, const uint8_t *data);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     void touchLRU(uint64_t key);

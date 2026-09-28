@@ -70,6 +70,9 @@ private:
     bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
     void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
     bool initDrawResources(gfx::Device *device);
+    bool initPageDrawResources(gfx::Device *device);
+    bool initMipPasses(gfx::Device *device);
+    bool initCommandResources(gfx::Device *device);
     bool initRootPages(const LandscapeData &data, TilePagePool &tiles);
     void buildPageBatch();
     uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);

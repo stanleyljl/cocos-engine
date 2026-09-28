@@ -95,6 +95,9 @@ public:
     const Page &page(uint32_t slot) const { return _pages[slot]; }
 
 private:
+    bool initAtlas(gfx::Device *device);
+    bool initMipTargets(gfx::Device *device);
+    void initSampler(gfx::Device *device);
     int allocatePageSlot(uint64_t key);
     IntrusivePtr<RenderTexture> _atlas;
     struct MipTarget {

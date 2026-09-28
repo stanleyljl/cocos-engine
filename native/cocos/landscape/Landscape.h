@@ -112,8 +112,13 @@ public:
 
 private:
     void initializeRenderer();
+    void applyRendererSettings(LandscapeRenderer &renderer) const;
+    void logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const;
     scene::Camera *pickMainCamera() const;
     void selectPass(const geometry::Frustum &frustum, bool shadow);
+    uint32_t selectShadowPasses(const pipeline::PipelineSceneData &sceneData);
+    void reportVisibilityDistanceStatus();
+    void finalizePassSelection(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
     bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes);
     bool queryTransformValid() const;

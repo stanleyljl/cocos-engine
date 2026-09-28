@@ -51,6 +51,16 @@ bool VirtualTexture::init(gfx::Device *device) {
         device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
         return false;
     }
+    if (!initAtlas(device) || !initMipTargets(device)) {
+        destroy();
+        return false;
+    }
+    initSampler(device);
+    _pages.resize(config::VT_PAGE_COUNT);
+    return valid();
+}
+
+bool VirtualTexture::initAtlas(gfx::Device *device) {
     gfx::RenderPassInfo passInfo;
     gfx::ColorAttachment color;
     color.format = gfx::Format::RGBA8;
@@ -70,6 +80,10 @@ bool VirtualTexture::init(gfx::Device *device) {
     info.colorMipLevels = config::VT_MIP_LEVELS;
     _atlas = ccnew RenderTexture();
     _atlas->initialize(info);
+    return albedo() != nullptr && normalRoughnessAO() != nullptr && renderPass() != nullptr;
+}
+
+bool VirtualTexture::initMipTargets(gfx::Device *device) {
     const auto createMipView = [device](gfx::Texture *texture, uint32_t baseLevel, uint32_t levelCount) {
         gfx::TextureViewInfo view;
         view.texture = texture;
@@ -87,7 +101,12 @@ bool VirtualTexture::init(gfx::Device *device) {
         mip.sourceAlbedo = createMipView(albedo(), 0, level);
         mip.sourceNormal = createMipView(normalRoughnessAO(), 0, level);
         mip.framebuffer = device->createFramebuffer({renderPass(), {mip.albedo, mip.normal}, nullptr});
+        if (!mip.albedo || !mip.normal || !mip.sourceAlbedo || !mip.sourceNormal || !mip.framebuffer) return false;
     }
+    return true;
+}
+
+void VirtualTexture::initSampler(gfx::Device *device) {
     gfx::SamplerInfo samplerInfo;
     samplerInfo.minFilter = gfx::Filter::LINEAR;
     samplerInfo.magFilter = gfx::Filter::LINEAR;
@@ -96,8 +115,6 @@ bool VirtualTexture::init(gfx::Device *device) {
     samplerInfo.addressV = gfx::Address::CLAMP;
     samplerInfo.addressW = gfx::Address::CLAMP;
     _sampler = device->getSampler(samplerInfo);
-    _pages.resize(config::VT_PAGE_COUNT);
-    return valid();
 }
 
 bool VirtualTexture::valid() const {

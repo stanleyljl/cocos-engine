@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 #pragma once
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -68,6 +69,18 @@ private:
         std::mutex mutex;
         ccstd::vector<Finished> finished;
     };
+    struct SampleLocation {
+        std::array<size_t, 4> texels;
+        float fx{0};
+        float fz{0};
+    };
+    LandscapeQueryStatus collectSourceKeys(float x, float z, float radius, ccstd::vector<uint64_t> &keys) const;
+    bool sourceFits(const ccstd::vector<uint64_t> &keys, const ccstd::vector<uint64_t> *previous) const;
+    void pinSourceTiles(const ccstd::vector<uint64_t> &keys);
+    SampleLocation locateSample(double x, double z, uint64_t key) const;
+    bool interpolateHeightNormal(const Entry &entry, const SampleLocation &location,
+                                 float worldX, float worldZ, LandscapeSurfaceResult &result) const;
+    void interpolateSurface(const Entry &entry, const SampleLocation &location, LandscapeSurfaceResult &result) const;
     uint64_t keyAt(double x, double z) const;
     LandscapeData _data;
     Loader _loader;

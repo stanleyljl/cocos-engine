@@ -217,9 +217,11 @@ bool VTRenderer::initCliffReference(const LandscapeAsset &asset, TilePagePool &t
 }
 
 bool VTRenderer::initDrawResources(gfx::Device *device) {
+    return initPageDrawResources(device) && initMipPasses(device) && initCommandResources(device) && valid();
+}
+
+bool VTRenderer::initPageDrawResources(gfx::Device *device) {
     auto *pass = _material->getPasses()->front().get();
-    IMaterialInfo info;
-    info.effectName = ccstd::string{"builtin-landscape-vt-compose"};
     constexpr uint32_t STRIDE = sizeof(PageInstance);
     _instances = device->createBuffer({gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
         gfx::MemoryUsageBit::DEVICE, config::VT_PAGE_COUNT * STRIDE, STRIDE});
@@ -239,11 +241,17 @@ bool VTRenderer::initDrawResources(gfx::Device *device) {
     _pipelineState = device->createPipelineState({shader, pass->getPipelineLayout(), _texture.renderPass(),
         {iaInfo.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(),
         *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
+    return _instances && _inputAssembler && _pipelineState;
+}
+
+bool VTRenderer::initMipPasses(gfx::Device *device) {
+    IMaterialInfo info;
+    info.effectName = ccstd::string{"builtin-landscape-vt-compose"};
+    info.technique = 1;
     for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
         // Technique 1 filters the completed pages, never re-evaluates materials.
         auto &mipMaterial = _mipPasses[level - 1].material;
         mipMaterial = ccnew Material();
-        info.technique = 1;
         mipMaterial->initialize(info);
         if (!mipMaterial->getPasses() || mipMaterial->getPasses()->empty()) {
             return false;
@@ -265,9 +273,14 @@ bool VTRenderer::initDrawResources(gfx::Device *device) {
             return false;
         }
         _mipPasses[level - 1].pipelineState = device->createPipelineState({mipShader, mipPass->getPipelineLayout(), _texture.renderPass(),
-            {iaInfo.attributes}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(),
+            {_inputAssembler->getAttributes()}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(),
             *mipPass->getBlendState(), mipPass->getPrimitive(), mipPass->getDynamicStates()});
+        if (!_mipPasses[level - 1].pipelineState) return false;
     }
+    return true;
+}
+
+bool VTRenderer::initCommandResources(gfx::Device *device) {
     _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
     gfx::RenderPassInfo initialInfo;
     initialInfo.colorAttachments = _texture.renderPass()->getColorAttachments();
@@ -277,10 +290,7 @@ bool VTRenderer::initDrawResources(gfx::Device *device) {
             gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE});
     }
     _initialPass = device->createRenderPass(initialInfo);
-    if (!valid() || !_initialPass || !_instances || !_inputAssembler) {
-        return false;
-    }
-    return true;
+    return _commands && _initialPass;
 }
 
 bool VTRenderer::initRootPages(const LandscapeData &data, TilePagePool &tiles) {

@@ -70,6 +70,16 @@ bool readPixelsPerMeter(const rapidjson::Value &object, uint32_t resolution, flo
     return std::isfinite(value) && value > 0.0F;
 }
 
+bool matchesString(const rapidjson::Value &object, const char *name, const char *expected) {
+    return object.HasMember(name) && object[name].IsString() &&
+           std::strcmp(object[name].GetString(), expected) == 0;
+}
+
+bool matchesUint(const rapidjson::Value &object, const char *name, uint32_t expected) {
+    uint32_t value = 0;
+    return readUnsigned(object, name, value) && value == expected;
+}
+
 ccstd::string manifestPathFor(const ccstd::string &dataDir) {
     constexpr size_t SUFFIX_SIZE = sizeof(".lsmanifest") - 1U;
     if (dataDir.size() >= SUFFIX_SIZE && dataDir.compare(dataDir.size() - SUFFIX_SIZE, SUFFIX_SIZE, ".lsmanifest") == 0) {
@@ -118,12 +128,15 @@ struct LandscapeAsset::Manifest {
     }
     bool readDimensions();
     bool readHeightRanges();
+    bool readHeightRangeLevel(uint32_t level, const rapidjson::Value &levelValue);
     bool readFileIndex();
     bool readMaterials();
     bool readCliffMaterial();
     bool readDecalLayers();
     bool readDecals();
     bool validateTileLayout();
+    bool validateSplatLayout() const;
+    bool validateNormalLayout() const;
 };
 
 bool LandscapeAsset::Manifest::readDimensions() {
@@ -162,54 +175,53 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
     ranges.assign(static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * nodesPerSector,
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
-    // Both height tiles and range metadata use the complete uint16 domain.
-    constexpr float HEIGHT_DENOMINATOR = 65535.0F;
     for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
-        const auto &levelValue = levels[level];
-        if (!levelValue.IsObject() || !levelValue.HasMember("heightRange") ||
-            !levelValue["heightRange"].IsObject()) {
-            CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has no height range", level);
-            return false;
-        }
-        const auto &range = levelValue["heightRange"];
-        if (!range.HasMember("min") || !range.HasMember("max")) {
-            CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has incomplete height range", level);
-            return false;
-        }
-        const auto &mins = range["min"];
-        const auto &maxs = range["max"];
-        const uint32_t side = computeNodesPerSide(parsed.maxLevel, level);
-        const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
-        if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected) {
-            CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
-            return false;
-        }
-        const float scale = parsed.heightScale / HEIGHT_DENOMINATOR;
-        const uint32_t globalSide = parsed.sectorsX * side;
-        for (uint32_t globalZ = 0; globalZ < parsed.sectorsZ * side; ++globalZ) {
-            for (uint32_t globalX = 0; globalX < globalSide; ++globalX) {
-                const size_t index = static_cast<size_t>(globalZ) * globalSide + globalX;
-                if (!mins[index].IsNumber() || !maxs[index].IsNumber()) {
-                    CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
-                    return false;
-                }
-                const size_t dst = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
-                                                        level, globalX, globalZ);
-                ranges[dst] = HeightRange{
-                    parsed.heightBias + mins[index].GetFloat() * scale,
-                    parsed.heightBias + maxs[index].GetFloat() * scale,
-                };
-                float childStretch = 1.0F;
-                if (level > 0U) {
-                    for (uint32_t q = 0; q < 4U; ++q) {
-                        const size_t child = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
-                            level - 1U, globalX * 2U + (q & 1U), globalZ * 2U + (q >> 1U));
-                        childStretch = std::max(childStretch, ranges[child].surfaceStretch);
-                    }
-                }
-                ranges[dst].surfaceStretch = cliffDensityScale(ranges[dst].maxY - ranges[dst].minY,
-                    computeNodeSize(parsed.sectorSize, parsed.maxLevel, level), childStretch);
+        if (!readHeightRangeLevel(level, levels[level])) return false;
+    }
+    return true;
+}
+
+bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidjson::Value &levelValue) {
+    if (!levelValue.IsObject() || !levelValue.HasMember("heightRange") || !levelValue["heightRange"].IsObject()) {
+        CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has no height range", level);
+        return false;
+    }
+    const auto &range = levelValue["heightRange"];
+    if (!range.HasMember("min") || !range.HasMember("max")) {
+        CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has incomplete height range", level);
+        return false;
+    }
+    const auto &mins = range["min"];
+    const auto &maxs = range["max"];
+    const uint32_t side = computeNodesPerSide(parsed.maxLevel, level);
+    const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
+    if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected) {
+        CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
+        return false;
+    }
+    // Both height tiles and range metadata use the complete uint16 domain.
+    const float scale = parsed.heightScale / 65535.0F;
+    const uint32_t globalSide = parsed.sectorsX * side;
+    for (uint32_t globalZ = 0; globalZ < parsed.sectorsZ * side; ++globalZ) {
+        for (uint32_t globalX = 0; globalX < globalSide; ++globalX) {
+            const size_t index = static_cast<size_t>(globalZ) * globalSide + globalX;
+            if (!mins[index].IsNumber() || !maxs[index].IsNumber()) {
+                CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
+                return false;
             }
+            const size_t dst = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector, level, globalX, globalZ);
+            ranges[dst] = HeightRange{parsed.heightBias + mins[index].GetFloat() * scale,
+                                      parsed.heightBias + maxs[index].GetFloat() * scale};
+            float childStretch = 1.0F;
+            if (level > 0U) {
+                for (uint32_t quadrant = 0; quadrant < 4U; ++quadrant) {
+                    const size_t child = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
+                        level - 1U, globalX * 2U + (quadrant & 1U), globalZ * 2U + (quadrant >> 1U));
+                    childStretch = std::max(childStretch, ranges[child].surfaceStretch);
+                }
+            }
+            ranges[dst].surfaceStretch = cliffDensityScale(ranges[dst].maxY - ranges[dst].minY,
+                computeNodeSize(parsed.sectorSize, parsed.maxLevel, level), childStretch);
         }
     }
     return true;
@@ -348,19 +360,16 @@ bool LandscapeAsset::Manifest::readDecals() {
 }
 
 bool LandscapeAsset::Manifest::validateTileLayout() {
+    return validateSplatLayout() && validateNormalLayout();
+}
+
+bool LandscapeAsset::Manifest::validateSplatLayout() const {
     // The shader's integer decode and the shared page pool require this layout.
     if (!document.HasMember("splatMap") || !document["splatMap"].IsObject()) {
         CC_LOG_WARNING("[Landscape] manifest requires paired splatMap tiles");
         return false;
     }
     const auto &splat = document["splatMap"];
-    const auto matchesString = [](const rapidjson::Value &v, const char *name, const char *expected) {
-        return v.HasMember(name) && v[name].IsString() && std::strcmp(v[name].GetString(), expected) == 0;
-    };
-    const auto matchesUint = [](const rapidjson::Value &v, const char *name, uint32_t expected) {
-        uint32_t value = 0;
-        return readUnsigned(v, name, value) && value == expected;
-    };
     if (!matchesString(splat, "format", "R16UI") || !matchesString(splat, "fileFormat", "PNG") ||
         !matchesString(splat, "path", "nodes/L{level}/s_{x}_{z}.png") ||
         !matchesUint(splat, "resolution", parsed.tileResolution) ||
@@ -384,7 +393,10 @@ bool LandscapeAsset::Manifest::validateTileLayout() {
         CC_LOG_WARNING("[Landscape] unsupported splat bit encoding; expected 5/5/6");
         return false;
     }
+    return true;
+}
 
+bool LandscapeAsset::Manifest::validateNormalLayout() const {
     if (!document.HasMember("normalMap") || !document["normalMap"].IsObject()) {
         CC_LOG_WARNING("[Landscape] normalMap is required; regenerate normal PNG tiles, reimport and rebuild assets");
         return false;

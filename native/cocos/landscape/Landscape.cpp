@@ -101,25 +101,35 @@ void Landscape::initializeRenderer() {
         return;
     }
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
-    renderer->setDebugData(_debugData);
-    renderer->setGlobalColorMap(_globalColorMap);
-    renderer->setGlobalColorStrength(_globalColorStrength);
-    renderer->setCastShadow(_castShadow);
-    renderer->setReceiveShadow(_receiveShadow);
-
-#if CC_LANDSCAPE_DEBUG
-    const auto &data = asset->data();
-    CC_LOG_INFO("[Landscape] LOD ranges:");
-    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
-        CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
-                    level, quadtree->lodMorphStart()[level], quadtree->lodMorphEnd()[level]);
-    }
-#endif
+    applyRendererSettings(*renderer);
+    logLodRanges(*asset, *quadtree);
 
     _asset = std::move(asset);
     _quadtree = std::move(quadtree);
     _renderer = std::move(renderer);
     _scene->addLandscape(this);
+}
+
+void Landscape::applyRendererSettings(LandscapeRenderer &renderer) const {
+    renderer.setDebugData(_debugData);
+    renderer.setGlobalColorMap(_globalColorMap);
+    renderer.setGlobalColorStrength(_globalColorStrength);
+    renderer.setCastShadow(_castShadow);
+    renderer.setReceiveShadow(_receiveShadow);
+}
+
+void Landscape::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const {
+#if CC_LANDSCAPE_DEBUG
+    const auto &data = asset.data();
+    CC_LOG_INFO("[Landscape] LOD ranges:");
+    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
+        CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
+                    level, quadtree.lodMorphStart()[level], quadtree.lodMorphEnd()[level]);
+    }
+#else
+    CC_UNUSED_PARAM(asset);
+    CC_UNUSED_PARAM(quadtree);
+#endif
 }
 
 void Landscape::setGlobalColorMap(Texture2D *texture) {
@@ -272,6 +282,12 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
 
     // The first selection is the only color pass in this forward camera batch.
     selectPass(camera.getFrustum(), false);
+    const uint32_t cascadesToDeduplicate = selectShadowPasses(sceneData);
+    reportVisibilityDistanceStatus();
+    finalizePassSelection(cascadesToDeduplicate);
+}
+
+uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
     uint32_t cascadesToDeduplicate = 0;
     const auto *shadows = sceneData.getShadows();
     if (_castShadow && shadows && shadows->isEnabled() && shadows->getType() == scene::ShadowType::SHADOW_MAP) {
@@ -296,6 +312,10 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
             if (spot->isShadowEnabled()) selectPass(spot->getFrustum(), true);
         }
     }
+    return cascadesToDeduplicate;
+}
+
+void Landscape::reportVisibilityDistanceStatus() {
     if (_visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
         if (_visibilityDistanceWarning) {
             CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
@@ -307,6 +327,9 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
 #endif
         _lastVisibilityDistanceWarning = _visibilityDistanceWarning;
     }
+}
+
+void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate) {
     // Only residency/model storage is shared. Each pass keeps its own root traversal result.
     auto &surfaceNodes = _passes.front().nodes;
     mergeNodeSelections(surfaceNodes);
