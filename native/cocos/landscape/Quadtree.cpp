@@ -135,7 +135,9 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
         return;
     }
     const size_t index = _nodeLayout.sectorNodeIndex(_sectorX, _sectorZ, level, ix, iz);
-    if (index >= _heightRanges.size()) return;
+    if (index >= _heightRanges.size()) {
+        return;
+    }
     const HeightRange &range = _heightRanges[index];
     minY = range.minY;
     maxY = range.maxY;

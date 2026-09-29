@@ -121,7 +121,9 @@ struct LandscapeAsset::Manifest {
     }
 
     ccstd::string resolve(const ccstd::string &logicalPath) const {
-        if (!imported) return assetDir + "/" + logicalPath;
+        if (!imported) {
+            return assetDir + "/" + logicalPath;
+        }
         const auto it = files.find(logicalPath);
         return it == files.end() ? ccstd::string{} : it->second;
     }
@@ -175,7 +177,9 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
     for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
-        if (!readHeightRangeLevel(level, levels[level])) return false;
+        if (!readHeightRangeLevel(level, levels[level])) {
+            return false;
+        }
     }
     return true;
 }
@@ -239,14 +243,18 @@ bool LandscapeAsset::Manifest::readFileIndex() {
         // Only replace the extension; do not assume an editor/source directory.
         const ccstd::string prefix = manifestPath.substr(0, manifestPath.size() - 11U);
         for (auto it = document["files"].MemberBegin(); it != document["files"].MemberEnd(); ++it) {
-            if (!it->value.IsString()) return false;
+            if (!it->value.IsString()) {
+                return false;
+            }
             const ccstd::string suffix = it->value.GetString();
             if (suffix.size() <= 6U || suffix.compare(0, 6U, ".lsraw") != 0 ||
                 suffix.find_first_not_of("0123456789", 6U) != ccstd::string::npos) {
                 CC_LOG_WARNING("[Landscape] invalid raw file extension");
                 return false;
             }
-            if (!files.emplace(it->name.GetString(), prefix + suffix).second) return false;
+            if (!files.emplace(it->name.GetString(), prefix + suffix).second) {
+                return false;
+            }
         }
     }
     return true;
@@ -282,7 +290,9 @@ bool LandscapeAsset::Manifest::readMaterials() {
             layer.name = value["name"].GetString();
             layer.albedoHeight = resolve(materialDir + value["albedoHeight"].GetString());
             layer.normalRoughnessAO = resolve(materialDir + value["normalRoughnessAO"].GetString());
-            if (layer.albedoHeight.empty() || layer.normalRoughnessAO.empty()) return false;
+            if (layer.albedoHeight.empty() || layer.normalRoughnessAO.empty()) {
+                return false;
+            }
             materialLayers.emplace_back(std::move(layer));
         }
     }
@@ -311,29 +321,39 @@ bool LandscapeAsset::Manifest::readDecalLayers() {
         const auto &library = document["decalLibrary"];
         if (!readUnsigned(library, "resolution", decalResolution) || decalResolution < 2 || decalResolution > 2048 ||
             (decalResolution & (decalResolution - 1U)) != 0 || !library.HasMember("layers") ||
-            !library["layers"].IsArray() || library["layers"].Empty() || library["layers"].Size() > config::DECAL_LIBRARY_MAX) return false;
+            !library["layers"].IsArray() || library["layers"].Empty() || library["layers"].Size() > config::DECAL_LIBRARY_MAX) {
+            return false;
+        }
         for (const auto &value : library["layers"].GetArray()) {
             DecalLayer layer;
             if (!value.IsObject() || !value.HasMember("albedoMask") || !value["albedoMask"].IsString() ||
                 !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
                 !value.HasMember("height") || !value["height"].IsString() ||
-                !readFloat(value, "heightScale", layer.heightScale) || layer.heightScale < 0 || layer.heightScale > 10) return false;
+                !readFloat(value, "heightScale", layer.heightScale) || layer.heightScale < 0 || layer.heightScale > 10) {
+                return false;
+            }
             layer.albedoMask = resolve(value["albedoMask"].GetString());
             layer.normalRoughnessAO = resolve(value["normalRoughnessAO"].GetString());
             layer.height = resolve(value["height"].GetString());
             if (value.HasMember("modulateColor")) {
-                if (!value["modulateColor"].IsBool()) return false;
+                if (!value["modulateColor"].IsBool()) {
+                    return false;
+                }
                 layer.modulateColor = value["modulateColor"].GetBool();
             }
             if (value.HasMember("detailMaterials")) {
                 const auto &ids = value["detailMaterials"];
                 if (!ids.IsArray() || ids.Size() != 2 || layer.heightScale != 0 || layer.modulateColor ||
                     !ids[0].IsUint() || !ids[1].IsUint() ||
-                    ids[0].GetUint() >= materialLayers.size() || ids[1].GetUint() >= materialLayers.size()) return false;
+                    ids[0].GetUint() >= materialLayers.size() || ids[1].GetUint() >= materialLayers.size()) {
+                    return false;
+                }
                 layer.detailMaterial0 = static_cast<int32_t>(ids[0].GetUint());
                 layer.detailMaterial1 = static_cast<int32_t>(ids[1].GetUint());
             }
-            if (layer.albedoMask.empty() || layer.normalRoughnessAO.empty() || layer.height.empty()) return false;
+            if (layer.albedoMask.empty() || layer.normalRoughnessAO.empty() || layer.height.empty()) {
+                return false;
+            }
             decalLayers.emplace_back(std::move(layer));
         }
     }
@@ -343,7 +363,9 @@ bool LandscapeAsset::Manifest::readDecalLayers() {
 bool LandscapeAsset::Manifest::readDecals() {
     if (document.HasMember("decals")) {
         const auto &values = document["decals"];
-        if (!values.IsArray() || values.Size() > config::DECAL_INSTANCE_MAX) return false;
+        if (!values.IsArray() || values.Size() > config::DECAL_INSTANCE_MAX) {
+            return false;
+        }
         for (const auto &value : values.GetArray()) {
             Decal d;
             if (!readFloat(value, "x", d.x) || !readFloat(value, "z", d.z) || !readFloat(value, "size", d.size) ||
@@ -351,7 +373,9 @@ bool LandscapeAsset::Manifest::readDecals() {
                 !readFloat(value, "nearDistance", d.nearDistance) || !readFloat(value, "farDistance", d.farDistance) ||
                 d.nearDistance < 0 || d.farDistance <= d.nearDistance || d.farDistance > 200 ||
                 d.x < -parsed.worldWidth() * .5F || d.z < -parsed.worldDepth() * .5F ||
-                d.x + d.size > parsed.worldWidth() * .5F || d.z + d.size > parsed.worldDepth() * .5F) return false;
+                d.x + d.size > parsed.worldWidth() * .5F || d.z + d.size > parsed.worldDepth() * .5F) {
+                return false;
+            }
             decals.push_back(d);
         }
     }
@@ -443,7 +467,9 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     }
 
     Manifest manifest{document, manifestPath};
-    if (!manifest.read()) return false;
+    if (!manifest.read()) {
+        return false;
+    }
 
     _data = manifest.parsed;
     _dataDir = manifest.assetDir;
@@ -483,7 +509,9 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
 }
 
 ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) const {
-    if (_files.empty()) return _dataDir + "/" + logicalPath;
+    if (_files.empty()) {
+        return _dataDir + "/" + logicalPath;
+    }
     const auto it = _files.find(logicalPath);
     return it == _files.end() ? ccstd::string{} : it->second;
 }
@@ -572,16 +600,22 @@ void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Co
         return;
     }
     const auto resolution = _data.tileResolution;
-    if (!_async) _async = std::make_shared<AsyncState>();
+    if (!_async) {
+        _async = std::make_shared<AsyncState>();
+    }
     const auto lifetime = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
         [height, normal, splat, resolution, lifetime, completion = std::move(completion)](int) {
-            if (lifetime && lifetime->cancelled.load()) return;
+            if (lifetime && lifetime->cancelled.load()) {
+                return;
+            }
             LandscapeQueryTile tile;
             const bool ok = loadTile(height, gfx::Format::RG8, resolution, tile.height) &&
                 loadTile(normal, gfx::Format::RGB8, resolution, tile.normal) &&
                 loadTile(splat, gfx::Format::R16UI, resolution, tile.splat);
-            if (lifetime && lifetime->cancelled.load()) return;
+            if (lifetime && lifetime->cancelled.load()) {
+                return;
+            }
             completion(std::move(tile), ok);
         }, LegacyThreadPool::TaskType::IO);
 }
@@ -629,7 +663,9 @@ bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t g
 }
 
 float LandscapeAsset::getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
-    if (!_data.valid() || level > _data.maxLevel) return 1.0F;
+    if (!_data.valid() || level > _data.maxLevel) {
+        return 1.0F;
+    }
     const size_t offset = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
     return offset < _heightRanges.size() ? _heightRanges[offset].surfaceStretch : 1.0F;
 }

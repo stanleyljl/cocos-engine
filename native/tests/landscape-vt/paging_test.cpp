@@ -50,7 +50,9 @@ ccstd::vector<ReferenceRequest> activeRequests(const VirtualTexture &cache, uint
     ccstd::vector<ReferenceRequest> result;
     for (uint32_t slot : cache.activeSlots()) {
         const auto &p = cache.page(slot);
-        if (p.address.level < root) result.push_back({p.address});
+        if (p.address.level < root) {
+            result.push_back({p.address});
+        }
     }
     return result;
 }
@@ -71,14 +73,20 @@ inline ccstd::unordered_set<uint64_t> referenceCoveragePages(
     for (uint32_t bias = 0; bias <= rootLevel; ++bias) {
         coverage.clear();
         for (const auto &request : requests) {
-            if (!request.required) continue;
+            if (!request.required) {
+                continue;
+            }
             const auto &page = request.page;
             const auto level = std::min(page.level + bias, rootLevel);
-            if (level == rootLevel) continue;
+            if (level == rootLevel) {
+                continue;
+            }
             const auto shift = level - page.level;
             coverage.insert(makeNodeKey(level, page.x >> shift, page.z >> shift));
         }
-        if (coverage.size() <= capacity) break;
+        if (coverage.size() <= capacity) {
+            break;
+        }
     }
     return coverage;
 }
@@ -96,17 +104,23 @@ inline void referenceBudget(ccstd::vector<ReferenceRequest> &requests, uint32_t 
         const size_t coverageBudget = std::max(size_t{1}, capacity / 2U);
         const auto coverage = referenceCoveragePages(requests, rootLevel, coverageBudget);
         float maximumPriority = 0.0F;
-        for (const auto &request : requests) maximumPriority = std::max(maximumPriority, request.priority);
+        for (const auto &request : requests) {
+            maximumPriority = std::max(maximumPriority, request.priority);
+        }
         for (auto &request : requests) {
             // Also compose coverage before refinement under the per-frame
             // update budget, so movement does not leave lasting root fallbacks.
-            if (coverage.count(request.page.key()) != 0U) request.priority += maximumPriority + 1.0F;
+            if (coverage.count(request.page.key()) != 0U) {
+                request.priority += maximumPriority + 1.0F;
+            }
         }
     }
     std::sort(requests.begin(), requests.end(), [](const auto &a, const auto &b) {
         return a.priority != b.priority ? a.priority > b.priority : a.page.key() < b.page.key();
     });
-    if (requests.size() > capacity) requests.resize(capacity);
+    if (requests.size() > capacity) {
+        requests.resize(capacity);
+    }
 }
 
 
@@ -143,7 +157,9 @@ void testRequestPlanEquivalence() {
             }
         }
         ccstd::vector<ReferenceRequest> expected;
-        for (const auto &entry : unique) expected.push_back(entry.second);
+        for (const auto &entry : unique) {
+            expected.push_back(entry.second);
+        }
         referenceBudget(expected, root, config::VT_PAGE_COUNT - roots);
         cache.endRequests();
         const auto actual = activeRequests(cache, root);
@@ -187,15 +203,21 @@ void testNearGroundCoverage() {
         require(cache.init(cacheData(root, 2, 2)), "Cache initialization failed");
         cache.beginRequests();
         for (const auto &entry : unique) {
-            if (entry.second.required) cache.request(entry.second.page, entry.second.priority);
+            if (entry.second.required) {
+                cache.request(entry.second.page, entry.second.priority);
+            }
         }
         for (const auto &entry : unique) {
             requests.push_back(entry.second);
-            if (entry.second.required) required.push_back(entry.second);
+            if (entry.second.required) {
+                required.push_back(entry.second);
+            }
         }
         const auto maximumGap = [&required, root](const ccstd::vector<ReferenceRequest> &resident) {
             ccstd::unordered_set<uint64_t> keys;
-            for (const auto &r : resident) keys.insert(r.page.key());
+            for (const auto &r : resident) {
+                keys.insert(r.page.key());
+            }
             uint32_t worst = 0;
             for (const auto &r : required) {
                 auto page = r.page;
@@ -220,8 +242,9 @@ void testNearGroundCoverage() {
         requests = activeRequests(cache, root);
         require(requests.size() <= capacity, "Coverage must not enlarge the physical cache");
         require(maximumGap(requests) <= 2U, "Near-ground view lost intermediate coverage under cache pressure");
-        if (density == 1.0F) require(maximumGap(requests) == 0U, "A fitting working set must retain full detail");
-        else {
+        if (density == 1.0F) {
+            require(maximumGap(requests) == 0U, "A fitting working set must retain full detail");
+        } else {
             auto initialBatch = requests;
             initialBatch.resize(capacity / 2U);
             require(maximumGap(initialBatch) <= 2U, "Coverage must be composed before optional detail pages");
@@ -242,7 +265,9 @@ VTPageInputs pageInputs(const VirtualTexture &cache, uint32_t slot, const Landsc
 }
 
 void resolveInputs(VirtualTexture &cache, const LandscapeData &data) {
-    for (uint32_t slot : cache.activeSlots()) cache.setInputs(slot, pageInputs(cache, slot, data));
+    for (uint32_t slot : cache.activeSlots()) {
+        cache.setInputs(slot, pageInputs(cache, slot, data));
+    }
 }
 
 void testPageLifecycle() {
@@ -357,7 +382,9 @@ void testCacheStreaming() {
                 cache.setInputs(slot, pageInputs(cache, slot, data, static_cast<float>(frame / 17)));
             }
         }
-        if (frame % 23 == 0) cache.invalidate();
+        if (frame % 23 == 0) {
+            cache.invalidate();
+        }
         const auto budget = frame % 4;
         cache.collectUpdates(updates, budget);
         uint32_t details = 0;
@@ -365,7 +392,9 @@ void testCacheStreaming() {
             const auto &p = cache.page(slot);
             require(active.count(slot) && p.inputsResolved && p.state == VirtualTexture::State::DIRTY,
                     "Scheduled stale, inactive or ready page");
-            if (slot >= ROOTS) ++details;
+            if (slot >= ROOTS) {
+                ++details;
+            }
         }
         require(details <= budget, "Composition exceeded detail budget");
         cache.publish(updates);
@@ -515,25 +544,29 @@ void testCoordinateLayouts() {
         size_t expected = 0;
         // Independently enumerate the serialized storage order. Every address
         // must map exactly once, and local/global addressing must agree.
-        for (uint32_t sz = 0; sz < 3; ++sz) for (uint32_t sx = 0; sx < 2; ++sx) {
-            uint32_t side = 1U << root;
-            for (uint32_t level = 0; level <= root; ++level, side /= 2U) {
-                require(data.nodesPerSectorSide(level) == side, "Wrong geometry level dimensions");
-                require(data.nodeSize(level) * side == 1000, "Node sizes do not cover the sector");
-                for (uint32_t z = 0; z < side; ++z) for (uint32_t x = 0; x < side; ++x) {
-                    const auto address = data.nodeInSector(sx, sz, level, x, z);
-                    require(layout.sectorNodeIndex(sx, sz, level, x, z) == expected, "Sector storage order changed");
-                    require(layout.globalNodeIndex(level, address.x, address.z) == expected++, "Global storage order changed");
-                    const auto decoded = NodeAddress::fromKey(address.key());
-                    require(decoded.level == level && decoded.x == address.x && decoded.z == address.z, "Node key round trip failed");
-                    const auto ancestor = address.ancestor(root);
-                    require(ancestor.x == sx && ancestor.z == sz, "Ancestor crossed a sector");
-                    const auto region = data.nodeRegion(address);
-                    const auto center = data.localToGrid({region.x + region.size / 2, region.z + region.size / 2});
-                    require(data.nodeAtGridClamped(level, center).key() == address.key(), "Node/local/grid round trip failed");
+        for (uint32_t sz = 0; sz < 3; ++sz) {
+            for (uint32_t sx = 0; sx < 2; ++sx) {
+                uint32_t side = 1U << root;
+                for (uint32_t level = 0; level <= root; ++level, side /= 2U) {
+                    require(data.nodesPerSectorSide(level) == side, "Wrong geometry level dimensions");
+                    require(data.nodeSize(level) * side == 1000, "Node sizes do not cover the sector");
+                    for (uint32_t z = 0; z < side; ++z) {
+                        for (uint32_t x = 0; x < side; ++x) {
+                            const auto address = data.nodeInSector(sx, sz, level, x, z);
+                            require(layout.sectorNodeIndex(sx, sz, level, x, z) == expected, "Sector storage order changed");
+                            require(layout.globalNodeIndex(level, address.x, address.z) == expected++, "Global storage order changed");
+                            const auto decoded = NodeAddress::fromKey(address.key());
+                            require(decoded.level == level && decoded.x == address.x && decoded.z == address.z, "Node key round trip failed");
+                            const auto ancestor = address.ancestor(root);
+                            require(ancestor.x == sx && ancestor.z == sz, "Ancestor crossed a sector");
+                            const auto region = data.nodeRegion(address);
+                            const auto center = data.localToGrid({region.x + region.size / 2, region.z + region.size / 2});
+                            require(data.nodeAtGridClamped(level, center).key() == address.key(), "Node/local/grid round trip failed");
+                        }
+                    }
+                    require(layout.sectorNodeIndex(sx, sz, level, side, 0) == invalid, "Local X overflow accepted");
+                    require(layout.sectorNodeIndex(sx, sz, level, 0, side) == invalid, "Local Z overflow accepted");
                 }
-                require(layout.sectorNodeIndex(sx, sz, level, side, 0) == invalid, "Local X overflow accepted");
-                require(layout.sectorNodeIndex(sx, sz, level, 0, side) == invalid, "Local Z overflow accepted");
             }
         }
         require(layout.nodeCount() == expected, "Flat storage contains holes");
@@ -661,7 +694,9 @@ int main() {
     struct PriorityRequest { float priority; bool direct; };
     ccstd::vector<PriorityRequest> candidates;
     constexpr size_t capacity = config::VT_PAGE_COUNT - 4;
-    for (size_t i = 0; i < capacity; ++i) candidates.push_back({referenceAncestorPriority(1.0F, 0), true});
+    for (size_t i = 0; i < capacity; ++i) {
+        candidates.push_back({referenceAncestorPriority(1.0F, 0), true});
+    }
     for (uint32_t ancestor = 1; ancestor <= 8; ++ancestor) {
         candidates.push_back({referenceAncestorPriority(1.0F, ancestor), false});
         require(referenceAncestorPriority(1.0F, ancestor) < referenceAncestorPriority(1.0F, ancestor - 1),

@@ -69,7 +69,9 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
 
     _node = node;
     _scene = scene;
-    for (uint32_t i = 0; i < _meshes.size(); ++i) _meshes[i] = GridMesh::create(device, 1U << i);
+    for (uint32_t i = 0; i < _meshes.size(); ++i) {
+        _meshes[i] = GridMesh::create(device, 1U << i);
+    }
     const bool heightUnorm = TilePagePool::supportsHeightUnorm(device);
     _materialSolid = createLandscapeMaterial(false, false, heightUnorm);
     _materialWire = createLandscapeMaterial(true, false, heightUnorm);
@@ -135,7 +137,9 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     if (!_materialLibrary->init(device, *asset)) {
         return false;
     }
-    if (!_decals->setAsset(asset, device)) return false;
+    if (!_decals->setAsset(asset, device)) {
+        return false;
+    }
     _vtRenderer = std::make_unique<VTRenderer>();
     if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary, *_decals)) {
         CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
@@ -179,52 +183,84 @@ void LandscapeRenderer::bindRuntimeTextures() {
 }
 
 void LandscapeRenderer::setGlobalColorMap(Texture2D *texture) {
-    if (_vtRenderer) _vtRenderer->setGlobalColorMap(texture);
+    if (_vtRenderer) {
+        _vtRenderer->setGlobalColorMap(texture);
+    }
 }
 
 void LandscapeRenderer::setGlobalColorStrength(float strength) {
-    if (_vtRenderer) _vtRenderer->setGlobalColorStrength(strength);
+    if (_vtRenderer) {
+        _vtRenderer->setGlobalColorStrength(strength);
+    }
 }
 
 void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
     // Freeze before changing compose modes; unfreeze only after recording all
     // requested modes so composition and surface decoding advance together.
-    if (data.freezeLod) setFreezeLod(true);
-    if (_debugData.lodColor != data.lodColor) setLodColor(data.lodColor);
-    if (_debugData.showRanges != data.showRanges) setShowRanges(data.showRanges);
-    if (_debugData.wireframe != data.wireframe) setWireframe(data.wireframe);
-    if (_debugData.unlit != data.unlit) setUnlit(data.unlit);
-    if (_debugData.heightBlendEnabled != data.heightBlendEnabled) setHeightBlendEnabled(data.heightBlendEnabled);
-    if (_debugData.decal3DEnabled != data.decal3DEnabled) setDecal3DEnabled(data.decal3DEnabled);
-    if (_debugData.bakeNormalEnabled != data.bakeNormalEnabled) setBakeNormalEnabled(data.bakeNormalEnabled);
-    if (_debugData.cliffEnabled != data.cliffEnabled) setCliffEnabled(data.cliffEnabled);
+    if (data.freezeLod) {
+        setFreezeLod(true);
+    }
+    if (_debugData.lodColor != data.lodColor) {
+        setLodColor(data.lodColor);
+    }
+    if (_debugData.showRanges != data.showRanges) {
+        setShowRanges(data.showRanges);
+    }
+    if (_debugData.wireframe != data.wireframe) {
+        setWireframe(data.wireframe);
+    }
+    if (_debugData.unlit != data.unlit) {
+        setUnlit(data.unlit);
+    }
+    if (_debugData.heightBlendEnabled != data.heightBlendEnabled) {
+        setHeightBlendEnabled(data.heightBlendEnabled);
+    }
+    if (_debugData.decal3DEnabled != data.decal3DEnabled) {
+        setDecal3DEnabled(data.decal3DEnabled);
+    }
+    if (_debugData.bakeNormalEnabled != data.bakeNormalEnabled) {
+        setBakeNormalEnabled(data.bakeNormalEnabled);
+    }
+    if (_debugData.cliffEnabled != data.cliffEnabled) {
+        setCliffEnabled(data.cliffEnabled);
+    }
     _debugData.showBox = data.showBox;
     _debugData.showVTAtlas = data.showVTAtlas;
-    if (!data.freezeLod) setFreezeLod(false);
+    if (!data.freezeLod) {
+        setFreezeLod(false);
+    }
 }
 
 void LandscapeRenderer::setDecal3DEnabled(bool enabled) {
     _debugData.decal3DEnabled = enabled;
     updateMaterialProperties();
     // Decal visibility affects geometry only and remains immediate while residency is frozen.
-    if (_decals) _decals->setEnabled(enabled);
+    if (_decals) {
+        _decals->setEnabled(enabled);
+    }
 }
 
 void LandscapeRenderer::setBakeNormalEnabled(bool enabled) {
     _debugData.bakeNormalEnabled = enabled;
-    if ((_debugData.freezeLod && _ready) || !_vtRenderer) return;
+    if ((_debugData.freezeLod && _ready) || !_vtRenderer) {
+        return;
+    }
     _vtRenderer->setBakeNormalEnabled(enabled);
     updateMaterialProperties();
 }
 
 void LandscapeRenderer::setHeightBlendEnabled(bool enabled) {
     _debugData.heightBlendEnabled = enabled;
-    if (_vtRenderer) _vtRenderer->setHeightBlendEnabled(enabled);
+    if (_vtRenderer) {
+        _vtRenderer->setHeightBlendEnabled(enabled);
+    }
 }
 
 void LandscapeRenderer::setCliffEnabled(bool enabled) {
     _debugData.cliffEnabled = enabled;
-    if ((_debugData.freezeLod && _ready) || !_vtRenderer) return;
+    if ((_debugData.freezeLod && _ready) || !_vtRenderer) {
+        return;
+    }
     _vtRenderer->setCliffEnabled(enabled);
     _syncCache.invalidate();
 }
@@ -328,14 +364,18 @@ LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const Patch &patch) {
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     surface.tile = _sourceResolver->shaderParams(tile);
-    if (!patch.needsMaterial) return surface;
+    if (!patch.needsMaterial) {
+        return surface;
+    }
     surface.normalParent = _sourceResolver->shaderParams(_sourceResolver->normalParent(node.address(), tile));
     surface.vt = _vtRenderer->mapping(patch.page);
     return surface;
 }
 
 void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &patch) {
-    if (model) resolveSurface(patch).apply(model, _instanceAttributeScratch);
+    if (model) {
+        resolveSurface(patch).apply(model, _instanceAttributeScratch);
+    }
 }
 
 LandscapeLocalRegion LandscapeRenderer::patchRegion(const Patch &patch) const {
@@ -415,10 +455,16 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patc
 }
 
 void LandscapeRenderer::preparePasses(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
-    if (!valid() || _initializationFailed) return;
+    if (!valid() || _initializationFailed) {
+        return;
+    }
     sync(geometryNodes, surfaceNodes);
-    if (_initializationFailed) return;
-    if (!_ready) return;
+    if (_initializationFailed) {
+        return;
+    }
+    if (!_ready) {
+        return;
+    }
     const auto stamp = Root::getInstance()->getFrameCount();
     for (const auto &entry : _active) {
         entry.second.model->updateTransform(stamp);
@@ -433,33 +479,53 @@ void LandscapeRenderer::rebuildNodeModels() {
         const uint32_t quadrant = (patch.x / 8U) + (patch.z / 8U) * 2U;
         _nodeModels[makeNodeKey(patch.node)].push_back({static_cast<uint8_t>(1U << quadrant), model});
     };
-    for (const auto &entry : _active) add(entry.second.patch, entry.second.model);
+    for (const auto &entry : _active) {
+        add(entry.second.patch, entry.second.model);
+    }
 }
 
 void LandscapeRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
                                           bool shadow, ccstd::vector<const scene::Model *> &models) const {
-    if (!_ready) return;
+    if (!_ready) {
+        return;
+    }
     for (const auto &node : selected) {
         const auto it = _nodeModels.find(makeNodeKey(node));
-        if (it == _nodeModels.end()) continue;
+        if (it == _nodeModels.end()) {
+            continue;
+        }
         for (const auto &entry : it->second) {
             const auto *model = entry.model;
-            if (!(node.quadrantMask & entry.quadrantMask) || !model->isEnabled() || (shadow && !model->isCastShadow())) continue;
+            if (!(node.quadrantMask & entry.quadrantMask) || !model->isEnabled() || (shadow && !model->isCastShadow())) {
+                continue;
+            }
             // Material patches and raised decals may occupy only part of a selected node.
-            if (model->getWorldBounds()->aabbFrustum(frustum)) models.push_back(model);
+            if (model->getWorldBounds()->aabbFrustum(frustum)) {
+                models.push_back(model);
+            }
         }
     }
     _decals->collectPassModels(selected, frustum, shadow, models);
 }
 
 void LandscapeRenderer::onGlobalPipelineStateChanged() {
-    for (const auto &entry : _active) entry.second.model->onGlobalPipelineStateChanged();
-    for (const auto &pool : _pool) for (const auto &model : pool) model->onGlobalPipelineStateChanged();
-    if (_decals) _decals->onGlobalPipelineStateChanged();
+    for (const auto &entry : _active) {
+        entry.second.model->onGlobalPipelineStateChanged();
+    }
+    for (const auto &pool : _pool) {
+        for (const auto &model : pool) {
+            model->onGlobalPipelineStateChanged();
+        }
+    }
+    if (_decals) {
+        _decals->onGlobalPipelineStateChanged();
+    }
 }
 
 void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
-    if (!valid()) return;
+    if (!valid()) {
+        return;
+    }
     auto &pages = _vtRenderer->pages();
     const bool frozen = _ready && _debugData.freezeLod;
     const auto &origin = _node->getWorldPosition();
@@ -468,9 +534,13 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
 
     // Poll once, while the previous frame's source set is still protected.
     // No drawing happens until changed source mappings have been resolved below.
-    if (_ready && !frozen) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    if (_ready && !frozen) {
+        _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    }
     if (_ready && (frozen || pages.ready()) &&
-        _syncCache.matches(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes)) return;
+        _syncCache.matches(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes)) {
+        return;
+    }
 
     buildFramePlan(geometryNodes, surfaceNodes);
     if (!frozen) {
@@ -505,13 +575,17 @@ void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNo
     _patches.reserve(geometryNodes.size() * 4U);
     for (const auto &node : surfaceNodes) {
         for (uint32_t q = 0; q < 4; ++q) {
-            if ((node.quadrantMask & (1U << q)) != 0) selectPatches(node, (q & 1U) * 8U, (q >> 1U) * 8U, 3U, _patches);
+            if ((node.quadrantMask & (1U << q)) != 0) {
+                selectPatches(node, (q & 1U) * 8U, (q >> 1U) * 8U, 3U, _patches);
+            }
         }
     }
     if (!_ready || !_debugData.freezeLod) {
         auto &pages = _vtRenderer->pages();
         pages.beginRequests();
-        for (const auto &patch : _patches) pages.request(patch.page, patch.vtPriority);
+        for (const auto &patch : _patches) {
+            pages.request(patch.page, patch.vtPriority);
+        }
         pages.endRequests();
     }
 
@@ -520,7 +594,9 @@ void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNo
     collectShadowOnlyNodes(geometryNodes, surfaceNodes, _shadowOnlyNodes);
     for (const auto &node : _shadowOnlyNodes) {
         for (uint32_t q = 0; q < 4; ++q) {
-            if ((node.quadrantMask & (1U << q)) == 0) continue;
+            if ((node.quadrantMask & (1U << q)) == 0) {
+                continue;
+            }
             _patches.push_back(Patch{node, (q & 1U) * 8U, (q >> 1U) * 8U, 3U, {}, 0.0F, false});
         }
     }
@@ -530,14 +606,20 @@ bool LandscapeRenderer::preparePageSources(const ccstd::vector<QuadNode> &geomet
                                             const ccstd::vector<QuadNode> &surfaceNodes) {
     _sourceResolver->beginFrame(!_ready);
     resolveFrameSources(geometryNodes, surfaceNodes);
-    if (_ready) return true; // Normal streaming was polled once at frame entry.
+    if (_ready) {
+        return true; // Normal streaming was polled once at frame entry.
+    }
 
     // Warmup may reveal finer normal neighborhoods or geometry parent sources.
     // Slot admission is already final: these rounds only load/resolve inputs.
     for (uint32_t round = 0; round <= config::MAX_LOD_LEVELS; ++round) {
-        if (!_tilePages->loadRequestedTiles()) return false;
+        if (!_tilePages->loadRequestedTiles()) {
+            return false;
+        }
         resolveFrameSources(geometryNodes, surfaceNodes);
-        if (_tilePages->requestsReady()) return true;
+        if (_tilePages->requestsReady()) {
+            return true;
+        }
     }
     return false;
 }
@@ -581,7 +663,9 @@ void LandscapeRenderer::syncTerrainModels() {
             } else {
                 model = createModel(patch.meshIndex);
             }
-            if (model == nullptr) continue;
+            if (model == nullptr) {
+                continue;
+            }
             iter = _active.emplace(key, ModelState{model, patch}).first;
             updateModel(iter->second, patch);
         } else {
@@ -589,13 +673,17 @@ void LandscapeRenderer::syncTerrainModels() {
             const bool boundsChanged = state.patch.node.minY != patch.node.minY || state.patch.node.maxY != patch.node.maxY;
             state.patch = patch;
             updateInstanceData(state.model, patch);
-            if (boundsChanged) updateModelBounds(state.model, patch);
+            if (boundsChanged) {
+                updateModelBounds(state.model, patch);
+            }
         }
     }
 }
 
 void LandscapeRenderer::syncDecals(const ccstd::vector<Patch> &patches) {
-    if (!_decals->beginSync(_viewPosition)) return;
+    if (!_decals->beginSync(_viewPosition)) {
+        return;
+    }
     for (const auto &patch : patches) {
         const auto region = patchRegion(patch);
         const float cell = _data.nodeSize(patch.node.level) / 16.0F;
@@ -612,10 +700,18 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
         return;
     }
     _debugData.freezeLod = frozen;
-    if (_vtRenderer) _vtRenderer->setFrozen(frozen && _ready);
-    if (_decals) _decals->refreshInstances(_viewPosition);
-    if (!frozen) setBakeNormalEnabled(_debugData.bakeNormalEnabled);
-    if (!frozen) setCliffEnabled(_debugData.cliffEnabled);
+    if (_vtRenderer) {
+        _vtRenderer->setFrozen(frozen && _ready);
+    }
+    if (_decals) {
+        _decals->refreshInstances(_viewPosition);
+    }
+    if (!frozen) {
+        setBakeNormalEnabled(_debugData.bakeNormalEnabled);
+    }
+    if (!frozen) {
+        setCliffEnabled(_debugData.cliffEnabled);
+    }
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         updateModelBounds(state.model, state.patch);
@@ -623,25 +719,41 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
 }
 
 void LandscapeRenderer::setCastShadow(bool enabled) {
-    if (_castShadow == enabled) return;
-    _castShadow = enabled;
-    for (const auto &entry : _active) entry.second.model->setCastShadow(enabled);
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) model->setCastShadow(enabled);
+    if (_castShadow == enabled) {
+        return;
     }
-    if (_decals) _decals->setCastShadow(enabled);
+    _castShadow = enabled;
+    for (const auto &entry : _active) {
+        entry.second.model->setCastShadow(enabled);
+    }
+    for (const auto &pool : _pool) {
+        for (const auto &model : pool) {
+            model->setCastShadow(enabled);
+        }
+    }
+    if (_decals) {
+        _decals->setCastShadow(enabled);
+    }
 }
 
 void LandscapeRenderer::setReceiveShadow(bool enabled) {
-    if (_receiveShadow == enabled) return;
+    if (_receiveShadow == enabled) {
+        return;
+    }
     _receiveShadow = enabled;
     // Model refreshes CC_RECEIVE_SHADOW for every submodel. Include pooled
     // instances and decals so toggling works even while LOD is frozen.
-    for (const auto &entry : _active) entry.second.model->setReceiveShadow(enabled);
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) model->setReceiveShadow(enabled);
+    for (const auto &entry : _active) {
+        entry.second.model->setReceiveShadow(enabled);
     }
-    if (_decals) _decals->setReceiveShadow(enabled);
+    for (const auto &pool : _pool) {
+        for (const auto &model : pool) {
+            model->setReceiveShadow(enabled);
+        }
+    }
+    if (_decals) {
+        _decals->setReceiveShadow(enabled);
+    }
     // The receive variant adds an instanced shadow-bias attribute. Rebuild the
     // layouts and restore terrain attributes, including frozen active models.
     setWireframe(_debugData.wireframe);
@@ -649,21 +761,27 @@ void LandscapeRenderer::setReceiveShadow(bool enabled) {
 
 void LandscapeRenderer::setWireframe(bool wireframe) {
     _debugData.wireframe = wireframe;
-    if (_decals) _decals->setWireframe(wireframe);
+    if (_decals) {
+        _decals->setWireframe(wireframe);
+    }
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         state.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
         updateInstanceData(state.model, state.patch);
     }
     for (const auto &pool : _pool) {
-        for (const auto &model : pool) model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
+        for (const auto &model : pool) {
+            model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
+        }
         // Inactive models get fresh instance data when reused. Do not request
         // height/VT pages here: doing so would pin invisible nodes in the caches.
     }
 }
 
 void LandscapeRenderer::setViewPos(const Vec3 &position) {
-    if (_debugData.freezeLod && _ready) return;
+    if (_debugData.freezeLod && _ready) {
+        return;
+    }
     if (_viewPosition.x == position.x &&
         _viewPosition.y == position.y &&
         _viewPosition.z == position.z) {
@@ -678,7 +796,9 @@ RenderTexture *LandscapeRenderer::vtAtlas() const {
 }
 
 void LandscapeRenderer::setUnlit(bool enabled) {
-    if (_debugData.unlit == enabled || !valid()) return;
+    if (_debugData.unlit == enabled || !valid()) {
+        return;
+    }
     // These passes belong exclusively to this renderer. Update their shader
     // variants in place, preserving texture bindings and instanced batching.
     const auto compile = [this](bool unlit) {
@@ -730,7 +850,9 @@ void LandscapeRenderer::destroy() {
         removeModel(entry.second.model);
     }
     for (auto &pool : _pool) {
-        for (const auto &model : pool) removeModel(model);
+        for (const auto &model : pool) {
+            removeModel(model);
+        }
         pool.clear();
     }
     _active.clear();
@@ -741,7 +863,9 @@ void LandscapeRenderer::destroy() {
 
     _tilePages.reset();
     _asset = nullptr;
-    for (auto &mesh : _meshes) mesh = nullptr;
+    for (auto &mesh : _meshes) {
+        mesh = nullptr;
+    }
     _materialSolid = nullptr;
     _materialWire = nullptr;
     _materialLibrary.reset();

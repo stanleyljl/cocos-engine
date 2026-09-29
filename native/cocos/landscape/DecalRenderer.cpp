@@ -81,7 +81,9 @@ void LandscapeSurfaceInstance::apply(scene::Model *model, TypedArray &scratch) c
     setLandscapeInstanceAttribute(model, scratch, "a_gridInst", grid);
     setLandscapeInstanceAttribute(model, scratch, "a_quadrantInst", quadrant);
     setLandscapeInstanceAttribute(model, scratch, "a_tileInst", tile);
-    if (!needsMaterial) return;
+    if (!needsMaterial) {
+        return;
+    }
     setLandscapeInstanceAttribute(model, scratch, "a_normalParentInst", normalParent);
     setLandscapeInstanceAttribute(model, scratch, "a_vtInst", vt);
 }
@@ -176,7 +178,9 @@ uint32_t DecalRenderer::collectPageDecals(uint32_t slot, const Vec4 &region) {
     for (size_t i = 0; i < decals.size(); ++i) {
         const auto &d = decals[i];
         if (d.x > region.x + region.z + border || d.z > region.y + region.z + border ||
-            d.x + d.size < region.x - border || d.z + d.size < region.y - border) continue;
+            d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
+            continue;
+        }
         _pageIndexData[slot * config::DECAL_INSTANCE_MAX + count++] = static_cast<uint8_t>(i);
     }
     return count;
@@ -235,17 +239,25 @@ bool DecalRenderer::beginSync(const Vec3 &viewPosition) {
     // Evaluate eligibility once per decal, independent of patch subdivision.
     for (uint32_t i = 0; i < _asset->decals().size(); ++i) {
         const auto &d = _asset->decals()[i];
-        if (_asset->decalLayers()[d.layer].heightScale == 0.0F) continue;
+        if (_asset->decalLayers()[d.layer].heightScale == 0.0F) {
+            continue;
+        }
         const float distance = (_viewPosition - (_node->getWorldPosition() + _centers[i])).length();
-        if (distance >= d.farDistance) continue;
+        if (distance >= d.farDistance) {
+            continue;
+        }
         _candidates[_candidateCount++] = i;
     }
-    if (_candidateCount == 0) endSync();
+    if (_candidateCount == 0) {
+        endSync();
+    }
     return _candidateCount != 0;
 }
 
 void DecalRenderer::addPatch(const TerrainPatch &patch) {
-    if (_candidateCount == 0) return;
+    if (_candidateCount == 0) {
+        return;
+    }
     const size_t patchIndex = _patches.size();
     bool stored = false;
     // Fixed lattice at 1/16 of the finest terrain cell. Patch ownership changes
@@ -260,7 +272,9 @@ void DecalRenderer::addPatch(const TerrainPatch &patch) {
     for (size_t candidate = 0; candidate < _candidateCount; ++candidate) {
         const uint32_t i = _candidates[candidate];
         const auto &d = _asset->decals()[i];
-        if (x + size <= d.x || z + size <= d.z || x >= d.x + d.size || z >= d.z + d.size) continue;
+        if (x + size <= d.x || z + size <= d.z || x >= d.x + d.size || z >= d.z + d.size) {
+            continue;
+        }
         if (!stored) {
             _patches.push_back(patch);
             stored = true;
@@ -269,23 +283,29 @@ void DecalRenderer::addPatch(const TerrainPatch &patch) {
         const int firstZ = static_cast<int>(std::floor((std::max(z, d.z) - originZ) / step));
         const int endX = static_cast<int>(std::ceil((std::min(x + size, d.x + d.size) - originX) / step));
         const int endZ = static_cast<int>(std::ceil((std::min(z + size, d.z + d.size) - originZ) / step));
-        for (int iz = firstZ; iz < endZ; ++iz) for (int ix = firstX; ix < endX; ++ix) {
-            const float left = std::max(originX + ix * step, d.x);
-            const float bottom = std::max(originZ + iz * step, d.z);
-            const float right = std::min(originX + (ix + 1) * step, d.x + d.size);
-            const float top = std::min(originZ + (iz + 1) * step, d.z + d.size);
-            appendDraw(patchIndex, i, Vec4{left, bottom, right - left, top - bottom});
+        for (int iz = firstZ; iz < endZ; ++iz) {
+            for (int ix = firstX; ix < endX; ++ix) {
+                const float left = std::max(originX + ix * step, d.x);
+                const float bottom = std::max(originZ + iz * step, d.z);
+                const float right = std::min(originX + (ix + 1) * step, d.x + d.size);
+                const float top = std::min(originZ + (iz + 1) * step, d.z + d.size);
+                appendDraw(patchIndex, i, Vec4{left, bottom, right - left, top - bottom});
+            }
         }
     }
 }
 
 void DecalRenderer::endSync() {
-    for (size_t i = _active; i < _draws.size(); ++i) _draws[i].model->setEnabled(false);
+    for (size_t i = _active; i < _draws.size(); ++i) {
+        _draws[i].model->setEnabled(false);
+    }
 }
 
 void DecalRenderer::refreshInstances(const Vec3 &viewPosition) {
     _viewPosition = viewPosition;
-    for (size_t i = 0; i < _active; ++i) updateInstance(_draws[i]);
+    for (size_t i = 0; i < _active; ++i) {
+        updateInstance(_draws[i]);
+    }
 }
 
 void DecalRenderer::preparePasses(uint32_t stamp) {
@@ -299,24 +319,34 @@ void DecalRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, c
                                      bool shadow, ccstd::vector<const scene::Model *> &models) const {
     for (const auto &node : selected) {
         const auto it = _nodeDraws.find(makeNodeKey(node));
-        if (it == _nodeDraws.end()) continue;
+        if (it == _nodeDraws.end()) {
+            continue;
+        }
         for (size_t index : it->second) {
             const auto &draw = _draws[index];
             const auto *model = draw.model.get();
             if (!(node.quadrantMask & _patches[draw.patch].quadrantMask) ||
-                !model->isEnabled() || (shadow && !model->isCastShadow())) continue;
-            if (model->getWorldBounds()->aabbFrustum(frustum)) models.push_back(model);
+                !model->isEnabled() || (shadow && !model->isCastShadow())) {
+                continue;
+            }
+            if (model->getWorldBounds()->aabbFrustum(frustum)) {
+                models.push_back(model);
+            }
         }
     }
 }
 
 void DecalRenderer::onGlobalPipelineStateChanged() {
-    for (const auto &draw : _draws) draw.model->onGlobalPipelineStateChanged();
+    for (const auto &draw : _draws) {
+        draw.model->onGlobalPipelineStateChanged();
+    }
 }
 
 void DecalRenderer::setEnabled(bool enabled) {
     _enabled = enabled;
-    for (size_t i = 0; i < _draws.size(); ++i) _draws[i].model->setEnabled(enabled && i < _active);
+    for (size_t i = 0; i < _draws.size(); ++i) {
+        _draws[i].model->setEnabled(enabled && i < _active);
+    }
 }
 
 void DecalRenderer::setWireframe(bool wireframe) {
@@ -324,18 +354,24 @@ void DecalRenderer::setWireframe(bool wireframe) {
     for (size_t i = 0; i < _draws.size(); ++i) {
         const auto &draw = _draws[i];
         draw.model->setSubModelMaterial(0, wireframe ? _wire.get() : _solid.get());
-        if (i < _active) updateInstance(draw);
+        if (i < _active) {
+            updateInstance(draw);
+        }
     }
 }
 
 void DecalRenderer::setCastShadow(bool enabled) {
     _castShadow = enabled;
-    for (const auto &draw : _draws) draw.model->setCastShadow(enabled);
+    for (const auto &draw : _draws) {
+        draw.model->setCastShadow(enabled);
+    }
 }
 
 void DecalRenderer::setReceiveShadow(bool enabled) {
     _receiveShadow = enabled;
-    for (const auto &draw : _draws) draw.model->setReceiveShadow(enabled);
+    for (const auto &draw : _draws) {
+        draw.model->setReceiveShadow(enabled);
+    }
     // Variant changes can rebuild instance layouts, including frozen models.
     setWireframe(_wireframe);
 }

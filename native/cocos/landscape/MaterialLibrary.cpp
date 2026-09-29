@@ -98,7 +98,9 @@ void accumulateMipSample(const uint8_t *pixel, MipContent content, MipAccumulato
 void writeMipSample(const MipAccumulator &sum, MipContent content, uint8_t *pixel) {
     for (uint32_t channel = 0; channel < 4U; ++channel) {
         float value = sum.channels[channel] / static_cast<float>(sum.sampleCount);
-        if (content == MipContent::SRGB_COLOR && channel < 3U) value = linearToSrgb(value);
+        if (content == MipContent::SRGB_COLOR && channel < 3U) {
+            value = linearToSrgb(value);
+        }
         pixel[channel] = encode(value);
     }
     if (content == MipContent::NORMAL) {
@@ -194,7 +196,9 @@ void uploadTexture(gfx::Device *device, gfx::Texture *texture, uint32_t resoluti
 } // namespace
 
 MaterialLibrary::MaterialLibrary() = default;
-MaterialLibrary::~MaterialLibrary() { destroy(); }
+MaterialLibrary::~MaterialLibrary() {
+    destroy();
+}
 
 bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
     CC_ASSERT(_albedoHeight == nullptr && _normalRoughnessAO == nullptr && _whiteTexture == nullptr);
@@ -202,7 +206,9 @@ bool MaterialLibrary::init(gfx::Device *device, const LandscapeAsset &asset) {
         return false;
     }
     // Keep failure cleanup in one place, including partially loaded decals.
-    if (!initMaterialLayers(device, asset) || !initDecalLayers(device, asset) || !initWhiteTexture(device)) {
+    if (!initMaterialLayers(device, asset) ||
+        !initDecalLayers(device, asset) ||
+        !initWhiteTexture(device)) {
         destroy();
         return false;
     }
@@ -245,21 +251,29 @@ bool MaterialLibrary::initDecalLayers(gfx::Device *device, const LandscapeAsset 
     const uint32_t decalCount = std::max(1U, static_cast<uint32_t>(decalLayers.size()));
     _decalAlbedo = createTexture(device, decalSize, decalCount);
     _decalNormal = createTexture(device, decalSize, decalCount);
-    if (!_decalAlbedo || !_decalNormal) return false;
+    if (!_decalAlbedo || !_decalNormal) {
+        return false;
+    }
     auto heightInfo = _decalAlbedo->getInfo();
     heightInfo.levelCount = 1;
     _decalHeight = device->createTexture(heightInfo);
-    if (!_decalHeight) return false;
+    if (!_decalHeight) {
+        return false;
+    }
     for (uint32_t i = 0; i < decalCount; ++i) {
         ccstd::vector<uint8_t> color{0, 0, 0, 0}, normal{128, 128, 255, 255}, height{0, 0, 0, 255};
         if (!decalLayers.empty()) {
             const auto &d = decalLayers[i];
             if (!decodeRGBA8(d.albedoMask, decalSize, color) || !decodeRGBA8(d.normalRoughnessAO, decalSize, normal) ||
-                !decodeRGBA8(d.height, decalSize, height)) return false;
+                !decodeRGBA8(d.height, decalSize, height)) {
+                return false;
+            }
         }
         for (size_t p = 0; p < color.size(); p += 4) {
             const float alpha = color[p + 3] / 255.0F;
-            for (size_t c = 0; c < 3; ++c) color[p + c] = encode(srgbToLinear(color[p + c] / 255.0F) * alpha);
+            for (size_t c = 0; c < 3; ++c) {
+                color[p + c] = encode(srgbToLinear(color[p + c] / 255.0F) * alpha);
+            }
         }
         uploadTexture(device, _decalAlbedo, decalSize, i, std::move(color), MipContent::LINEAR_COLOR);
         uploadTexture(device, _decalNormal, decalSize, i, std::move(normal), MipContent::NORMAL);
@@ -285,7 +299,7 @@ void MaterialLibrary::initSamplers(gfx::Device *device) {
     info.addressU = gfx::Address::WRAP;
     info.addressV = gfx::Address::WRAP;
     info.addressW = gfx::Address::WRAP;
-    _sampler = device->getSampler(info);
+    _repeatSampler = device->getSampler(info);
     info.addressU = gfx::Address::CLAMP;
     info.addressV = gfx::Address::CLAMP;
     info.addressW = gfx::Address::CLAMP;
@@ -299,7 +313,7 @@ void MaterialLibrary::destroy() {
     _decalAlbedo = nullptr;
     _decalNormal = nullptr;
     _decalHeight = nullptr;
-    _sampler = nullptr;
+    _repeatSampler = nullptr;
     _clampSampler = nullptr;
     _tilingParams.clear();
 }

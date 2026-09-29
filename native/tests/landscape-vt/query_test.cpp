@@ -11,7 +11,10 @@ using namespace cc::landscape;
 using Status = LandscapeQueryStatus;
 
 void require(bool ok, const char *message) {
-    if (!ok) { std::cerr << message << '\n'; std::exit(1); }
+    if (!ok) {
+        std::cerr << message << '\n';
+        std::exit(1);
+    }
 }
 void close(float a, float b, const char *message) { require(std::abs(a-b) < 1e-3F, message); }
 
@@ -24,14 +27,19 @@ LandscapeData data() {
 LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
     LandscapeQueryTile t;
     t.height.resize(18); t.splat.resize(18); t.normal.resize(27);
-    for (uint32_t z=0; z<3; ++z) for (uint32_t x=0; x<3; ++x) {
-        const uint16_t h = static_cast<uint16_t>(100 + (tx*2+x)*100 + (tz*2+z)*50);
-        const size_t i=z*3+x;
-        t.height[i*2]=h>>8; t.height[i*2+1]=h&255;
-        const uint16_t s = 3U | (7U<<5U) | (21U<<10U);
-        std::memcpy(t.splat.data()+i*2, &s, 2);
-        // Deliberately different from the height gradient: queries must use RGB.
-        t.normal[i*3]=64; t.normal[i*3+1]=220; t.normal[i*3+2]=160;
+    for (uint32_t z = 0; z < 3; ++z) {
+        for (uint32_t x = 0; x < 3; ++x) {
+            const uint16_t h = static_cast<uint16_t>(100 + (tx * 2 + x) * 100 + (tz * 2 + z) * 50);
+            const size_t i = z * 3 + x;
+            t.height[i * 2] = h >> 8;
+            t.height[i * 2 + 1] = h & 255;
+            const uint16_t s = 3U | (7U << 5U) | (21U << 10U);
+            std::memcpy(t.splat.data() + i * 2, &s, 2);
+            // Deliberately different from the height gradient: queries must use RGB.
+            t.normal[i * 3] = 64;
+            t.normal[i * 3 + 1] = 220;
+            t.normal[i * 3 + 2] = 160;
+        }
     }
     return t;
 }
@@ -51,7 +59,9 @@ struct Loading {
     void drain(LandscapeQuery &query) {
         query.update();
         for (int i=0;i<20 && !jobs.empty();++i) {
-            while(!jobs.empty()) finish();
+            while (!jobs.empty()) {
+                finish();
+            }
             query.update();
         }
     }
@@ -134,8 +144,9 @@ void failureAndSplat() {
     LandscapeQuery splat(data(),splatLoader.loader(),1);
     splat.setSource(1,{-3,-1},0); splat.update();
     auto t=tile(0,0);
-    for (const auto &pair : {std::pair<size_t,uint16_t>{0,3}, {1,7}, {3,11}, {4,13}})
-        std::memcpy(t.splat.data()+pair.first*2,&pair.second,2);
+    for (const auto &pair : {std::pair<size_t, uint16_t>{0, 3}, {1, 7}, {3, 11}, {4, 13}}) {
+        std::memcpy(t.splat.data() + pair.first * 2, &pair.second, 2);
+    }
     splatLoader.jobs.front().complete(std::move(t),true); splatLoader.jobs.pop_front(); splat.update();
     const auto hit=splat.sample({-3.25F,-1.75F});
     require(hit.surfaceType==7,"splat triangle interpolation"); close(hit.surfaceWeight,0.5F,"splat spatial weights");

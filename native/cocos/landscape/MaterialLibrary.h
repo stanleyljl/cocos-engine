@@ -50,8 +50,8 @@ public:
     gfx::Texture *decalAlbedo() const { return _decalAlbedo; }
     gfx::Texture *decalNormal() const { return _decalNormal; }
     gfx::Texture *decalHeight() const { return _decalHeight; }
-    gfx::Sampler *sampler() const { return _sampler; }
     gfx::Texture *whiteTexture() const { return _whiteTexture; }
+    gfx::Sampler *repeatSampler() const { return _repeatSampler; }
     gfx::Sampler *clampSampler() const { return _clampSampler; }
     // Shared shader layout, built once from the loaded material layers.
     const ccstd::vector<Vec4> &tilingParams() const { return _tilingParams; }
@@ -68,7 +68,7 @@ private:
     IntrusivePtr<gfx::Texture> _decalAlbedo;
     IntrusivePtr<gfx::Texture> _decalNormal;
     IntrusivePtr<gfx::Texture> _decalHeight;
-    gfx::Sampler *_sampler{nullptr}; // cached by device
+    gfx::Sampler *_repeatSampler{nullptr}; // cached by device
     gfx::Sampler *_clampSampler{nullptr}; // cached by device
     ccstd::vector<Vec4> _tilingParams;
 };

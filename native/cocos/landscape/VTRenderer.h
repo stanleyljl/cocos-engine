@@ -77,7 +77,11 @@ private:
         uint32_t level = data.minTileLevel;
         while (level < data.maxLevel &&
                static_cast<uint64_t>(data.sectorsX) * data.sectorsZ *
-                   (1ULL << (2U * (data.maxLevel - level))) > config::PAGE_POOL_LAYERS / 4U) ++level;
+                   (1ULL << (2U * (data.maxLevel - level)))>
+                   config::PAGE_POOL_LAYERS /
+               4U) {
+            ++level;
+        }
         return level;
     }
 

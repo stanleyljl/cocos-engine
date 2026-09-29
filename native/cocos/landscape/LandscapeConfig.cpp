@@ -94,7 +94,9 @@ NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint
 }
 
 NodeRangeLayout::NodeRangeLayout(const LandscapeData &data) {
-    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS) return;
+    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS) {
+        return;
+    }
     _sectorsX = data.sectorsX;
     _sectorsZ = data.sectorsZ;
     _levelCount = data.maxLevel + 1U;
@@ -107,15 +109,21 @@ NodeRangeLayout::NodeRangeLayout(const LandscapeData &data) {
 
 size_t NodeRangeLayout::sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
                                        uint32_t localX, uint32_t localZ) const {
-    if (level >= _levelCount || sectorX >= _sectorsX || sectorZ >= _sectorsZ) return INVALID_INDEX;
+    if (level >= _levelCount || sectorX >= _sectorsX || sectorZ >= _sectorsZ) {
+        return INVALID_INDEX;
+    }
     const auto &layout = _levels[level];
-    if (localX >= layout.nodesPerSide || localZ >= layout.nodesPerSide) return INVALID_INDEX;
+    if (localX >= layout.nodesPerSide || localZ >= layout.nodesPerSide) {
+        return INVALID_INDEX;
+    }
     const size_t sectorIndex = static_cast<size_t>(sectorZ) * _sectorsX + sectorX;
     return sectorIndex * _nodesPerSector + layout.offset + static_cast<size_t>(localZ) * layout.nodesPerSide + localX;
 }
 
 size_t NodeRangeLayout::globalNodeIndex(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
-    if (level >= _levelCount) return INVALID_INDEX;
+    if (level >= _levelCount) {
+        return INVALID_INDEX;
+    }
     const uint32_t side = _levels[level].nodesPerSide;
     return sectorNodeIndex(globalX / side, globalZ / side, level, globalX % side, globalZ % side);
 }
@@ -168,11 +176,15 @@ void collectShadowOnlyNodes(const ccstd::vector<QuadNode> &geometryNodes,
     auto surface = surfaceNodes.begin();
     for (auto node : geometryNodes) {
         const auto key = makeNodeKey(node);
-        while (surface != surfaceNodes.end() && makeNodeKey(*surface) < key) ++surface;
+        while (surface != surfaceNodes.end() && makeNodeKey(*surface) < key) {
+            ++surface;
+        }
         if (surface != surfaceNodes.end() && makeNodeKey(*surface) == key) {
             node.quadrantMask &= static_cast<uint8_t>(~surface->quadrantMask);
         }
-        if (node.quadrantMask != 0) output.push_back(node);
+        if (node.quadrantMask != 0) {
+            output.push_back(node);
+        }
     }
 }
 

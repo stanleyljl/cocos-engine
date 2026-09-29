@@ -27,8 +27,9 @@ LandscapeQueryStatus LandscapeQuery::setSource(uint32_t id, LandscapeLocalXZ cen
     }
     const auto previous = _sources.find(id);
     // Motion within the same tile rectangle does not allocate or repin tiles.
-    if (previous != _sources.end() && previous->second.front() == keys.front() && previous->second.back() == keys.back())
+    if (previous != _sources.end() && previous->second.front() == keys.front() && previous->second.back() == keys.back()) {
         return sourceStatus(id);
+    }
     if (!sourceFits(keys, previous == _sources.end() ? nullptr : &previous->second)) {
         removeSource(id);
         return LandscapeQueryStatus::NOT_READY;
@@ -57,7 +58,9 @@ LandscapeQueryStatus LandscapeQuery::collectSourceKeys(LandscapeLocalXZ center, 
     }
     keys.reserve(size_t(x1 - x0 + 1U) * (z1 - z0 + 1U));
     for (uint32_t iz = z0; iz <= z1; ++iz) {
-        for (uint32_t ix = x0; ix <= x1; ++ix) keys.push_back(makeNodeKey(_data.minTileLevel, ix, iz));
+        for (uint32_t ix = x0; ix <= x1; ++ix) {
+            keys.push_back(makeNodeKey(_data.minTileLevel, ix, iz));
+        }
     }
     return LandscapeQueryStatus::HIT;
 }
@@ -66,10 +69,14 @@ bool LandscapeQuery::sourceFits(const ccstd::vector<uint64_t> &keys,
                                 const ccstd::vector<uint64_t> *previous) const {
     const ccstd::unordered_set<uint64_t> desired(keys.begin(), keys.end());
     ccstd::unordered_set<uint64_t> old;
-    if (previous) old.insert(previous->begin(), previous->end());
+    if (previous) {
+        old.insert(previous->begin(), previous->end());
+    }
     size_t protectedCount = keys.size();
     for (const auto &pair : _entries) {
-        if (pair.second.references > old.count(pair.first) && !desired.count(pair.first)) ++protectedCount;
+        if (pair.second.references > old.count(pair.first) && !desired.count(pair.first)) {
+            ++protectedCount;
+        }
     }
     return protectedCount <= _capacity;
 }
@@ -81,16 +88,24 @@ void LandscapeQuery::pinSourceTiles(const ccstd::vector<uint64_t> &keys) {
             if (_entries.size() == _capacity) {
                 auto victim = _entries.end();
                 for (auto it = _entries.begin(); it != _entries.end(); ++it) {
-                    if (it->second.references || desired.count(it->first)) continue;
-                    if (victim == _entries.end() || it->second.lastUse < victim->second.lastUse) victim = it;
+                    if (it->second.references || desired.count(it->first)) {
+                        continue;
+                    }
+                    if (victim == _entries.end() || it->second.lastUse < victim->second.lastUse) {
+                        victim = it;
+                    }
                 }
-                if (victim != _entries.end()) _entries.erase(victim);
+                if (victim != _entries.end()) {
+                    _entries.erase(victim);
+                }
             }
             _entries.emplace(key, Entry{});
         }
         auto &entry = _entries.at(key);
         // A fresh registration can retry a previously failed, unpinned tile.
-        if (!entry.references && entry.state == State::FAILED) entry.state = State::WAITING;
+        if (!entry.references && entry.state == State::FAILED) {
+            entry.state = State::WAITING;
+        }
         ++entry.references;
         entry.lastUse = ++_clock;
     }
@@ -98,18 +113,26 @@ void LandscapeQuery::pinSourceTiles(const ccstd::vector<uint64_t> &keys) {
 
 void LandscapeQuery::removeSource(uint32_t id) {
     const auto it = _sources.find(id);
-    if (it == _sources.end()) return;
-    for (const auto key : it->second) --_entries.at(key).references;
+    if (it == _sources.end()) {
+        return;
+    }
+    for (const auto key : it->second) {
+        --_entries.at(key).references;
+    }
     _sources.erase(it);
 }
 
 LandscapeQueryStatus LandscapeQuery::sourceStatus(uint32_t id) const {
     const auto it = _sources.find(id);
-    if (it == _sources.end()) return LandscapeQueryStatus::NOT_READY;
+    if (it == _sources.end()) {
+        return LandscapeQueryStatus::NOT_READY;
+    }
     bool ready = true;
     for (const auto key : it->second) {
         const auto state = _entries.at(key).state;
-        if (state == State::FAILED) return LandscapeQueryStatus::ERROR;
+        if (state == State::FAILED) {
+            return LandscapeQueryStatus::ERROR;
+        }
         ready &= state == State::READY;
     }
     return ready ? LandscapeQueryStatus::HIT : LandscapeQueryStatus::NOT_READY;
@@ -126,19 +149,27 @@ void LandscapeQuery::update() {
         --_inFlight;
         const auto it = _entries.find(item.key);
         // A moved source may have evicted/re-requested this key while decoding.
-        if (it == _entries.end() || it->second.ticket != item.ticket) continue;
+        if (it == _entries.end() || it->second.ticket != item.ticket) {
+            continue;
+        }
         auto &entry = it->second;
         const bool valid = item.success && item.tile.height.size() == samples * 2U &&
             item.tile.splat.size() == samples * 2U && item.tile.normal.size() == samples * 3U;
         entry.state = valid ? State::READY : State::FAILED;
-        if (valid) entry.tile = std::move(item.tile);
+        if (valid) {
+            entry.tile = std::move(item.tile);
+        }
     }
     // Includes queued completions: unpolled results cannot grow without bound.
     constexpr uint32_t MAX_IN_FLIGHT = 2;
     for (auto &pair : _entries) {
         auto &entry = pair.second;
-        if (_inFlight >= MAX_IN_FLIGHT) break;
-        if (!entry.references || entry.state != State::WAITING) continue;
+        if (_inFlight >= MAX_IN_FLIGHT) {
+            break;
+        }
+        if (!entry.references || entry.state != State::WAITING) {
+            continue;
+        }
         entry.state = State::LOADING;
         entry.ticket = ++_nextTicket;
         ++_inFlight;
@@ -170,7 +201,9 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     const auto address = _data.nodeAtGridClamped(_data.minTileLevel, grid);
     const auto key = address.key();
     const auto it = _entries.find(key);
-    if (it == _entries.end() || it->second.state == State::WAITING || it->second.state == State::LOADING) return result;
+    if (it == _entries.end() || it->second.state == State::WAITING || it->second.state == State::LOADING) {
+        return result;
+    }
     if (it->second.state == State::FAILED) {
         result.status = LandscapeQueryStatus::ERROR;
         return result;
@@ -178,7 +211,9 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     auto &entry = it->second;
     entry.lastUse = ++_clock;
     const auto location = locateSample(grid, address);
-    if (!interpolateHeightNormal(entry, location, local, result)) return result;
+    if (!interpolateHeightNormal(entry, location, local, result)) {
+        return result;
+    }
     interpolateSurface(entry, location, result);
     result.status = LandscapeQueryStatus::HIT;
     return result;

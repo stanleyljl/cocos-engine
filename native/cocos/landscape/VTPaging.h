@@ -37,7 +37,9 @@ class VTPageLayout {
 public:
     explicit VTPageLayout(float sectorSize = 1.0F) : _sectorSize(sectorSize) {
         assert(std::isfinite(sectorSize) && sectorSize > 0);
-        while (_rootLevel < 27U && sectorSize / static_cast<float>(1U << (_rootLevel + 1U)) >= 1.0F) ++_rootLevel;
+        while (_rootLevel < 27U && sectorSize / static_cast<float>(1U << (_rootLevel + 1U)) >= 1.0F) {
+            ++_rootLevel;
+        }
     }
 
     uint32_t rootLevel() const { return _rootLevel; }
@@ -47,7 +49,9 @@ public:
     // Distance-based material resolution, independent of geometry LOD.
     uint32_t levelForDistance(float distance) const {
         uint32_t level = 0;
-        while (level < _rootLevel && pageSize(level) < distance * 0.5F) ++level;
+        while (level < _rootLevel && pageSize(level) < distance * 0.5F) {
+            ++level;
+        }
         return level;
     }
     LandscapeGridXZ pageOrigin(VTPageAddress page) const {
@@ -65,7 +69,9 @@ public:
                 static_cast<uint32_t>(std::floor(bounds.min.x / size + 1e-7)),
                 static_cast<uint32_t>(std::floor(bounds.min.z / size + 1e-7))};
             if (bounds.max.x <= (page.x + 1.0) * size + size * 1e-7 &&
-                bounds.max.z <= (page.z + 1.0) * size + size * 1e-7) return page;
+                bounds.max.z <= (page.z + 1.0) * size + size * 1e-7) {
+                return page;
+            }
         }
         assert(false && "A VT patch must not cross sector boundaries");
         return {};

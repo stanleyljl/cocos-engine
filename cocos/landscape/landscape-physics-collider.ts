@@ -42,11 +42,15 @@ export function createNativeLandscapeShapeType (Base: any, Resource: any): Const
         private _resource: any;
         private _nativeInitialized = false;
         setTerrain (terrain: LandscapePhysicsHeightfield): void {
-            if (this._resource) return;
+            if (this._resource) {
+                return;
+            }
             const resource = new Resource();
             this._resource = resource;
             const id = resource.create(terrain.samples, terrain.getVertexCountI(), this._impl.getObjectID());
-            if (!id) throw new Error('Failed to create Landscape native heightfield');
+            if (!id) {
+                throw new Error('Failed to create Landscape native heightfield');
+            }
             this._impl.setTerrain(id, terrain.tileSize, terrain.tileSize, terrain.heightFieldScale);
         }
         initialize (collider: TerrainCollider): void {
@@ -60,7 +64,9 @@ export function createNativeLandscapeShapeType (Base: any, Resource: any): Const
         }
         onDestroy (): void {
             // Failed cooking never initialized/booked the native shape.
-            if (this._nativeInitialized) super.onDestroy();
+            if (this._nativeInitialized) {
+                super.onDestroy();
+            }
             this._resource?.destroy();
             this._resource = null;
         }
@@ -72,7 +78,9 @@ export function createNativeLandscapeShapeType (Base: any, Resource: any): Const
 const shapeTypes = new WeakMap<Constructor<ITerrainShape>, Constructor<ITerrainShape>>();
 function createLandscapeShape (): ITerrainShape {
     const Base = selector.wrapper.TerrainShape as any;
-    if (!Base) throw new Error(`Landscape collision unavailable: ${selector.id}`);
+    if (!Base) {
+        throw new Error(`Landscape collision unavailable: ${selector.id}`);
+    }
     let Type = shapeTypes.get(Base);
     if (!Type) {
         if (selector.id === 'bullet') {
@@ -87,7 +95,9 @@ function createLandscapeShape (): ITerrainShape {
                     const n = terrain.getVertexCountI();
                     for (let i = 0; i < n; ++i) {
                         this.data[i] = new Array<number>(n);
-                        for (let j = 0; j < n; ++j) this.data[i][j] = terrain.getHeight(j, i);
+                        for (let j = 0; j < n; ++j) {
+                            this.data[i][j] = terrain.getHeight(j, i);
+                        }
                     }
                     this.options.elementSize = terrain.tileSize;
                     this._shape = new cclegacy._global.CANNON.Heightfield(this.data, this.options);
@@ -100,26 +110,34 @@ function createLandscapeShape (): ITerrainShape {
                 }
             } as unknown as Constructor<ITerrainShape>;
         } else if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && jsb.physics) {
-            if (!jsb.LandscapeHeightfield) throw new Error('Landscape native physics binding is missing; rebuild native code');
+            if (!jsb.LandscapeHeightfield) {
+                throw new Error('Landscape native physics binding is missing; rebuild native code');
+            }
             Type = createNativeLandscapeShapeType(Base, jsb.LandscapeHeightfield);
         } else if (selector.id === 'physx') {
             Type = class extends Base {
                 private _ownedHeightField: any;
                 setTerrain (terrain: LandscapePhysicsHeightfield): void {
-                    if (this._impl) return;
+                    if (this._impl) {
+                        return;
+                    }
                     const PX = cclegacy._global.PhysX as any;
                     const samples = new PX.PxHeightFieldSampleVector();
                     const sample = new PX.PxHeightFieldSample();
                     const n = terrain.getVertexCountI();
                     try {
                         // PhysX rows run along X, columns along Z: transpose the source layout.
-                        for (let x = 0; x < n; ++x) for (let z = 0; z < n; ++z) {
-                            sample.height = terrain.getSignedHeight(x, z);
-                            samples.push_back(sample);
+                        for (let x = 0; x < n; ++x) {
+                            for (let z = 0; z < n; ++z) {
+                                sample.height = terrain.getSignedHeight(x, z);
+                                samples.push_back(sample);
+                            }
                         }
                         this._ownedHeightField = PhysXInstance.cooking.createHeightFieldExt(n, n, samples, PhysXInstance.physics);
                     } finally { sample.delete(); samples.delete(); }
-                    if (!this._ownedHeightField) throw new Error('Failed to create Landscape heightfield');
+                    if (!this._ownedHeightField) {
+                        throw new Error('Failed to create Landscape heightfield');
+                    }
                     const flags = new PX.PxMeshGeometryFlags(0);
                     const geometry = new PX.PxHeightFieldGeometry(this._ownedHeightField, flags,
                         terrain.heightFieldScale, terrain.tileSize, terrain.tileSize);
@@ -127,7 +145,9 @@ function createLandscapeShape (): ITerrainShape {
                         this._impl = PhysXInstance.physics.createShape(geometry, this.getSharedMaterial(this.collider.sharedMaterial),
                             true, this._flags);
                     } finally { geometry.delete(); flags.delete(); }
-                    if (!this._impl) throw new Error('Failed to create Landscape collision shape');
+                    if (!this._impl) {
+                        throw new Error('Failed to create Landscape collision shape');
+                    }
                 }
                 onDestroy (): void {
                     const flags = this._flags;
@@ -150,7 +170,9 @@ function createLandscapeShape (): ITerrainShape {
 @ccclass('cc.LandscapePhysicsCollider')
 export class LandscapePhysicsCollider extends TerrainCollider {
     protected onLoad (): void {
-        if (!selector.runInEditor) return;
+        if (!selector.runInEditor) {
+            return;
+        }
         this.sharedMaterial = this._material;
         this._shape = createLandscapeShape();
         this._shape.initialize(this);

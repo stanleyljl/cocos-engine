@@ -134,17 +134,25 @@ void Landscape::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtr
 
 void Landscape::setGlobalColorMap(Texture2D *texture) {
     _globalColorMap = texture;
-    if (_renderer) _renderer->setGlobalColorMap(texture);
+    if (_renderer) {
+        _renderer->setGlobalColorMap(texture);
+    }
 }
 
 void Landscape::setGlobalColorStrength(float strength) {
-    if (!std::isfinite(strength)) return;
+    if (!std::isfinite(strength)) {
+        return;
+    }
     _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
-    if (_renderer) _renderer->setGlobalColorStrength(_globalColorStrength);
+    if (_renderer) {
+        _renderer->setGlobalColorStrength(_globalColorStrength);
+    }
 }
 
 void Landscape::onDisable() {
-    if (_scene) _scene->removeLandscape(this);
+    if (_scene) {
+        _scene->removeLandscape(this);
+    }
     _passes.clear();
     _coveredShadowModels.clear();
     _passCount = 0;
@@ -160,18 +168,28 @@ void Landscape::onDisable() {
 }
 
 void Landscape::update() {
-    if (_query) _query->update(); // No camera or render-readiness dependency.
-    if (!_node || !_renderer || !_quadtree || !_renderer->valid()) return;
-    if (_debugData.freezeLod && _renderer->isReady()) return;
+    if (_query) {
+        _query->update(); // No camera or render-readiness dependency.
+    }
+    if (!_node || !_renderer || !_quadtree || !_renderer->valid()) {
+        return;
+    }
+    if (_debugData.freezeLod && _renderer->isReady()) {
+        return;
+    }
     auto *camera = pickMainCamera();
-    if (!camera) return;
+    if (!camera) {
+        return;
+    }
     camera->update();
     _lodViewPosition = camera->getPosition();
     _renderer->setViewPos(_lodViewPosition);
 }
 
 void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
-    if (_passCount == _passes.size()) _passes.emplace_back();
+    if (_passCount == _passes.size()) {
+        _passes.emplace_back();
+    }
     auto &pass = _passes[_passCount++];
     pass.frustum = &frustum;
     pass.shadow = shadow;
@@ -181,21 +199,29 @@ void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
 }
 
 bool Landscape::queryTransformValid() const {
-    if (!_node) return false;
+    if (!_node) {
+        return false;
+    }
     const auto &m = _node->getWorldMatrix();
     for (uint32_t i = 0; i < 12; ++i) {
         const float expected = (i == 0 || i == 5 || i == 10) ? 1.0F : 0.0F;
-        if (!std::isfinite(m.m[i]) || std::abs(m.m[i] - expected) > 1e-5F) return false;
+        if (!std::isfinite(m.m[i]) || std::abs(m.m[i] - expected) > 1e-5F) {
+            return false;
+        }
     }
     return std::isfinite(m.m[12]) && std::isfinite(m.m[13]) && std::isfinite(m.m[14]);
 }
 
 void Landscape::setQueryCacheCapacity(uint32_t capacity) {
-    if (!_query && capacity > 0 && capacity <= 4096) _queryCacheCapacity = capacity;
+    if (!_query && capacity > 0 && capacity <= 4096) {
+        _queryCacheCapacity = capacity;
+    }
 }
 
 uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
-    if (!_asset || !_node) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    if (!_asset || !_node) {
+        return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    }
     if (!queryTransformValid()) {
         removeQuerySource(id);
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
@@ -211,7 +237,9 @@ uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, floa
 }
 
 void Landscape::removeQuerySource(uint32_t id) {
-    if (_query) _query->removeSource(id);
+    if (_query) {
+        _query->removeSource(id);
+    }
 }
 
 uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
@@ -219,16 +247,24 @@ uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
 }
 
 uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array output) {
-    if (output.length() < 8 || !std::isfinite(worldX) || !std::isfinite(worldZ))
+    if (output.length() < 8 || !std::isfinite(worldX) || !std::isfinite(worldZ)) {
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
-    if (!_asset || !_node) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
-    if (!queryTransformValid()) return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    }
+    if (!_asset || !_node) {
+        return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    }
+    if (!queryTransformValid()) {
+        return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    }
     const auto &origin = _node->getWorldPosition();
     const auto &data = _asset->data();
     const LandscapeLocalXZ local{worldX - origin.x, worldZ - origin.z};
-    if (!data.containsGridPoint(data.localToGrid(local)))
+    if (!data.containsGridPoint(data.localToGrid(local))) {
         return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
-    if (!_query) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    }
+    if (!_query) {
+        return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    }
     const auto result = _query->sample(local);
     if (result.status == LandscapeQueryStatus::HIT) {
         output[0] = worldX; output[1] = result.position.y + origin.y; output[2] = worldZ;
@@ -255,10 +291,14 @@ bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<Quad
 
 void Landscape::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
     _passCount = 0;
-    if (!_renderer || !_quadtree || !_renderer->valid()) return;
+    if (!_renderer || !_quadtree || !_renderer->valid()) {
+        return;
+    }
     const auto layer = _node->getLayer();
     // UI/other cameras that hide terrain must not rebuild its models or VT plan.
-    if ((camera.getVisibility() & layer) != layer) return;
+    if ((camera.getVisibility() & layer) != layer) {
+        return;
+    }
     update();
     _visibilityDistanceWarning = false;
 
@@ -289,9 +329,13 @@ uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneD
             }
         }
         for (const auto *light : sceneData.getValidPunctualLights()) {
-            if (light->getType() != scene::LightType::SPOT) continue;
+            if (light->getType() != scene::LightType::SPOT) {
+                continue;
+            }
             const auto *spot = static_cast<const scene::SpotLight *>(light);
-            if (spot->isShadowEnabled()) selectPass(spot->getFrustum(), true);
+            if (spot->isShadowEnabled()) {
+                selectPass(spot->getFrustum(), true);
+            }
         }
     }
     return cascadesToDeduplicate;
@@ -331,7 +375,9 @@ void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate) {
 
 void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
     _coveredShadowModels.clear();
-    if (cascadeCount < 2U) return;
+    if (cascadeCount < 2U) {
+        return;
+    }
     // Match legacy shadowCulling: a model completely inside an earlier cascade
     // is omitted from later cascades. Intersecting the frustum is not sufficient.
     // All passes have already traversed their own quadtrees independently.
@@ -340,7 +386,9 @@ void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
         auto &pass = _passes[i];
         size_t count = 0;
         for (const auto *model : pass.models) {
-            if (_coveredShadowModels.count(model) != 0) continue;
+            if (_coveredShadowModels.count(model) != 0) {
+                continue;
+            }
             pass.models[count++] = model;
             if (i < cascadeCount && geometry::aabbFrustumCompletelyInside(*model->getWorldBounds(), *pass.frustum)) {
                 _coveredShadowModels.insert(model);
@@ -353,14 +401,18 @@ void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
 const ccstd::vector<const scene::Model *> &Landscape::getPassModels(const geometry::Frustum &frustum, bool shadow) const {
     for (size_t i = 0; i < _passCount; ++i) {
         const auto &pass = _passes[i];
-        if (pass.frustum == &frustum && pass.shadow == shadow) return pass.models;
+        if (pass.frustum == &frustum && pass.shadow == shadow) {
+            return pass.models;
+        }
     }
     static const ccstd::vector<const scene::Model *> empty;
     return empty;
 }
 
 void Landscape::onGlobalPipelineStateChanged() {
-    if (_renderer) _renderer->onGlobalPipelineStateChanged();
+    if (_renderer) {
+        _renderer->onGlobalPipelineStateChanged();
+    }
 }
 
 bool Landscape::isReady() const {
@@ -369,17 +421,23 @@ bool Landscape::isReady() const {
 
 void Landscape::setDebugData(const LandscapeDebugData &data) {
     _debugData = data;
-    if (_renderer) _renderer->setDebugData(data);
+    if (_renderer) {
+        _renderer->setDebugData(data);
+    }
 }
 
 void Landscape::setCastShadow(bool enabled) {
     _castShadow = enabled;
-    if (_renderer) _renderer->setCastShadow(enabled);
+    if (_renderer) {
+        _renderer->setCastShadow(enabled);
+    }
 }
 
 void Landscape::setReceiveShadow(bool enabled) {
     _receiveShadow = enabled;
-    if (_renderer) _renderer->setReceiveShadow(enabled);
+    if (_renderer) {
+        _renderer->setReceiveShadow(enabled);
+    }
 }
 
 void Landscape::setAssetPath(const ccstd::string &manifestPath) {

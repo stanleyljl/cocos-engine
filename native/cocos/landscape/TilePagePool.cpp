@@ -77,7 +77,9 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _tileRes = data.tileResolution;
     _layerCount = layerCount;
     _heightUnorm = supportsHeightUnorm(device);
-    if (_heightUnorm) _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
+    if (_heightUnorm) {
+        _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
+    }
     if (!initTextures()) {
         destroy();
         return false;
@@ -236,7 +238,9 @@ bool TilePagePool::requestsReady() const {
 }
 
 bool TilePagePool::loadRequestedTiles() {
-    if (!valid() || !_asset || !_synchronous) return false;
+    if (!valid() || !_asset || !_synchronous) {
+        return false;
+    }
     const size_t missing = static_cast<size_t>(std::count_if(_missingRequests.begin(), _missingRequests.end(),
         [this](uint64_t key) { return !_resident.count(key); }));
     const size_t available = _freeLayers.size() + static_cast<size_t>(std::count_if(_lru.begin(), _lru.end(),
@@ -247,11 +251,17 @@ bool TilePagePool::loadRequestedTiles() {
     }
     LandscapeAsset::TileData tile;
     for (const auto key : _missingRequests) {
-        if (_resident.count(key)) continue;
+        if (_resident.count(key)) {
+            continue;
+        }
         const auto address = NodeAddress::fromKey(key);
-        if (!_asset->loadTileSet(address.level, address.x, address.z, tile)) return false;
+        if (!_asset->loadTileSet(address.level, address.x, address.z, tile)) {
+            return false;
+        }
         const int layer = acquireLayer();
-        if (layer < 0) return false;
+        if (layer < 0) {
+            return false;
+        }
         uploadHeight(static_cast<uint32_t>(layer), tile.height.data());
         uploadLayer(_splatArray, static_cast<uint32_t>(layer), tile.splat.data());
         uploadLayer(_normalArray, static_cast<uint32_t>(layer), tile.normal.data());
@@ -368,7 +378,9 @@ void TilePageResolver::beginFrame(bool synchronous) {
 
 void TilePageResolver::protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes,
                                              const ccstd::vector<QuadNode> &surfaceNodes) {
-    for (const auto &node : geometryNodes) resolve(node.address());
+    for (const auto &node : geometryNodes) {
+        resolve(node.address());
+    }
     // Shadow vertices need heights only. Parent normals are a color-pass input.
     for (const auto &node : surfaceNodes) {
         normalParent(node.address(), resolve(node.address()));
@@ -382,7 +394,9 @@ Vec4 TilePageResolver::shaderParams(const Tile &tile) const {
 
 uint32_t TilePageResolver::sourceLevelForWorldSize(float size) const {
     uint32_t level = _data.minTileLevel;
-    while (level < _data.maxLevel && _data.nodeSize(level) < size) ++level;
+    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
+        ++level;
+    }
     return level;
 }
 
@@ -412,7 +426,9 @@ std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::resolveNormal
         const uint32_t residentLevel = resolveNormalNeighborhood(page, size, level, sources);
         // Publish one resolution for the entire page. Fine sources remain
         // requested; when all arrive, setInputs invalidates this cached page.
-        if (residentLevel == level) return sources;
+        if (residentLevel == level) {
+            return sources;
+        }
         level = residentLevel;
     }
 }
@@ -440,7 +456,9 @@ uint32_t TilePageResolver::resolveNormalNeighborhood(
 TilePageResolver::Tile TilePageResolver::normalParent(NodeAddress node, const Tile &tile) {
     // Finer geometry already shares the finest source normal map. A streaming
     // fallback likewise must not morph towards an extra-coarse level again.
-    if (node.level != tile.address.level || node.level >= _data.maxLevel) return tile;
+    if (node.level != tile.address.level || node.level >= _data.maxLevel) {
+        return tile;
+    }
     return resolve(node.ancestor(node.level + 1U));
 }
 
@@ -449,7 +467,9 @@ TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) {
     tile.address = node.ancestor(std::max(node.level, _data.minTileLevel));
     const uint64_t key = tile.address.key();
     const auto cached = _cache.find(key);
-    if (cached != _cache.end()) return cached->second;
+    if (cached != _cache.end()) {
+        return cached->second;
+    }
     // Only the desired tile starts an asynchronous request. Ancestors are
     // queried without loading and remain protected while used as fallbacks.
     tile.layer = _pool.query(tile.address.level, tile.address.x, tile.address.z);

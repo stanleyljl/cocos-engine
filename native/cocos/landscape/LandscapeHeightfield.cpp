@@ -24,10 +24,14 @@ LandscapeHeightfield::~LandscapeHeightfield() { destroy(); }
 
 uint32_t LandscapeHeightfield::create(const Uint16Array &source, uint32_t resolution, uint32_t wrapperObjectID) {
 #if CC_USE_PHYSICS_PHYSX
-    if (_impl->heightfield) return 0;
+    if (_impl->heightfield) {
+        return 0;
+    }
     _impl->uninitializedWrapperID = wrapperObjectID;
     if (resolution < 2 || resolution > 4097 ||
-        source.length() != resolution * resolution) return 0;
+        source.length() != resolution * resolution) {
+        return 0;
+    }
     ccstd::vector<physx::PxHeightFieldSample> samples(source.length());
     // Source is Z-major (X contiguous). PhysX rows run along X and columns
     // along Z, so transpose while converting uint16 to signed16 heights.
@@ -48,7 +52,9 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, uint32_t resolu
     desc.samples.stride = sizeof(physx::PxHeightFieldSample);
     _impl->heightfield = physics::PhysXWorld::getCooking().createHeightField(
         desc, physics::PhysXWorld::getPhysics().getPhysicsInsertionCallback());
-    if (!_impl->heightfield) return 0;
+    if (!_impl->heightfield) {
+        return 0;
+    }
     _impl->objectID = physics::PhysXWorld::getInstance().addPXObject(reinterpret_cast<uintptr_t>(_impl->heightfield));
     return _impl->objectID;
 #else
@@ -58,13 +64,19 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, uint32_t resolu
 
 bool LandscapeHeightfield::adoptShape() {
 #if CC_USE_PHYSICS_PHYSX
-    if (!_impl->heightfield || _impl->shape) return false;
+    if (!_impl->heightfield || _impl->shape) {
+        return false;
+    }
     auto &world = physics::PhysXWorld::getInstance();
     auto *wrapper = reinterpret_cast<physics::PhysXShape *>(world.getWrapperPtrWithObjectID(_impl->uninitializedWrapperID));
-    if (!wrapper) return false;
+    if (!wrapper) {
+        return false;
+    }
     auto &shape = wrapper->getShape();
     physx::PxHeightFieldGeometry geometry;
-    if (!shape.getHeightFieldGeometry(geometry) || geometry.heightField != _impl->heightfield) return false;
+    if (!shape.getHeightFieldGeometry(geometry) || geometry.heightField != _impl->heightfield) {
+        return false;
+    }
     // Adopt the original createShape reference, not a new reference. Legacy
     // TerrainShape does not release it. This owner releases it on tile unload.
     _impl->shape = &shape;

@@ -194,7 +194,9 @@ export class Landscape extends Component {
     }
     set shadowCastingMode (value: number) {
         this._shadowCastingMode = value;
-        if (this._native) this._native.setCastShadow(value === ShadowCastingMode.ON);
+        if (this._native) {
+            this._native.setCastShadow(value === ShadowCastingMode.ON);
+        }
     }
 
     @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName', style: 'section' })
@@ -215,7 +217,9 @@ export class Landscape extends Component {
     }
     set receiveShadow (value: number) {
         this._shadowReceivingMode = value;
-        if (this._native) this._native.setReceiveShadow(value === ShadowReceivingMode.ON);
+        if (this._native) {
+            this._native.setReceiveShadow(value === ShadowReceivingMode.ON);
+        }
     }
 
     @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName' })
@@ -256,8 +260,12 @@ export class Landscape extends Component {
     @range([1, 4096, 1])
     get queryCacheCapacity (): number { return this._queryCacheCapacity; }
     set queryCacheCapacity (value: number) {
-        if (!Number.isInteger(value) || value < 1 || value > 4096) throw new RangeError('Invalid query cache capacity');
-        if (this._native?.isInitialized()) throw new Error('Set queryCacheCapacity before enabling Landscape');
+        if (!Number.isInteger(value) || value < 1 || value > 4096) {
+            throw new RangeError('Invalid query cache capacity');
+        }
+        if (this._native?.isInitialized()) {
+            throw new Error('Set queryCacheCapacity before enabling Landscape');
+        }
         this._queryCacheCapacity = value;
     }
 
@@ -268,7 +276,9 @@ export class Landscape extends Component {
      * Native platforms only; independent of camera LOD and VT readiness.
      */
     public addQuerySource (node: Node, preloadRadius = 64): number {
-        if (!isValid(node, true)) throw new Error('Query source requires a valid node');
+        if (!isValid(node, true)) {
+            throw new Error('Query source requires a valid node');
+        }
         this._validateQueryRadius(preloadRadius);
         const id = this._nextQuerySource++;
         this._querySources.set(id, { node, radius: preloadRadius, status: LandscapeQueryStatus.NotReady });
@@ -278,7 +288,9 @@ export class Landscape extends Component {
     public setQuerySourceRadius (id: number, preloadRadius: number): boolean {
         this._validateQueryRadius(preloadRadius);
         const source = this._querySources.get(id);
-        if (!source) return false;
+        if (!source) {
+            return false;
+        }
         source.radius = preloadRadius;
         source.status = LandscapeQueryStatus.NotReady;
         return true;
@@ -308,8 +320,12 @@ export class Landscape extends Component {
      * Like terrain selection, supports translation-only landscape placement.
      */
     public sampleSurface (worldPosition: Readonly<Vec3>, output: LandscapeSurfaceResult): LandscapeQueryStatus {
-        if (!Number.isFinite(worldPosition.x) || !Number.isFinite(worldPosition.z)) return LandscapeQueryStatus.Error;
-        if (!this._native || !this.enabledInHierarchy) return LandscapeQueryStatus.NotReady;
+        if (!Number.isFinite(worldPosition.x) || !Number.isFinite(worldPosition.z)) {
+            return LandscapeQueryStatus.Error;
+        }
+        if (!this._native || !this.enabledInHierarchy) {
+            return LandscapeQueryStatus.NotReady;
+        }
         const status = this._native.sampleSurface(worldPosition.x, worldPosition.z, this._queryOutput) as LandscapeQueryStatus;
         if (status === LandscapeQueryStatus.Hit) {
             const data = this._queryOutput;
@@ -322,7 +338,9 @@ export class Landscape extends Component {
     }
 
     private _validateQueryRadius (radius: number): void {
-        if (!Number.isFinite(radius) || radius < 0) throw new RangeError('Query radius must be finite and nonnegative');
+        if (!Number.isFinite(radius) || radius < 0) {
+            throw new RangeError('Query radius must be finite and nonnegative');
+        }
     }
 
     private _syncQuerySource (id: number, source: QuerySource): LandscapeQueryStatus {
@@ -385,11 +403,17 @@ export class Landscape extends Component {
         return this._landscapeAsset;
     }
     set landscapeAsset (value: LandscapeAsset | null) {
-        if (this._landscapeAsset === value) return;
+        if (this._landscapeAsset === value) {
+            return;
+        }
         const enabled = this.enabledInHierarchy;
-        if (enabled) this.onDisable();
+        if (enabled) {
+            this.onDisable();
+        }
         this._landscapeAsset = value;
-        if (enabled) this.onEnable();
+        if (enabled) {
+            this.onEnable();
+        }
     }
 
     /**
@@ -403,8 +427,12 @@ export class Landscape extends Component {
         return this._lodQualityScale;
     }
     set lodQualityScale (value: number) {
-        if (this._native?.isInitialized()) return;
-        if (!Number.isFinite(value) || value < 1.0) return;
+        if (this._native?.isInitialized()) {
+            return;
+        }
+        if (!Number.isFinite(value) || value < 1.0) {
+            return;
+        }
         this._lodQualityScale = value;
     }
 
@@ -417,9 +445,13 @@ export class Landscape extends Component {
         return this._globalColorMap;
     }
     set globalColorMap (value: Texture2D | null) {
-        if (this._globalColorMap === value) return;
+        if (this._globalColorMap === value) {
+            return;
+        }
         this._globalColorMap = value;
-        if (this._native) this._native.setGlobalColorMap(value);
+        if (this._native) {
+            this._native.setGlobalColorMap(value);
+        }
     }
 
     /** Blend the global map's broad colors with the tiled materials. */
@@ -432,9 +464,13 @@ export class Landscape extends Component {
         return this._globalColorStrength;
     }
     set globalColorStrength (value: number) {
-        if (!Number.isFinite(value)) return;
+        if (!Number.isFinite(value)) {
+            return;
+        }
         const strength = Math.min(1, Math.max(0, value));
-        if (this._globalColorStrength === strength) return;
+        if (this._globalColorStrength === strength) {
+            return;
+        }
         this._globalColorStrength = strength;
         if (this._native) {
             this._native.setGlobalColorStrength(strength);
@@ -442,7 +478,9 @@ export class Landscape extends Component {
     }
 
     private _syncDebugData (force = false): void {
-        if (!this._native) return;
+        if (!this._native) {
+            return;
+        }
         const previous = this._appliedDebugData;
         let changed = force || !previous;
         if (previous && !changed) {
@@ -453,10 +491,14 @@ export class Landscape extends Component {
                 }
             }
         }
-        if (!changed) return;
+        if (!changed) {
+            return;
+        }
         this._native.setDebugData(this._debugData);
         const snapshot = previous || new LandscapeDebugData();
-        for (const key of DEBUG_PROPERTIES) snapshot[key] = this._debugData[key];
+        for (const key of DEBUG_PROPERTIES) {
+            snapshot[key] = this._debugData[key];
+        }
         this._appliedDebugData = snapshot;
     }
 
@@ -500,7 +542,9 @@ export class Landscape extends Component {
             return;
         }
         this._syncDebugData();
-        for (const [id, source] of this._querySources) this._syncQuerySource(id, source);
+        for (const [id, source] of this._querySources) {
+            this._syncQuerySource(id, source);
+        }
         if (!this._native.isInitialized()) {
             return;
         }

@@ -86,10 +86,14 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
         || !Number.isInteger(nodeTileResolution) || nodeTileResolution < 2 || nodeTileResolution > 1025
         || !Number.isFinite(sectorSizeMeters) || sectorSizeMeters <= 0
         || !Number.isFinite(heightScale) || heightScale <= 0 || !Number.isFinite(heightBias)
-        || !files || typeof files !== 'object') throw new Error('Invalid Landscape height manifest');
+        || !files || typeof files !== 'object') {
+        throw new Error('Invalid Landscape height manifest');
+    }
     const side = 2 ** (maxLevel - minTileLevel);
     const tilesX = sectorCount[0] * side; const tilesZ = sectorCount[1] * side;
-    if (tilesX * tilesZ > 1000000) throw new Error('Landscape tile count exceeds limit');
+    if (tilesX * tilesZ > 1000000) {
+        throw new Error('Landscape tile count exceeds limit');
+    }
     return { resolution: nodeTileResolution, tilesX, tilesZ, tileSize: sectorSizeMeters / side,
         heightScale, heightBias, level: minTileLevel, files };
 }
@@ -105,37 +109,59 @@ export function decodeLandscapeHeight (buffer: ArrayBuffer, resolution: number):
     }
     const chunks: Uint8Array[] = []; let size = 0; let ended = false;
     for (let offset = 8; offset + 12 <= bytes.length;) {
-        const length = view.getUint32(offset); const type = view.getUint32(offset + 4);
-        if (length > bytes.length - offset - 12) throw new Error('Truncated Landscape PNG');
-        if (type === 0x49444154) { chunks.push(bytes.subarray(offset + 8, offset + 8 + length)); size += length; }
+        const length = view.getUint32(offset);
+        const type = view.getUint32(offset + 4);
+        if (length > bytes.length - offset - 12) {
+            throw new Error('Truncated Landscape PNG');
+        }
+        if (type === 0x49444154) {
+            chunks.push(bytes.subarray(offset + 8, offset + 8 + length));
+            size += length;
+        }
         offset += length + 12;
-        if (type === 0x49454e44) { ended = true; break; }
+        if (type === 0x49454e44) {
+            ended = true;
+            break;
+        }
     }
-    if (!ended || !size) throw new Error('Incomplete Landscape PNG');
+    if (!ended || !size) {
+        throw new Error('Incomplete Landscape PNG');
+    }
     const packed = new Uint8Array(size); let offset = 0;
-    for (const chunk of chunks) { packed.set(chunk, offset); offset += chunk.length; }
+    for (const chunk of chunks) {
+        packed.set(chunk, offset);
+        offset += chunk.length;
+    }
     const decoded = new zlib.Inflate(packed, { verify: true }).decompress() as Uint8Array;
     const stride = resolution * 2;
-    if (decoded.length !== (stride + 1) * resolution) throw new Error('Invalid Landscape PNG scanline size');
+    if (decoded.length !== (stride + 1) * resolution) {
+        throw new Error('Invalid Landscape PNG scanline size');
+    }
     const pixels = new Uint8Array(stride * resolution);
     let input = 0;
     for (let row = 0; row < resolution; ++row) {
         const filter = decoded[input++];
-        if (filter > 4) throw new Error('Invalid Landscape PNG filter');
+        if (filter > 4) {
+            throw new Error('Invalid Landscape PNG filter');
+        }
         for (let col = 0; col < stride; ++col) {
             const at = row * stride + col;
             const a = col >= 2 ? pixels[at - 2] : 0;
             const b = row ? pixels[at - stride] : 0;
             const c = row && col >= 2 ? pixels[at - stride - 2] : 0;
             const p = a + b - c;
-            const pa = Math.abs(p - a); const pb = Math.abs(p - b); const pc = Math.abs(p - c);
+            const pa = Math.abs(p - a);
+            const pb = Math.abs(p - b);
+            const pc = Math.abs(p - c);
             const prediction = filter === 1 ? a : filter === 2 ? b : filter === 3 ? (a + b) >>> 1
                 : filter === 4 ? (pa <= pb && pa <= pc ? a : pb <= pc ? b : c) : 0;
             pixels[at] = decoded[input++] + prediction;
         }
     }
     const heights = new Uint16Array(resolution * resolution);
-    for (let i = 0; i < heights.length; ++i) heights[i] = pixels[i * 2] * 256 + pixels[i * 2 + 1];
+    for (let i = 0; i < heights.length; ++i) {
+        heights[i] = pixels[i * 2] * 256 + pixels[i * 2 + 1];
+    }
     return heights;
 }
 
@@ -150,9 +176,13 @@ export class LandscapeHeightLoader {
 
     public async loadTile (url: string, layout: LandscapeHeightLayout, x: number, z: number): Promise<Uint16Array> {
         const suffix = layout.files[`nodes/L${layout.level}/h_${x}_${z}.png`];
-        if (!/^\.lsraw\d+$/.test(suffix)) throw new Error(`Missing Landscape height tile ${x},${z}`);
+        if (!/^\.lsraw\d+$/.test(suffix)) {
+            throw new Error(`Missing Landscape height tile ${x},${z}`);
+        }
         const [path, query] = url.split('?');
-        if (!path.endsWith('.lsmanifest')) throw new Error('Landscape physics requires an imported manifest');
+        if (!path.endsWith('.lsmanifest')) {
+            throw new Error('Landscape physics requires an imported manifest');
+        }
         const tileURL = path.slice(0, -11) + suffix + (query ? `?${query}` : '');
         const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
             downloader._downloadArrayBuffer(tileURL, {}, (err, data) => err ? reject(err) : resolve(data));

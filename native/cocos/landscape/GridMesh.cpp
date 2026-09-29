@@ -36,7 +36,9 @@ namespace landscape {
 
 namespace {
 RenderingSubMesh *createGrid(gfx::Device *device, int n) {
-    if (device == nullptr) return nullptr;
+    if (device == nullptr) {
+        return nullptr;
+    }
     const float step = 1.0F / static_cast<float>(n - 1);
 
     // Store normalized XZ only; the shader reconstructs the height.

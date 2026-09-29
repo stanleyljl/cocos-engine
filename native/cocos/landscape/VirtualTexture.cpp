@@ -17,7 +17,9 @@ bool same(const Vec4 &a, const Vec4 &b) {
 bool VirtualTexture::init(const LandscapeData &data, uint32_t capacity) {
     *this = VirtualTexture{};
     const uint64_t roots = static_cast<uint64_t>(data.sectorsX) * data.sectorsZ;
-    if (!data.valid() || capacity == 0 || roots > capacity) return false;
+    if (!data.valid() || capacity == 0 || roots > capacity) {
+        return false;
+    }
     _data = data;
     _layout = VTPageLayout(data.sectorSize);
     _rootCount = static_cast<uint32_t>(roots);
@@ -44,14 +46,20 @@ void VirtualTexture::beginRequests() {
 
 void VirtualTexture::request(VTPageAddress address, float priority) {
     const auto root = _layout.rootLevel();
-    if (address.level > root || !std::isfinite(priority) || priority < 0) return;
+    if (address.level > root || !std::isfinite(priority) || priority < 0) {
+        return;
+    }
     const uint32_t side = 1U << (root - address.level);
     if (address.x >= static_cast<uint64_t>(_data.sectorsX) * side ||
-        address.z >= static_cast<uint64_t>(_data.sectorsZ) * side) return;
+        address.z >= static_cast<uint64_t>(_data.sectorsZ) * side) {
+        return;
+    }
     const uint32_t desired = address.level;
     for (; address.level < root; address = address.parent(), priority *= 0.5F) {
         const auto inserted = _requestIndices.emplace(address.key(), _requests.size());
-        if (inserted.second) _requests.push_back({address, priority});
+        if (inserted.second) {
+            _requests.push_back({address, priority});
+        }
         auto &r = _requests[inserted.first->second];
         r.priority = std::max(r.priority, priority);
         r.direct |= address.level == desired;
@@ -72,32 +80,48 @@ void VirtualTexture::selectRequests() {
         for (uint32_t bias = 0; bias <= _layout.rootLevel(); ++bias) {
             coverage.clear();
             for (const auto &r : _requests) {
-                if (!r.direct) continue;
+                if (!r.direct) {
+                    continue;
+                }
                 const auto level = std::min(r.address.level + bias, _layout.rootLevel());
-                if (level == _layout.rootLevel()) continue; // permanent coverage
+                if (level == _layout.rootLevel()) {
+                    continue; // permanent coverage
+                }
                 const auto shift = level - r.address.level;
                 coverage.insert(VTPageAddress{level, r.address.x >> shift, r.address.z >> shift}.key());
             }
-            if (coverage.size() <= reserve) break;
+            if (coverage.size() <= reserve) {
+                break;
+            }
         }
-        for (auto &r : _requests) r.coverage = coverage.count(r.address.key()) != 0;
+        for (auto &r : _requests) {
+            r.coverage = coverage.count(r.address.key()) != 0;
+        }
     }
     // The same order drives BOTH slot admission and composition. No priority
     // boosting, second dirty-page sort, or separate protected-key plan.
     std::sort(_requests.begin(), _requests.end(), [](const Request &a, const Request &b) {
-        if (a.coverage != b.coverage) return a.coverage;
+        if (a.coverage != b.coverage) {
+            return a.coverage;
+        }
         return a.priority != b.priority ? a.priority > b.priority : a.address.key() < b.address.key();
     });
-    if (_requests.size() > capacity) _requests.resize(capacity);
+    if (_requests.size() > capacity) {
+        _requests.resize(capacity);
+    }
 }
 
 void VirtualTexture::endRequests() {
-    if (_pages.empty()) return;
+    if (_pages.empty()) {
+        return;
+    }
     selectRequests();
     _requestIndices.clear();
     ++_frame;
     _active.clear();
-    for (auto &p : _pages) p.inputsResolved = false;
+    for (auto &p : _pages) {
+        p.inputsResolved = false;
+    }
     for (uint32_t slot = 0; slot < _rootCount; ++slot) {
         _pages[slot].lastRequested = _frame;
         _active.push_back(slot);
@@ -105,13 +129,17 @@ void VirtualTexture::endRequests() {
     // Pin the ENTIRE admitted set before allocating any missing page.
     for (const auto &r : _requests) {
         const auto it = _lookup.find(r.address.key());
-        if (it != _lookup.end()) _pages[it->second].lastRequested = _frame;
+        if (it != _lookup.end()) {
+            _pages[it->second].lastRequested = _frame;
+        }
     }
     for (const auto &r : _requests) {
         const auto it = _lookup.find(r.address.key());
         const int slot = it != _lookup.end() ? static_cast<int>(it->second) : allocate(r.address);
         assert(slot >= 0 && "Admitted VT working set must fit the physical cache");
-        if (slot < 0) continue;
+        if (slot < 0) {
+            continue;
+        }
         _pages[slot].lastRequested = _frame;
         _active.push_back(static_cast<uint32_t>(slot));
     }
@@ -132,9 +160,13 @@ int VirtualTexture::allocate(VTPageAddress address) {
             oldest = p.lastRequested;
         }
     }
-    if (slot < 0) return -1;
+    if (slot < 0) {
+        return -1;
+    }
     auto &p = _pages[slot];
-    if (p.state != State::EMPTY) _lookup.erase(p.address.key());
+    if (p.state != State::EMPTY) {
+        _lookup.erase(p.address.key());
+    }
     p = Page{};
     p.address = address;
     p.state = State::DIRTY;
@@ -157,9 +189,13 @@ void VirtualTexture::collectUpdates(ccstd::vector<uint32_t> &slots, uint32_t bud
     slots.clear();
     for (const uint32_t slot : _active) {
         const auto &p = _pages[slot];
-        if (p.state != State::DIRTY || !p.inputsResolved) continue;
+        if (p.state != State::DIRTY || !p.inputsResolved) {
+            continue;
+        }
         if (slot >= _rootCount) {
-            if (budget == 0) break;
+            if (budget == 0) {
+                break;
+            }
             --budget;
         }
         slots.push_back(slot);
@@ -172,12 +208,16 @@ void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
         assert(p.inputsResolved && p.lastRequested == _frame && p.state == State::DIRTY);
         p.state = State::READY;
     }
-    if (!slots.empty()) ++_revision;
+    if (!slots.empty()) {
+        ++_revision;
+    }
 }
 
 void VirtualTexture::invalidate() {
     for (auto &p : _pages) {
-        if (p.state != State::EMPTY) p.state = State::DIRTY;
+        if (p.state != State::EMPTY) {
+            p.state = State::DIRTY;
+        }
     }
     ++_revision;
 }
@@ -192,7 +232,9 @@ int VirtualTexture::resolve(VTPageAddress address) const {
         const auto it = _lookup.find(address.key());
         if (it != _lookup.end()) {
             const auto &p = _pages[it->second];
-            if (p.lastRequested == _frame && p.state == State::READY) return static_cast<int>(it->second);
+            if (p.lastRequested == _frame && p.state == State::READY) {
+                return static_cast<int>(it->second);
+            }
         }
         address = address.parent();
     }
