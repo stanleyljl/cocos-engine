@@ -207,7 +207,7 @@ uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, floa
             }, _queryCacheCapacity);
     }
     const auto &origin = _node->getWorldPosition();
-    return static_cast<uint32_t>(_query->setSource(id, worldX - origin.x, worldZ - origin.z, radius));
+    return static_cast<uint32_t>(_query->setSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
 }
 
 void Landscape::removeQuerySource(uint32_t id) {
@@ -225,11 +225,11 @@ uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array outpu
     if (!queryTransformValid()) return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
     const auto &origin = _node->getWorldPosition();
     const auto &data = _asset->data();
-    const float x = worldX - origin.x, z = worldZ - origin.z;
-    if (std::abs(x) > data.worldWidth() * 0.5F || std::abs(z) > data.worldDepth() * 0.5F)
+    const LandscapeLocalXZ local{worldX - origin.x, worldZ - origin.z};
+    if (!data.containsGridPoint(data.localToGrid(local)))
         return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
     if (!_query) return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
-    const auto result = _query->sample(x, z);
+    const auto result = _query->sample(local);
     if (result.status == LandscapeQueryStatus::HIT) {
         output[0] = worldX; output[1] = result.position.y + origin.y; output[2] = worldZ;
         output[3] = result.normal.x; output[4] = result.normal.y; output[5] = result.normal.z;
@@ -242,30 +242,12 @@ bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<Quad
     nodes.clear();
     const Vec3 base = _node->getWorldPosition();
     const auto &data = _asset->data();
-    const float halfWorldX = data.worldWidth() * 0.5F;
-    const float halfWorldZ = data.worldDepth() * 0.5F;
     bool visibilityDistanceWarning = false;
     for (uint32_t sectorZ = 0; sectorZ < data.sectorsZ; ++sectorZ) {
         for (uint32_t sectorX = 0; sectorX < data.sectorsX; ++sectorX) {
-            const Vec3 origin{
-                base.x + (static_cast<float>(sectorX) + 0.5F) * data.sectorSize - halfWorldX,
-                base.y,
-                base.z + (static_cast<float>(sectorZ) + 0.5F) * data.sectorSize - halfWorldZ,
-            };
-            const auto &local = _quadtree->select(_lodViewPosition, frustum,
-                                                  origin, sectorX, sectorZ);
+            const auto &selected = _quadtree->select(_lodViewPosition, frustum, base, sectorX, sectorZ);
             visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
-            for (const auto &node : local) {
-                const uint32_t scale = computeNodesPerSide(data.maxLevel, node.level);
-                nodes.push_back(QuadNode{
-                    node.level,
-                    sectorX * scale + node.ix,
-                    sectorZ * scale + node.iz,
-                    node.minY,
-                    node.maxY,
-                    node.quadrantMask,
-                });
-            }
+            nodes.insert(nodes.end(), selected.begin(), selected.end());
         }
     }
     return visibilityDistanceWarning;
@@ -445,13 +427,11 @@ void Landscape::drawDebugBounds() {
                   "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
     const auto &data = _asset->data();
-    const float halfWorldX = data.worldWidth() * 0.5F;
-    const float halfWorldZ = data.worldDepth() * 0.5F;
     for (const auto &node : _debugNodes) {
-        const float nodeSize = computeNodeSize(data.sectorSize, data.maxLevel, node.level);
-        const float quadrantSize = nodeSize * 0.5F;
-        const float nodeX = static_cast<float>(node.ix) * nodeSize - halfWorldX;
-        const float nodeZ = static_cast<float>(node.iz) * nodeSize - halfWorldZ;
+        const auto region = data.nodeRegion(node.address());
+        const float quadrantSize = region.size * 0.5F;
+        const float nodeX = region.x;
+        const float nodeZ = region.z;
         for (uint32_t quadrant = 0U; quadrant < 4U; ++quadrant) {
             if ((node.quadrantMask & (1U << quadrant)) == 0U) {
                 continue;

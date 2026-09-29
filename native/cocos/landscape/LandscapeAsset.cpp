@@ -31,7 +31,7 @@
 #include "base/Log.h"
 #include "base/Ptr.h"
 #include "base/ThreadPool.h"
-#include "landscape/VTPaging.h"
+#include "landscape/LandscapeConfig.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
 #include "rapidjson/document.h"
@@ -102,8 +102,7 @@ struct LandscapeAsset::Manifest {
     const rapidjson::Document &document;
     const ccstd::string &manifestPath;
     LandscapeData parsed;
-    ccstd::vector<size_t> levelOffsets;
-    size_t nodesPerSector{0};
+    NodeRangeLayout nodeLayout;
     ccstd::vector<HeightRange> ranges;
     ccstd::string assetDir;
     bool imported{false};
@@ -171,8 +170,8 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
         return false;
     }
 
-    nodesPerSector = computeSectorNodeLayout(parsed.maxLevel, levelOffsets);
-    ranges.assign(static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * nodesPerSector,
+    nodeLayout = NodeRangeLayout(parsed);
+    ranges.assign(nodeLayout.nodeCount(),
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
     for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
@@ -193,7 +192,7 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
     }
     const auto &mins = range["min"];
     const auto &maxs = range["max"];
-    const uint32_t side = computeNodesPerSide(parsed.maxLevel, level);
+    const uint32_t side = parsed.nodesPerSectorSide(level);
     const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
     if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected) {
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
@@ -209,19 +208,19 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
                 CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
                 return false;
             }
-            const size_t dst = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector, level, globalX, globalZ);
+            const size_t dst = nodeLayout.globalNodeIndex(level, globalX, globalZ);
             ranges[dst] = HeightRange{parsed.heightBias + mins[index].GetFloat() * scale,
                                       parsed.heightBias + maxs[index].GetFloat() * scale};
             float childStretch = 1.0F;
             if (level > 0U) {
                 for (uint32_t quadrant = 0; quadrant < 4U; ++quadrant) {
-                    const size_t child = globalNodeRangeIndex(parsed, levelOffsets, nodesPerSector,
-                        level - 1U, globalX * 2U + (quadrant & 1U), globalZ * 2U + (quadrant >> 1U));
+                    const size_t child = nodeLayout.globalNodeIndex(level - 1U,
+                        globalX * 2U + (quadrant & 1U), globalZ * 2U + (quadrant >> 1U));
                     childStretch = std::max(childStretch, ranges[child].surfaceStretch);
                 }
             }
             ranges[dst].surfaceStretch = cliffDensityScale(ranges[dst].maxY - ranges[dst].minY,
-                computeNodeSize(parsed.sectorSize, parsed.maxLevel, level), childStretch);
+                parsed.nodeSize(level), childStretch);
         }
     }
     return true;
@@ -455,9 +454,8 @@ bool LandscapeAsset::load(const ccstd::string &dataDir) {
     _decalLayers = std::move(manifest.decalLayers);
     _decals = std::move(manifest.decals);
     _decalResolution = manifest.decalResolution;
-    _levelOffsets = std::move(manifest.levelOffsets);
+    _nodeLayout = manifest.nodeLayout;
     _heightRanges = std::move(manifest.ranges);
-    _nodesPerSector = manifest.nodesPerSector;
     return true;
 }
 
@@ -491,7 +489,7 @@ ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) cons
 }
 
 bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const {
-    const uint32_t side = computeNodesPerSide(_data.maxLevel, level);
+    const uint32_t side = _data.nodesPerSectorSide(level);
     if (!valid() || level < _data.minTileLevel || side == 0 ||
         x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         return false;
@@ -557,7 +555,7 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
 }
 
 void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
-    const uint32_t side = computeNodesPerSide(_data.maxLevel, _data.minTileLevel);
+    const uint32_t side = _data.nodesPerSectorSide(_data.minTileLevel);
     if (!valid() || x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         completion({}, false);
         return;
@@ -621,7 +619,7 @@ bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t g
     if (!_data.valid() || level > _data.maxLevel) {
         return false;
     }
-    const size_t offset = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector, level, globalX, globalZ);
+    const size_t offset = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
     if (offset >= _heightRanges.size()) {
         return false;
     }
@@ -632,7 +630,7 @@ bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t g
 
 float LandscapeAsset::getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
     if (!_data.valid() || level > _data.maxLevel) return 1.0F;
-    const size_t offset = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector, level, globalX, globalZ);
+    const size_t offset = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
     return offset < _heightRanges.size() ? _heightRanges[offset].surfaceStretch : 1.0F;
 }
 

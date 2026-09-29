@@ -1,6 +1,31 @@
 import { deflateSync } from 'zlib';
-import { decodeLandscapeHeight, parseLandscapeHeightLayout, LandscapeHeightLoader } from '../../cocos/landscape/landscape-height-data';
+import { decodeLandscapeHeight, parseLandscapeHeightLayout, LandscapeHeightGrid, LandscapeHeightLoader } from '../../cocos/landscape/landscape-height-data';
 import downloader from '../../cocos/asset/asset-manager/downloader';
+
+test('height grid keeps world rectangles, local origins and tile indices distinct', () => {
+    const grid = new LandscapeHeightGrid({ resolution: 3, tilesX: 4, tilesZ: 2, tileSize: 2,
+        heightScale: 100, heightBias: -20, level: 0, files: {} });
+    const origin = { x: -10, z: 30 };
+    // Translated, non-square terrain: world [-14,-6] x [28,32].
+    const exact = grid.worldBoundsToTiles({ minX: -12, minZ: 28, maxX: -10, maxZ: 30 }, origin);
+    expect(exact).toEqual({ beginX: 1, beginZ: 0, endX: 2, endZ: 1 });
+    expect(grid.tilesToWorldBounds(exact, origin)).toEqual({ minX: -12, minZ: 28, maxX: -10, maxZ: 30 });
+    expect(grid.contains(exact)).toBe(true);
+    // A tiny extension across an edge needs the adjacent tile.
+    expect(grid.worldBoundsToTiles({ minX: -12.001, minZ: 28, maxX: -9.999, maxZ: 30 }, origin))
+        .toEqual({ beginX: 0, beginZ: 0, endX: 3, endZ: 1 });
+    const outside = grid.worldBoundsToTiles({ minX: -15, minZ: 27, maxX: -5, maxZ: 33 }, origin);
+    expect(grid.contains(outside)).toBe(false);
+    const clipped = grid.clip(outside);
+    expect(clipped).toEqual({ beginX: 0, beginZ: 0, endX: 4, endZ: 2 });
+    expect(grid.tilesToWorldBounds(clipped, origin)).toEqual({ minX: -14, minZ: 28, maxX: -6, maxZ: 32 });
+    const beyond = grid.clip(grid.worldBoundsToTiles({ minX: -6, minZ: 28, maxX: -4, maxZ: 30 }, origin));
+    expect(grid.contains(beyond)).toBe(false);
+    for (let z = 0; z < 2; ++z) for (let x = 0; x < 4; ++x) {
+        expect(grid.tileAtKey(grid.tileKey(x, z))).toEqual({ x, z });
+        expect(grid.tileLocalOrigin(x, z)).toEqual({ x: -4 + x * 2, z: -2 + z * 2 });
+    }
+});
 
 function png (filter: number) {
     const resolution = 3;

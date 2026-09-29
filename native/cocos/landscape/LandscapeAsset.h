@@ -149,9 +149,8 @@ private:
     ccstd::vector<DecalLayer> _decalLayers;
     ccstd::vector<Decal> _decals;
     uint32_t _decalResolution{1};
-    ccstd::vector<size_t> _levelOffsets;
+    NodeRangeLayout _nodeLayout;
     ccstd::vector<HeightRange> _heightRanges;
-    size_t _nodesPerSector{0U};
     ccstd::unordered_set<uint64_t> _pendingTiles;
     std::shared_ptr<AsyncState> _async;
 };

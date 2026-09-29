@@ -70,13 +70,12 @@ bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
         return false;
     }
     _selected.clear();
-    _nodesPerSector = computeSectorNodeLayout(_data.maxLevel, _levelOffsets);
+    _nodeLayout = NodeRangeLayout(_data);
 
-    const size_t sectorCount = static_cast<size_t>(_data.sectorsX) * _data.sectorsZ;
-    _heightRanges.assign(sectorCount * _nodesPerSector,
+    _heightRanges.assign(_nodeLayout.nodeCount(),
                          HeightRange{_data.minHeight(), _data.maxHeight()});
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const uint32_t side = computeNodesPerSide(_data.maxLevel, level);
+        const uint32_t side = _data.nodesPerSectorSide(level);
         for (uint32_t globalZ = 0; globalZ < _data.sectorsZ * side; ++globalZ) {
             for (uint32_t globalX = 0; globalX < _data.sectorsX * side; ++globalX) {
                 float minY = _data.minHeight();
@@ -84,8 +83,7 @@ bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
                 if (!asset.getHeightRange(level, globalX, globalZ, minY, maxY)) {
                     return false;
                 }
-                const size_t index = globalNodeRangeIndex(_data, _levelOffsets, _nodesPerSector,
-                                                          level, globalX, globalZ);
+                const size_t index = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
                 _heightRanges[index] = HeightRange{minY, maxY};
             }
         }
@@ -136,7 +134,7 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
         level > _data.maxLevel) {
         return;
     }
-    const size_t index = nodeRangeIndex(_data, _levelOffsets, _nodesPerSector, _sectorX, _sectorZ, level, ix, iz);
+    const size_t index = _nodeLayout.sectorNodeIndex(_sectorX, _sectorZ, level, ix, iz);
     if (index >= _heightRanges.size()) return;
     const HeightRange &range = _heightRanges[index];
     minY = range.minY;
@@ -144,10 +142,10 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
 }
 
 const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum,
-                                                const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ) {
+                                                const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ) {
     _camPos = camPos;
     _frustum = &frustum;
-    _sectorOrigin = sectorOrigin;
+    _landscapeWorldOrigin = landscapeWorldOrigin;
     _sectorX = sectorX;
     _sectorZ = sectorZ;
     _selected.clear();
@@ -160,13 +158,15 @@ const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geomet
 }
 
 Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
-    const float size = computeNodeSize(_data.sectorSize, _data.maxLevel, level);
+    const float size = _data.nodeSize(level);
     float minY = _data.minHeight();
     float maxY = _data.maxHeight();
     nodeHeightRange(level, ix, iz, minY, maxY);
-    const float x = static_cast<float>(ix) * size - _data.sectorSize * 0.5F + _sectorOrigin.x;
-    const float z = static_cast<float>(iz) * size - _data.sectorSize * 0.5F + _sectorOrigin.z;
-    _box->setCenter(x + size * 0.5F, (minY + maxY) * 0.5F + _sectorOrigin.y, z + size * 0.5F);
+    const auto address = _data.nodeInSector(_sectorX, _sectorZ, level, ix, iz);
+    const auto region = _data.nodeRegion(address);
+    const float x = region.x + _landscapeWorldOrigin.x;
+    const float z = region.z + _landscapeWorldOrigin.z;
+    _box->setCenter(x + size * 0.5F, (minY + maxY) * 0.5F + _landscapeWorldOrigin.y, z + size * 0.5F);
     _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
 
     if (!_box->aabbFrustum(*_frustum)) {
@@ -179,7 +179,7 @@ Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t 
     }
     const float maxDistance = maxDistanceToAABB(_camPos, *_box);
     const auto addSelection = [&](uint8_t quadrantMask) {
-        _selected.push_back(QuadNode{level, ix, iz, minY, maxY, quadrantMask});
+        _selected.push_back(QuadNode{level, address.x, address.z, minY, maxY, quadrantMask});
         if (level < _data.maxLevel && maxDistance > _lodMorphStart[level + 1U]) {
             _visibilityDistanceTooSmall = true;
         }

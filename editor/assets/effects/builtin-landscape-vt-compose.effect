@@ -16,7 +16,7 @@ CCEffect %{
         - blend: false
         - blend: false
       properties:
-        vtLayout: { value: [4224, 264, 4, 1] }
+        vtLayout: { value: [8448, 528, 8, 1] }
         sourceParams: { value: [129, 1, 0, 0] }
         cliffParams: { value: [0, 1, 0, 0] }
         cliffLayout: { value: [0, 0, 1, 0] }
@@ -52,7 +52,7 @@ CCEffect %{
         - blend: false
         - blend: false
       properties:
-        mipLayout: { value: [4224, 264, 0, 1] }
+        mipLayout: { value: [8448, 528, 0, 1] }
         sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
 }%
@@ -100,7 +100,7 @@ CCProgram vt-mip-fs %{
       return normalize(vec3(nra.r, albedo.a, nra.g) * 2.0 - 1.0);
     }
     void main() {
-      // Halve the complete slot: 256+4+4 -> 128+2+2 -> 64+1+1. Integer fetches
+      // Halve the complete slot: 512+8+8 -> 256+4+4 -> 128+2+2. Integer fetches
       // cannot cross into an unrelated physical slot, even at its outer edge.
       int size = int(mipLayout.y);
       int sourceLod = int(mipLayout.z);

@@ -44,6 +44,7 @@ struct GLES3GPUConstantRegistry {
     MSRTSupportLevel mMSRT{MSRTSupportLevel::NONE};
     FBFSupportLevel mFBF{FBFSupportLevel::NONE};
     bool debugMarker = false;
+    float maxSamplerAnisotropy = 0.0F; // zero when the extension is unavailable
 };
 
 class GLES3GPUStateCache;
@@ -179,6 +180,7 @@ struct GLES3GPUSwapchain {
 
 class GLES3GPUSampler final {
 public:
+    float maxAnisotropy = 0.0F;
     Filter minFilter = Filter::NONE;
     Filter magFilter = Filter::NONE;
     Filter mipFilter = Filter::NONE;

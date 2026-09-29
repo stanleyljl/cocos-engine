@@ -9,9 +9,9 @@ import { PhysicsMaterial } from '../physics/framework/assets/physics-material';
 import { selector } from '../physics/framework/physics-selector';
 import { LandscapePhysicsCollider, LandscapePhysicsHeightfield } from './landscape-physics-collider';
 import type { Landscape } from './landscape';
-import { LandscapeHeightLayout, LandscapeHeightLoader } from './landscape-height-data';
+import { LandscapeHeightGrid, LandscapeHeightLayout, LandscapeHeightLoader, LandscapeWorldBounds } from './landscape-height-data';
 
-export interface LandscapePhysicsBounds { minX: number; minZ: number; maxX: number; maxZ: number; }
+export type LandscapePhysicsBounds = LandscapeWorldBounds;
 
 export enum LandscapePhysicsStatus {
     NotReady,
@@ -74,6 +74,7 @@ export class LandscapePhysics {
     private _destroyed = false;
     private _listening = false;
     private _inStep = false;
+    private _grid?: LandscapeHeightGrid;
     private _originX = NaN;
     private _originZ = NaN;
     private _transformValid = true;
@@ -144,15 +145,11 @@ export class LandscapePhysics {
         if (!this._enabled || this._destroyed || !layout || this._resetTiles || this._error || !this._transformValid) return false;
         const origin = this._landscape.node.worldPosition;
         if (origin.x !== this._originX || origin.z !== this._originZ) return false;
-        const startX = this._originX - layout.tilesX * layout.tileSize / 2;
-        const startZ = this._originZ - layout.tilesZ * layout.tileSize / 2;
-        const x0 = Math.floor((bounds.minX - startX) / layout.tileSize);
-        const z0 = Math.floor((bounds.minZ - startZ) / layout.tileSize);
-        const x1 = Math.ceil((bounds.maxX - startX) / layout.tileSize);
-        const z1 = Math.ceil((bounds.maxZ - startZ) / layout.tileSize);
-        if (x0 < 0 || z0 < 0 || x1 > layout.tilesX || z1 > layout.tilesZ) return false;
-        for (let z = z0; z < z1; ++z) for (let x = x0; x < x1; ++x) {
-            const tile = this._tiles.get(z * layout.tilesX + x);
+        const grid = this._grid!;
+        const rect = grid.worldBoundsToTiles(bounds, origin);
+        if (!grid.contains(rect)) return false;
+        for (let z = rect.beginZ; z < rect.endZ; ++z) for (let x = rect.beginX; x < rect.endX; ++x) {
+            const tile = this._tiles.get(grid.tileKey(x, z));
             if (!tile?.node || tile.error || !isValid(tile.node) || !tile.node.activeInHierarchy) return false;
         }
         return true;
@@ -286,7 +283,7 @@ export class LandscapePhysics {
     private _ensureLayout (): void {
         const url = this._landscape.landscapeAsset?.manifestPath || '';
         if (url !== this._url) {
-            ++this._generation; this._url = url; this._layout = undefined;
+            ++this._generation; this._url = url; this._layout = undefined; this._grid = undefined;
             this._layoutPending = false; this._error = ''; this._dirty = true; this._resetTiles = true;
         }
         if (!url || this._layout || this._layoutPending || this._error) return;
@@ -294,7 +291,8 @@ export class LandscapePhysics {
         this._layoutPending = true;
         void this._loader.loadLayout(url).then(layout => {
             if (generation !== this._generation || this._destroyed) return;
-            this._layout = layout; this._layoutPending = false; this._dirty = true;
+            this._layout = layout; this._grid = new LandscapeHeightGrid(layout);
+            this._layoutPending = false; this._dirty = true;
         }, error => {
             if (generation !== this._generation || this._destroyed) return;
             this._layoutPending = false; this._error = String(error);
@@ -303,15 +301,12 @@ export class LandscapePhysics {
 
     private _reconcile (): void {
         const layout = this._layout!;
-        const startX = this._originX - layout.tilesX * layout.tileSize / 2;
-        const startZ = this._originZ - layout.tilesZ * layout.tileSize / 2;
+        const grid = this._grid!;
+        const origin = { x: this._originX, z: this._originZ };
         const desired = new Set<number>();
         for (const region of this._regions.values()) {
-            const b = region.bounds;
-            const x0 = Math.max(0, Math.floor((b.minX - startX) / layout.tileSize));
-            const z0 = Math.max(0, Math.floor((b.minZ - startZ) / layout.tileSize));
-            const x1 = Math.min(layout.tilesX, Math.ceil((b.maxX - startX) / layout.tileSize));
-            const z1 = Math.min(layout.tilesZ, Math.ceil((b.maxZ - startZ) / layout.tileSize));
+            const rect = grid.clip(grid.worldBoundsToTiles(region.bounds, origin));
+            const { beginX: x0, beginZ: z0, endX: x1, endZ: z1 } = rect;
             region.keys = []; region.actual = undefined;
             if (x0 >= x1 || z0 >= z1) { region.status = LandscapePhysicsStatus.Outside; continue; }
             if ((x1 - x0) * (z1 - z0) > this._options.maxTiles) {
@@ -319,12 +314,11 @@ export class LandscapePhysics {
             }
             const keys: number[] = []; let added = 0;
             for (let z = z0; z < z1; ++z) for (let x = x0; x < x1; ++x) {
-                const key = z * layout.tilesX + x; keys.push(key); if (!desired.has(key)) ++added;
+                const key = grid.tileKey(x, z); keys.push(key); if (!desired.has(key)) ++added;
             }
             if (desired.size + added > this._options.maxTiles) { region.status = LandscapePhysicsStatus.OutOfCapacity; continue; }
             region.keys = keys; region.status = LandscapePhysicsStatus.NotReady;
-            region.actual = { minX: startX + x0 * layout.tileSize, minZ: startZ + z0 * layout.tileSize,
-                maxX: startX + x1 * layout.tileSize, maxZ: startZ + z1 * layout.tileSize };
+            region.actual = grid.tilesToWorldBounds(rect, origin);
             for (const key of keys) desired.add(key);
         }
         for (const [key, tile] of this._tiles) if (!desired.has(key)) { this._disposeTile(tile); this._tiles.delete(key); }
@@ -334,21 +328,23 @@ export class LandscapePhysics {
             z: (region.bounds.minZ + region.bounds.maxZ) / 2,
         }));
         const pending = [...desired].filter(key => !this._tiles.has(key)).map(key => {
-            const x = startX + (key % layout.tilesX + 0.5) * layout.tileSize;
-            const z = startZ + (Math.floor(key / layout.tilesX) + 0.5) * layout.tileSize;
+            const tile = grid.tileAtKey(key);
+            const local = grid.tileLocalOrigin(tile.x, tile.z);
+            const x = origin.x + local.x + layout.tileSize / 2;
+            const z = origin.z + local.z + layout.tileSize / 2;
             let distance = Infinity;
             for (const center of centers) distance = Math.min(distance, (x - center.x) ** 2 + (z - center.z) ** 2);
             return { key, distance };
         }).sort((a, b) => a.distance - b.distance);
         for (const { key } of pending) {
-            this._tiles.set(key, { x: key % layout.tilesX, z: Math.floor(key / layout.tilesX), loading: false });
+            this._tiles.set(key, { ...grid.tileAtKey(key), loading: false });
         }
         this._dirty = false;
     }
 
     private _loadTile (tile: Tile): void {
         const generation = this._generation; const layout = this._layout!;
-        const key = tile.z * layout.tilesX + tile.x;
+        const key = this._grid!.tileKey(tile.x, tile.z);
         tile.loading = true; ++this._inFlight;
         void this._loader.loadTile(this._url, layout, tile.x, tile.z).then(samples => {
             if (generation !== this._generation || this._tiles.get(key) !== tile) return;
@@ -365,11 +361,11 @@ export class LandscapePhysics {
         node.active = false;
         try {
             node.parent = this._landscape.node;
-            node.setPosition((tile.x - layout.tilesX / 2) * layout.tileSize,
-                layout.heightBias + 32768 * layout.heightScale / 65535,
-                (tile.z - layout.tilesZ / 2) * layout.tileSize);
+            const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
+            const heightfield = new LandscapePhysicsHeightfield(tile.samples!, layout);
+            node.setPosition(local.x, heightfield.localOriginY, local.z);
             const collider = node.addComponent(LandscapePhysicsCollider);
-            collider.terrain = new LandscapePhysicsHeightfield(tile.samples!, layout);
+            collider.terrain = heightfield;
             collider.sharedMaterial = this._options.material;
             node.active = true;
             if (!collider.shape?.impl) throw new Error('Terrain collider creation failed');

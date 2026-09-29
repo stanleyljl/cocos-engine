@@ -49,9 +49,10 @@ public:
     // Copies the metadata needed for selection; does not load or retain the asset.
     bool init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
 
+    // Inputs are world space; output QuadNodes always use global node coordinates.
     // Each pass traverses from the root with its own frustum and the same LOD position.
     const ccstd::vector<QuadNode> &select(const Vec3 &camPos, const geometry::Frustum &frustum,
-                                          const Vec3 &sectorOrigin, uint32_t sectorX, uint32_t sectorZ);
+                                          const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ);
 
     const ccstd::vector<float> &lodMorphStart() const { return _lodMorphStart; }
     const ccstd::vector<float> &lodMorphEnd() const { return _lodMorphEnd; }
@@ -75,15 +76,14 @@ private:
     LandscapeData _data;
 
     Vec3 _camPos;
-    Vec3 _sectorOrigin;
+    Vec3 _landscapeWorldOrigin;
     uint32_t _sectorX{0};
     uint32_t _sectorZ{0};
     const geometry::Frustum *_frustum{nullptr};
     IntrusivePtr<geometry::AABB> _box;
     ccstd::vector<QuadNode> _selected;
-    ccstd::vector<size_t> _levelOffsets;
+    NodeRangeLayout _nodeLayout;
     ccstd::vector<HeightRange> _heightRanges;
-    size_t _nodesPerSector{0};
     ccstd::vector<float> _lodRange;
     ccstd::vector<float> _lodMorphStart;
     ccstd::vector<float> _lodMorphEnd;

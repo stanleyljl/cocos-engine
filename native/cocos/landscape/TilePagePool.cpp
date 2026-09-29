@@ -248,9 +248,8 @@ bool TilePagePool::loadRequestedTiles() {
     LandscapeAsset::TileData tile;
     for (const auto key : _missingRequests) {
         if (_resident.count(key)) continue;
-        if (!_asset->loadTileSet(static_cast<uint32_t>(key >> NODE_KEY_LEVEL_SHIFT),
-                static_cast<uint32_t>((key >> NODE_KEY_COORD_BITS) & NODE_KEY_COORD_MASK),
-                static_cast<uint32_t>(key & NODE_KEY_COORD_MASK), tile)) return false;
+        const auto address = NodeAddress::fromKey(key);
+        if (!_asset->loadTileSet(address.level, address.x, address.z, tile)) return false;
         const int layer = acquireLayer();
         if (layer < 0) return false;
         uploadHeight(static_cast<uint32_t>(layer), tile.height.data());
@@ -303,7 +302,7 @@ void TilePagePool::update(uint32_t maxUploads) {
 }
 
 void TilePagePool::touchLRU(uint64_t key) {
-    if ((key >> NODE_KEY_LEVEL_SHIFT) == _asset->data().maxLevel) {
+    if (NodeAddress::fromKey(key).level == _asset->data().maxLevel) {
         return; // roots are permanent and must never become eviction candidates
     }
     const auto it = _lruIter.find(key);
@@ -360,7 +359,7 @@ void TilePagePool::destroy() {
 }
 
 TilePageResolver::TilePageResolver(TilePagePool &pool, const LandscapeData &data)
-: _pool(pool), _data(data), _vtRootLevel(vtRootLevel(data.sectorSize)) {}
+: _pool(pool), _data(data), _vtLayout(data.sectorSize) {}
 
 void TilePageResolver::beginFrame(bool synchronous) {
     _pool.beginFrame(synchronous);
@@ -369,52 +368,50 @@ void TilePageResolver::beginFrame(bool synchronous) {
 
 void TilePageResolver::protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes,
                                              const ccstd::vector<QuadNode> &surfaceNodes) {
-    for (const auto &node : geometryNodes) resolve(node);
+    for (const auto &node : geometryNodes) resolve(node.address());
     // Shadow vertices need heights only. Parent normals are a color-pass input.
     for (const auto &node : surfaceNodes) {
-        normalParent(node, resolve(node));
+        normalParent(node.address(), resolve(node.address()));
     }
 }
 
-Vec4 TilePageResolver::params(const Tile &tile) const {
-    const float size = computeNodeSize(_data.sectorSize, _data.maxLevel, tile.level);
-    return Vec4{tile.x * size - _data.worldWidth() * 0.5F,
-                tile.z * size - _data.worldDepth() * 0.5F, size, static_cast<float>(tile.layer)};
+Vec4 TilePageResolver::shaderParams(const Tile &tile) const {
+    const auto region = _data.nodeRegion(tile.address);
+    return Vec4{region.x, region.z, region.size, static_cast<float>(tile.layer)};
 }
 
 uint32_t TilePageResolver::sourceLevelForWorldSize(float size) const {
     uint32_t level = _data.minTileLevel;
-    while (level < _data.maxLevel && computeNodeSize(_data.sectorSize, _data.maxLevel, level) < size) ++level;
+    while (level < _data.maxLevel && _data.nodeSize(level) < size) ++level;
     return level;
 }
 
 TilePageResolver::Tile TilePageResolver::resolveSplat(const VTPageAddress &page) {
     // A material page can be finer than every height/splat tile. Choose the
     // containing source independently of the selected geometry node's LOD.
-    const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
+    const float size = _vtLayout.pageSize(page.level);
     const uint32_t level = sourceLevelForWorldSize(size);
-    const float sourceSize = computeNodeSize(_data.sectorSize, _data.maxLevel, level);
-    return resolve(QuadNode{level, static_cast<uint32_t>((page.x + 0.5F) * size / sourceSize),
-                            static_cast<uint32_t>((page.z + 0.5F) * size / sourceSize)});
+    return resolve(_data.nodeAtGridClamped(level, {(page.x + 0.5F) * size, (page.z + 0.5F) * size}));
 }
 
 std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::resolveNormals(const VTPageAddress &page, bool bakeNormals) {
     std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> sources;
     if (!bakeNormals) {
-        sources.fill(params(resolveSplat(page)));
+        sources.fill(shaderParams(resolveSplat(page)));
         return sources;
     }
-    // Match normal spacing to VT texels, independently of geometry LOD. A
-    // 129-sample tile covers half a 256-texel page. The outer ring supplies
-    // real neighboring normals for gutters instead of clamping at page edges.
-    const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
+    // Match normal spacing to VT texels, independently of geometry LOD, but
+    // keep each source at least half a page wide to fit the 4x4 neighborhood.
+    // Higher VT resolution interpolates these normals; the outer ring still
+    // supplies real neighboring normals instead of clamping at page edges.
+    const float size = _vtLayout.pageSize(page.level);
     const float target = size * std::max(0.5F,
         static_cast<float>(_data.tileResolution - 1U) / config::VT_PAGE_INTERIOR);
     uint32_t level = sourceLevelForWorldSize(target);
     for (;;) {
         const uint32_t residentLevel = resolveNormalNeighborhood(page, size, level, sources);
         // Publish one resolution for the entire page. Fine sources remain
-        // requested; when all arrive, acquirePage invalidates this cached page.
+        // requested; when all arrive, setInputs invalidates this cached page.
         if (residentLevel == level) return sources;
         level = residentLevel;
     }
@@ -425,9 +422,6 @@ uint32_t TilePageResolver::resolveNormalNeighborhood(
     std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &sources) {
     constexpr uint32_t SIDE = 4;
     static_assert(SIDE * SIDE == config::VT_NORMAL_SOURCE_COUNT, "Normal source table is a 4x4 neighborhood");
-    const float sourceSize = computeNodeSize(_data.sectorSize, _data.maxLevel, level);
-    const uint32_t countX = _data.sectorsX << (_data.maxLevel - level);
-    const uint32_t countZ = _data.sectorsZ << (_data.maxLevel - level);
     uint32_t coarsestResidentLevel = level;
     for (uint32_t row = 0; row < SIDE; ++row) {
         for (uint32_t column = 0; column < SIDE; ++column) {
@@ -435,50 +429,42 @@ uint32_t TilePageResolver::resolveNormalNeighborhood(
             // two interior sources and one neighbor beyond each edge.
             const float x = (page.x - 0.25F + column * 0.5F) * pageSize;
             const float z = (page.z - 0.25F + row * 0.5F) * pageSize;
-            const uint32_t tileX = static_cast<uint32_t>(std::clamp(std::floor(x / sourceSize), 0.0F, static_cast<float>(countX - 1U)));
-            const uint32_t tileZ = static_cast<uint32_t>(std::clamp(std::floor(z / sourceSize), 0.0F, static_cast<float>(countZ - 1U)));
-            const auto tile = resolve(QuadNode{level, tileX, tileZ});
-            sources[row * SIDE + column] = params(tile);
-            coarsestResidentLevel = std::max(coarsestResidentLevel, tile.level);
+            const auto tile = resolve(_data.nodeAtGridClamped(level, {x, z}));
+            sources[row * SIDE + column] = shaderParams(tile);
+            coarsestResidentLevel = std::max(coarsestResidentLevel, tile.address.level);
         }
     }
     return coarsestResidentLevel;
 }
 
-TilePageResolver::Tile TilePageResolver::normalParent(const QuadNode &node, const Tile &tile) {
+TilePageResolver::Tile TilePageResolver::normalParent(NodeAddress node, const Tile &tile) {
     // Finer geometry already shares the finest source normal map. A streaming
     // fallback likewise must not morph towards an extra-coarse level again.
-    if (node.level != tile.level || node.level >= _data.maxLevel) return tile;
-    return resolve(QuadNode{node.level + 1U, node.ix >> 1U, node.iz >> 1U});
+    if (node.level != tile.address.level || node.level >= _data.maxLevel) return tile;
+    return resolve(node.ancestor(node.level + 1U));
 }
 
-TilePageResolver::Tile TilePageResolver::resolve(const QuadNode &node) {
+TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) {
     Tile tile;
-    tile.level = std::max(node.level, _data.minTileLevel);
-    const uint32_t shift = tile.level - node.level;
-    tile.x = node.ix >> shift;
-    tile.z = node.iz >> shift;
-    const uint64_t key = makeNodeKey(tile.level, tile.x, tile.z);
+    tile.address = node.ancestor(std::max(node.level, _data.minTileLevel));
+    const uint64_t key = tile.address.key();
     const auto cached = _cache.find(key);
     if (cached != _cache.end()) return cached->second;
     // Only the desired tile starts an asynchronous request. Ancestors are
     // queried without loading and remain protected while used as fallbacks.
-    tile.layer = _pool.query(tile.level, tile.x, tile.z);
-    while (tile.layer < 0 && tile.level < _data.maxLevel) {
-        ++tile.level;
-        tile.x >>= 1U;
-        tile.z >>= 1U;
-        tile.layer = _pool.peekResident(makeNodeKey(tile.level, tile.x, tile.z));
+    tile.layer = _pool.query(tile.address.level, tile.address.x, tile.address.z);
+    while (tile.layer < 0 && tile.address.level < _data.maxLevel) {
+        tile.address = tile.address.ancestor(tile.address.level + 1U);
+        tile.layer = _pool.peekResident(tile.address.key());
     }
     _cache.emplace(key, tile);
     return tile; // initialization guarantees a resident root for every sector
 }
 
 VTPageInputs TilePageResolver::resolvePage(const VTPageAddress &page, bool bakeNormals) {
-    const float size = vtPageWorldSize(_data.sectorSize, _vtRootLevel, page.level);
-    const Vec4 region{page.x * size - _data.worldWidth() * 0.5F,
-                      page.z * size - _data.worldDepth() * 0.5F, size, 0.0F};
-    return {region, params(resolveSplat(page)), resolveNormals(page, bakeNormals)};
+    const float size = _vtLayout.pageSize(page.level);
+    const auto region = _data.regionAtGrid(_vtLayout.pageOrigin(page), size);
+    return {Vec4{region.x, region.z, region.size, 0.0F}, shaderParams(resolveSplat(page)), resolveNormals(page, bakeNormals)};
 }
 
 } // namespace landscape

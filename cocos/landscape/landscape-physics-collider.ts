@@ -16,16 +16,23 @@ let nextTerrainID = 1;
 /** Landscape-owned immutable samples, centered on the signed16 domain. */
 export class LandscapePhysicsHeightfield implements ITerrainAsset {
     public readonly _uuid = `landscape-heightfield-${nextTerrainID++}`;
+    // ITerrainAsset calls sample spacing tileSize; it is NOT the source tile's width.
     public readonly tileSize: number;
+    public readonly localOriginY: number;
     public readonly heightFieldScale: number;
     constructor (public readonly samples: Uint16Array, private readonly _layout: LandscapeHeightLayout) {
         this.tileSize = _layout.tileSize / (_layout.resolution - 1);
         this.heightFieldScale = _layout.heightScale / 65535;
+        this.localOriginY = _layout.heightBias + 32768 * _layout.heightScale / 65535;
     }
     public getVertexCountI (): number { return this._layout.resolution; }
     public getVertexCountJ (): number { return this._layout.resolution; }
-    public getHeight (i: number, j: number): number {
-        return (this.samples[j * this._layout.resolution + i] - 32768) * this.heightFieldScale;
+    // Samples are Z-major with X contiguous; physics stores signed16 heights.
+    public getSignedHeight (x: number, z: number): number {
+        return this.samples[z * this._layout.resolution + x] - 32768;
+    }
+    public getHeight (x: number, z: number): number {
+        return this.getSignedHeight(x, z) * this.heightFieldScale;
     }
 }
 
@@ -105,8 +112,9 @@ function createLandscapeShape (): ITerrainShape {
                     const sample = new PX.PxHeightFieldSample();
                     const n = terrain.getVertexCountI();
                     try {
-                        for (let i = 0; i < n; ++i) for (let j = 0; j < n; ++j) {
-                            sample.height = terrain.samples[j * n + i] - 32768;
+                        // PhysX rows run along X, columns along Z: transpose the source layout.
+                        for (let x = 0; x < n; ++x) for (let z = 0; z < n; ++z) {
+                            sample.height = terrain.getSignedHeight(x, z);
                             samples.push_back(sample);
                         }
                         this._ownedHeightField = PhysXInstance.cooking.createHeightFieldExt(n, n, samples, PhysXInstance.physics);

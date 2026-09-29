@@ -24,23 +24,19 @@
 
 #include "landscape/LandscapeConfig.h"
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 
 namespace cc {
 namespace landscape {
 
-size_t computeSectorNodeLayout(uint32_t maxLevel, ccstd::vector<size_t> &levelOffsets) {
-    if (maxLevel >= config::MAX_LOD_LEVELS) {
-        levelOffsets.clear();
-        return 0U;
-    }
-    levelOffsets.resize(static_cast<size_t>(maxLevel) + 1U);
-    size_t nodesPerSector = 0U;
-    for (uint32_t level = 0; level <= maxLevel; ++level) {
-        levelOffsets[level] = nodesPerSector;
-        const size_t side = computeNodesPerSide(maxLevel, level);
-        nodesPerSector += side * side;
-    }
-    return nodesPerSector;
+float cliffDensityScale(float heightRange, float width, float childScale) {
+    const float slope = std::max(heightRange, 0.0F) / std::max(width, 0.001F);
+    // At most two extra VT levels. This is a conservative range-based estimate,
+    // not a substitute for screen-space feedback; residency still bounds memory.
+    // Retain narrow steep features when a coarse node encloses mostly flat
+    // terrain. Averaging its high/low range over the coarse width loses them.
+    return std::min(4.0F, std::max(childScale, std::sqrt(1.0F + slope * slope)));
 }
 
 bool LandscapeData::valid() const {
@@ -49,34 +45,79 @@ bool LandscapeData::valid() const {
            heightScale > 0.0F;
 }
 
-uint32_t computeNodesPerSide(uint32_t maxLevel, uint32_t level) {
+uint32_t LandscapeData::nodesPerSectorSide(uint32_t level) const {
     return maxLevel < config::MAX_LOD_LEVELS && level <= maxLevel
         ? 1U << (maxLevel - level) : 0U;
 }
 
-float computeNodeSize(float sectorSize, uint32_t maxLevel, uint32_t level) {
-    const uint32_t side = computeNodesPerSide(maxLevel, level);
+float LandscapeData::nodeSize(uint32_t level) const {
+    const uint32_t side = nodesPerSectorSide(level);
     return side != 0U ? sectorSize / static_cast<float>(side) : 0.0F;
 }
 
-size_t nodeRangeIndex(const LandscapeData &data, const ccstd::vector<size_t> &levelOffsets,
-                      size_t nodesPerSector, uint32_t sectorX, uint32_t sectorZ,
-                      uint32_t level, uint32_t localX, uint32_t localZ) {
-    const uint32_t side = computeNodesPerSide(data.maxLevel, level);
-    if (side == 0U || level >= levelOffsets.size() || nodesPerSector == 0U ||
-        sectorX >= data.sectorsX || sectorZ >= data.sectorsZ || localX >= side || localZ >= side) {
-        return INVALID_NODE_INDEX;
-    }
-    const size_t sectorIndex = static_cast<size_t>(sectorZ) * data.sectorsX + sectorX;
-    return sectorIndex * nodesPerSector + levelOffsets[level] + static_cast<size_t>(localZ) * side + localX;
+LandscapeGridXZ LandscapeData::localToGrid(LandscapeLocalXZ local) const {
+    return {local.x + worldWidth() * 0.5, local.z + worldDepth() * 0.5};
 }
 
-size_t globalNodeRangeIndex(const LandscapeData &data, const ccstd::vector<size_t> &levelOffsets,
-                            size_t nodesPerSector, uint32_t level, uint32_t globalX, uint32_t globalZ) {
-    const uint32_t side = computeNodesPerSide(data.maxLevel, level);
-    if (side == 0U) return INVALID_NODE_INDEX;
-    return nodeRangeIndex(data, levelOffsets, nodesPerSector, globalX / side, globalZ / side,
-                          level, globalX % side, globalZ % side);
+LandscapeLocalXZ LandscapeData::gridToLocal(LandscapeGridXZ grid) const {
+    return {grid.x - worldWidth() * 0.5, grid.z - worldDepth() * 0.5};
+}
+
+bool LandscapeData::containsGridPoint(LandscapeGridXZ grid) const {
+    return grid.x >= 0 && grid.z >= 0 && grid.x <= worldWidth() && grid.z <= worldDepth();
+}
+
+NodeAddress LandscapeData::nodeAtGridClamped(uint32_t level, LandscapeGridXZ grid) const {
+    assert(nodesX(level) > 0 && nodesZ(level) > 0 && sectorSize > 0);
+    assert(std::isfinite(grid.x) && std::isfinite(grid.z));
+    const double size = nodeSize(level);
+    return {level,
+        static_cast<uint32_t>(std::clamp(std::floor(grid.x / size), 0.0, double(nodesX(level) - 1U))),
+        static_cast<uint32_t>(std::clamp(std::floor(grid.z / size), 0.0, double(nodesZ(level) - 1U)))};
+}
+
+LandscapeLocalRegion LandscapeData::regionAtGrid(LandscapeGridXZ origin, float size) const {
+    const auto local = gridToLocal(origin);
+    return {static_cast<float>(local.x), static_cast<float>(local.z), size};
+}
+
+LandscapeLocalRegion LandscapeData::nodeRegion(NodeAddress address) const {
+    const float size = nodeSize(address.level);
+    return regionAtGrid({address.x * size, address.z * size}, size);
+}
+
+NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                                       uint32_t localX, uint32_t localZ) const {
+    const uint32_t side = nodesPerSectorSide(level);
+    assert(sectorX < sectorsX && sectorZ < sectorsZ && localX < side && localZ < side);
+    return {level, sectorX * side + localX, sectorZ * side + localZ};
+}
+
+NodeRangeLayout::NodeRangeLayout(const LandscapeData &data) {
+    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS) return;
+    _sectorsX = data.sectorsX;
+    _sectorsZ = data.sectorsZ;
+    _levelCount = data.maxLevel + 1U;
+    for (uint32_t level = 0; level < _levelCount; ++level) {
+        const uint32_t side = data.nodesPerSectorSide(level);
+        _levels[level] = Level{side, _nodesPerSector};
+        _nodesPerSector += static_cast<size_t>(side) * side;
+    }
+}
+
+size_t NodeRangeLayout::sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
+                                       uint32_t localX, uint32_t localZ) const {
+    if (level >= _levelCount || sectorX >= _sectorsX || sectorZ >= _sectorsZ) return INVALID_INDEX;
+    const auto &layout = _levels[level];
+    if (localX >= layout.nodesPerSide || localZ >= layout.nodesPerSide) return INVALID_INDEX;
+    const size_t sectorIndex = static_cast<size_t>(sectorZ) * _sectorsX + sectorX;
+    return sectorIndex * _nodesPerSector + layout.offset + static_cast<size_t>(localZ) * layout.nodesPerSide + localX;
+}
+
+size_t NodeRangeLayout::globalNodeIndex(uint32_t level, uint32_t globalX, uint32_t globalZ) const {
+    if (level >= _levelCount) return INVALID_INDEX;
+    const uint32_t side = _levels[level].nodesPerSide;
+    return sectorNodeIndex(globalX / side, globalZ / side, level, globalX % side, globalZ % side);
 }
 
 uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz) {
@@ -85,12 +126,22 @@ uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz) {
            (static_cast<uint64_t>(iz) & NODE_KEY_COORD_MASK);
 }
 
-uint64_t makeNodeKey(const QuadNode &node) {
-    return makeNodeKey(node.level, node.ix, node.iz);
+uint64_t NodeAddress::key() const { return makeNodeKey(level, x, z); }
+
+NodeAddress NodeAddress::fromKey(uint64_t key) {
+    return {static_cast<uint32_t>(key >> NODE_KEY_LEVEL_SHIFT),
+            static_cast<uint32_t>((key >> NODE_KEY_COORD_BITS) & NODE_KEY_COORD_MASK),
+            static_cast<uint32_t>(key & NODE_KEY_COORD_MASK)};
 }
 
-uint64_t makeQuadrantKey(const QuadNode &node, uint32_t quadrant) {
-    return (makeNodeKey(node) << 2U) | static_cast<uint64_t>(quadrant);
+NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
+    assert(targetLevel >= level && targetLevel < config::MAX_LOD_LEVELS);
+    const uint32_t shift = targetLevel - level;
+    return {targetLevel, x >> shift, z >> shift};
+}
+
+uint64_t makeNodeKey(const QuadNode &node) {
+    return makeNodeKey(node.level, node.ix, node.iz);
 }
 
 void mergeNodeSelections(ccstd::vector<QuadNode> &nodes) {

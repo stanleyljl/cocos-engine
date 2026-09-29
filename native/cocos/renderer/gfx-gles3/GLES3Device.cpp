@@ -105,6 +105,10 @@ bool GLES3Device::doInit(const DeviceInfo & /*info*/) {
     ccstd::string extStr = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
     _extensions = StringUtil::split(extStr, " ");
 
+    if (checkExtension("GL_EXT_texture_filter_anisotropic") || checkExtension("GL_ARB_texture_filter_anisotropic")) {
+        GL_CHECK(glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &_gpuConstantRegistry->maxSamplerAnisotropy));
+    }
+
     initFormatFeature();
 
     _multithreadedCommandRecording = false;

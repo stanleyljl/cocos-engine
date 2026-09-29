@@ -22,7 +22,7 @@ enum class LandscapeQueryStatus : uint32_t {
 
 struct LandscapeSurfaceResult {
     LandscapeQueryStatus status{LandscapeQueryStatus::NOT_READY};
-    Vec3 position;
+    Vec3 position; // landscape-local; Landscape adds the node's world translation
     Vec3 normal;
     int32_t surfaceType{-1};
     float surfaceWeight{0.0F};
@@ -44,11 +44,12 @@ public:
     using Loader = std::function<void(uint32_t, uint32_t, Completion)>;
     LandscapeQuery(const LandscapeData &data, Loader loader, uint32_t capacity = 64);
     ~LandscapeQuery();
-    LandscapeQueryStatus setSource(uint32_t id, float x, float z, float radius);
+    // Inputs and returned positions are landscape-local; Landscape converts world space.
+    LandscapeQueryStatus setSource(uint32_t id, LandscapeLocalXZ center, float radius);
     void removeSource(uint32_t id);
     LandscapeQueryStatus sourceStatus(uint32_t id) const;
     void update();
-    LandscapeSurfaceResult sample(float x, float z);
+    LandscapeSurfaceResult sample(LandscapeLocalXZ local);
 
 private:
     enum class State { WAITING, LOADING, READY, FAILED };
@@ -74,19 +75,16 @@ private:
         float fx{0};
         float fz{0};
     };
-    LandscapeQueryStatus collectSourceKeys(float x, float z, float radius, ccstd::vector<uint64_t> &keys) const;
+    LandscapeQueryStatus collectSourceKeys(LandscapeLocalXZ center, float radius, ccstd::vector<uint64_t> &keys) const;
     bool sourceFits(const ccstd::vector<uint64_t> &keys, const ccstd::vector<uint64_t> *previous) const;
     void pinSourceTiles(const ccstd::vector<uint64_t> &keys);
-    SampleLocation locateSample(double x, double z, uint64_t key) const;
+    SampleLocation locateSample(LandscapeGridXZ grid, NodeAddress tile) const;
     bool interpolateHeightNormal(const Entry &entry, const SampleLocation &location,
-                                 float worldX, float worldZ, LandscapeSurfaceResult &result) const;
+                                 LandscapeLocalXZ local, LandscapeSurfaceResult &result) const;
     void interpolateSurface(const Entry &entry, const SampleLocation &location, LandscapeSurfaceResult &result) const;
-    uint64_t keyAt(double x, double z) const;
     LandscapeData _data;
     Loader _loader;
     uint32_t _capacity;
-    uint32_t _tilesX;
-    uint32_t _tilesZ;
     double _tileSize;
     uint64_t _clock{0};
     uint64_t _nextTicket{0};

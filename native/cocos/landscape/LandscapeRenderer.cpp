@@ -53,34 +53,6 @@
 namespace cc {
 namespace landscape {
 
-namespace {
-Material *createLandscapeMaterial(bool wireframe, bool decal, bool heightUnorm) {
-    auto *material = ccnew Material();
-    IMaterialInfo info;
-    info.effectName = ccstd::string{"builtin-landscape"};
-    MacroRecord defines;
-    defines["USE_INSTANCING"] = true;
-    defines["LANDSCAPE_DEBUG_UNLIT"] = false;
-    defines["LANDSCAPE_DECAL_MESH"] = decal;
-    defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
-    // Compile debug edges out of the normal material entirely.
-    defines["LANDSCAPE_WIREFRAME"] = wireframe;
-    info.defines = IMaterialInfo::DefinesType{defines};
-
-    if (wireframe) {
-        RasterizerStateInfo rasterizer;
-        rasterizer.cullMode = gfx::CullMode::NONE;
-        PassOverrides overrides;
-        overrides.rasterizerState = rasterizer;
-        info.states = IMaterialInfo::PassOverridesType{overrides};
-    }
-
-    material->initialize(info);
-    return material;
-}
-
-} // namespace
-
 LandscapeRenderer::LandscapeRenderer() = default;
 
 LandscapeRenderer::~LandscapeRenderer() {
@@ -101,12 +73,10 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
     const bool heightUnorm = TilePagePool::supportsHeightUnorm(device);
     _materialSolid = createLandscapeMaterial(false, false, heightUnorm);
     _materialWire = createLandscapeMaterial(true, false, heightUnorm);
-    _decalSolid = createLandscapeMaterial(false, true, heightUnorm);
-    _decalWire = createLandscapeMaterial(true, true, heightUnorm);
-    _decalMesh = GridMesh::create(device, 16);
+    _decals = std::make_unique<DecalRenderer>();
+    const bool decalsReady = _decals->init(node, scene, heightUnorm);
     if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
-        _decalMesh == nullptr ||
-        _materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
+        !decalsReady || _materialSolid == nullptr || _materialWire == nullptr) {
         destroy();
         return false;
     }
@@ -118,6 +88,10 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
         return false;
     }
     _instanceAttributeScratch = Float32Array(4);
+    _decals->setEnabled(_debugData.decal3DEnabled);
+    _decals->setWireframe(_debugData.wireframe);
+    _decals->setCastShadow(_castShadow);
+    _decals->setReceiveShadow(_receiveShadow);
     updateMaterialProperties();
     return true;
 }
@@ -148,9 +122,8 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     }
     _asset = asset;
     _data = asset->data();
-    initDecalCenters();
-    _vtRootLevel = vtRootLevel(_data.sectorSize);
-    _heightSampleSpacing = computeNodeSize(_data.sectorSize, _data.maxLevel, _data.minTileLevel) /
+    _vtLayout = VTPageLayout(_data.sectorSize);
+    _heightSampleSpacing = _data.nodeSize(_data.minTileLevel) /
                            static_cast<float>(_data.tileResolution - 1U);
     _tilePages = std::make_unique<TilePagePool>();
     if (!_tilePages->init(device, asset, config::PAGE_POOL_LAYERS)) {
@@ -162,8 +135,9 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     if (!_materialLibrary->init(device, *asset)) {
         return false;
     }
+    if (!_decals->setAsset(asset, device)) return false;
     _vtRenderer = std::make_unique<VTRenderer>();
-    if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary)) {
+    if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary, *_decals)) {
         CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
         _vtRenderer.reset();
         return false;
@@ -174,26 +148,15 @@ bool LandscapeRenderer::setAsset(LandscapeAsset *asset) {
     return true;
 }
 
-void LandscapeRenderer::initDecalCenters() {
-    _decalCenters.clear();
-    const float finestNodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, 0);
-    for (const auto &d : _asset->decals()) {
-        const float x = d.x + d.size * 0.5F;
-        const float z = d.z + d.size * 0.5F;
-        float minY = _data.minHeight();
-        float maxY = _data.maxHeight();
-        _asset->getHeightRange(0, static_cast<uint32_t>((x + _data.worldWidth() * 0.5F) / finestNodeSize),
-                             static_cast<uint32_t>((z + _data.worldDepth() * 0.5F) / finestNodeSize), minY, maxY);
-        // A stable height reference keeps the WHOLE decal's fade independent of
-        // selected LOD, streaming height pages and individual vertex positions.
-        _decalCenters.emplace_back(x, (minY + maxY) * 0.5F, z);
-    }
+std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
+    const auto decals = _decals ? _decals->materials() : std::array<Material *, 2>{};
+    return {_materialSolid.get(), _materialWire.get(), decals[0], decals[1]};
 }
 
 void LandscapeRenderer::bindRuntimeTextures() {
-    // Bind full VT textures with trilinear mip filtering for terrain and decals.
-    auto &vt = _vtRenderer->texture();
-    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
+    // Bind full VT textures with anisotropic mip filtering for terrain and decals.
+    auto &vt = *_vtRenderer;
+    for (auto *material : surfaceMaterials()) {
         const auto setRuntimeTexture = [material](const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
             CC_ASSERT(texture != nullptr);
             material->setPropertyGFXTexture(name, texture);
@@ -208,7 +171,7 @@ void LandscapeRenderer::bindRuntimeTextures() {
         setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
         setRuntimeTexture("terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
-        if (material == _decalSolid.get() || material == _decalWire.get()) {
+        if (material != _materialSolid.get() && material != _materialWire.get()) {
             setRuntimeTexture("decalHeightMap", _materialLibrary->decalHeight(), _tilePages->heightSampler());
         }
         setRuntimeTexture("vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
@@ -244,7 +207,7 @@ void LandscapeRenderer::setDecal3DEnabled(bool enabled) {
     _debugData.decal3DEnabled = enabled;
     updateMaterialProperties();
     // Decal visibility affects geometry only and remains immediate while residency is frozen.
-    for (size_t i = 0; i < _decalDraws.size(); ++i) _decalDraws[i].model->setEnabled(enabled && i < _decalActive);
+    if (_decals) _decals->setEnabled(enabled);
 }
 
 void LandscapeRenderer::setBakeNormalEnabled(bool enabled) {
@@ -296,7 +259,7 @@ IntrusivePtr<scene::Model> LandscapeRenderer::createModel(uint32_t meshIndex) {
 }
 
 void LandscapeRenderer::updateMaterialProperties() {
-    if (_materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
+    if (_materialSolid == nullptr || _materialWire == nullptr || !_decals) {
         return;
     }
 
@@ -313,7 +276,7 @@ void LandscapeRenderer::updateMaterialProperties() {
         lodMorph[i] = Vec4{start, end, 0.0F, 0.0F};
     }
 
-    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
+    for (auto *material : surfaceMaterials()) {
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize,
             _data.worldWidth() * 0.5F, _data.worldDepth() * 0.5F, 0.0F});
@@ -324,13 +287,14 @@ void LandscapeRenderer::updateMaterialProperties() {
                                                         0.0F, 0.0F});
         material->setPropertyVec4Array("lodMorph", lodMorph);
         material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
-            static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER), 0.0F});
+            static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
+            static_cast<float>(config::VT_FILTER_MARGIN)});
     }
     updateMorphCameraProperty();
 }
 
 void LandscapeRenderer::updateMorphCameraProperty() {
-    if (_materialSolid == nullptr || _materialWire == nullptr || _decalSolid == nullptr || _decalWire == nullptr) {
+    if (_materialSolid == nullptr || _materialWire == nullptr || !_decals) {
         return;
     }
 
@@ -340,58 +304,52 @@ void LandscapeRenderer::updateMorphCameraProperty() {
         _viewPosition.z,
         0.0F,
     };
-    for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
+    for (auto *material : surfaceMaterials()) {
         material->setPropertyVec4("morphCameraPos", cameraPosition);
     }
 }
 
-void LandscapeRenderer::setInstanceAttribute(scene::Model *model, const char *name, const Vec4 &value) {
-    // setInstancedAttribute copies into each submodel's own attribute block
-    // synchronously, so this buffer can be reused across attributes and models.
-    // Creating transient ArrayBuffers here also grows the external pointer
-    // table in the bundled V8 build even after their JS objects are collected.
-    auto &instance = ccstd::get<Float32Array>(_instanceAttributeScratch);
-    instance[0] = value.x;
-    instance[1] = value.y;
-    instance[2] = value.z;
-    instance[3] = value.w;
-    model->setInstancedAttribute(name, _instanceAttributeScratch);
-}
-
-void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &patch) {
-    if (model == nullptr) {
-        return;
-    }
+LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const Patch &patch) {
+    LandscapeSurfaceInstance surface;
+    surface.needsMaterial = patch.needsMaterial;
 
     const auto &node = patch.node;
-    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, std::min(node.level, _data.maxLevel));
-    const float x = static_cast<float>(node.ix) * nodeSize - _data.worldWidth() * 0.5F;
-    const float z = static_cast<float>(node.iz) * nodeSize - _data.worldDepth() * 0.5F;
-    setInstanceAttribute(model, "a_gridInst", Vec4{x, z, nodeSize, static_cast<float>(node.level)});
-    setInstanceAttribute(model, "a_quadrantInst", Vec4{patch.x / 16.0F, patch.z / 16.0F,
-        static_cast<float>(1U << patch.meshIndex) / 16.0F, 0.0F});
+    const auto region = _data.nodeRegion(node.address());
+    surface.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
+    surface.quadrant = Vec4{patch.x / 16.0F, patch.z / 16.0F,
+        static_cast<float>(1U << patch.meshIndex) / 16.0F, 0.0F};
 
-    const auto tile = _sourceResolver->resolve(node);
+    const auto tile = _sourceResolver->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
                "[Landscape] missing resident root: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
-               node.level, node.ix, node.iz, tile.level, tile.x, tile.z, tile.layer);
+               node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
     // a_tileInst.xy = source tile origin in landscape-local meters,
     // z = source tile size in meters, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
-    setInstanceAttribute(model, "a_tileInst", _sourceResolver->params(tile));
-    if (!patch.needsMaterial) return;
-    setInstanceAttribute(model, "a_normalParentInst", _sourceResolver->params(_sourceResolver->normalParent(node, tile)));
-    const int vtSlot = _vtRenderer->texture().findReadyPageOrRoot(patch.page, _vtRootLevel);
-    CC_ASSERTF(vtSlot >= 0, "[Landscape] missing permanent root VT page");
-    const auto &vtRegion = _vtRenderer->texture().page(static_cast<uint32_t>(vtSlot)).inputs.region;
-    // A fallback covers an ancestor's region, not the fine node's region.
-    setInstanceAttribute(model, "a_vtInst", Vec4{vtRegion.x, vtRegion.y, vtRegion.z, static_cast<float>(vtSlot)});
+    surface.tile = _sourceResolver->shaderParams(tile);
+    if (!patch.needsMaterial) return surface;
+    surface.normalParent = _sourceResolver->shaderParams(_sourceResolver->normalParent(node.address(), tile));
+    surface.vt = _vtRenderer->mapping(patch.page);
+    return surface;
+}
+
+void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &patch) {
+    if (model) resolveSurface(patch).apply(model, _instanceAttributeScratch);
+}
+
+LandscapeLocalRegion LandscapeRenderer::patchRegion(const Patch &patch) const {
+    auto region = _data.nodeRegion(patch.node.address());
+    const float cell = region.size / 16.0F;
+    region.x += patch.x * cell;
+    region.z += patch.z * cell;
+    region.size = (1U << patch.meshIndex) * cell;
+    return region;
 }
 
 float LandscapeRenderer::patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const {
     // Match the translation-only terrain placement used by quadtree selection.
-    const Vec3 camera = (farthest ? _viewPosition : _vtViewPosition) - _node->getWorldPosition();
+    const Vec3 camera = _viewPosition - _node->getWorldPosition();
     const auto axisDistance = [farthest](float p, float lo, float hi) {
         return farthest ? std::max(std::abs(p - lo), std::abs(p - hi)) : std::max({lo - p, p - hi, 0.0F});
     };
@@ -403,27 +361,25 @@ float LandscapeRenderer::patchDistance(const QuadNode &node, float x, float z, f
 
 void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
                                       ccstd::vector<Patch> &patches) {
-    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
+    const float nodeSize = _data.nodeSize(node.level);
     const float cellSize = nodeSize / 16.0F;
     const uint32_t cells = 1U << meshIndex;
     const float size = cells * cellSize;
     const float minX = node.ix * nodeSize + x * cellSize;
     const float minZ = node.iz * nodeSize + z * cellSize;
-    const float localX = minX - _data.worldWidth() * 0.5F;
-    const float localZ = minZ - _data.worldDepth() * 0.5F;
+    const auto local = _data.gridToLocal({minX, minZ});
+    const float localX = static_cast<float>(local.x), localZ = static_cast<float>(local.z);
     const float distance = patchDistance(node, localX, localZ, size, false);
     float density = 1.0F;
     if (_debugData.cliffEnabled) {
         float minY = node.minY, maxY = node.maxY;
         const uint32_t rangeLevel = node.level + meshIndex >= 4U ? node.level + meshIndex - 4U : 0U;
-        const float rangeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, rangeLevel);
-        const uint32_t rangeX = static_cast<uint32_t>(minX / rangeSize);
-        const uint32_t rangeZ = static_cast<uint32_t>(minZ / rangeSize);
-        _asset->getHeightRange(rangeLevel, rangeX, rangeZ, minY, maxY);
-        density = cliffDensityScale(maxY - minY, size, _asset->getSurfaceStretch(rangeLevel, rangeX, rangeZ));
+        const auto address = _data.nodeAtGridClamped(rangeLevel, {minX, minZ});
+        _asset->getHeightRange(rangeLevel, address.x, address.z, minY, maxY);
+        density = cliffDensityScale(maxY - minY, size, _asset->getSurfaceStretch(rangeLevel, address.x, address.z));
     }
-    const uint32_t desired = vtDesiredLevel(_data.sectorSize, _vtRootLevel, distance / density);
-    if (meshIndex > 0 && vtPageWorldSize(_data.sectorSize, _vtRootLevel, desired) < size) {
+    const uint32_t desired = _vtLayout.levelForDistance(distance / density);
+    if (meshIndex > 0 && _vtLayout.pageSize(desired) < size) {
         const uint32_t half = cells / 2U;
         for (uint32_t q = 0; q < 4; ++q) {
             selectPatches(node, x + (q & 1U) * half, z + (q >> 1U) * half, meshIndex - 1U, patches);
@@ -436,8 +392,7 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
         patchDistance(node, localX, localZ, size, true) >= _morphStart[node.level];
     const float safeMinX = minX - (canMorph ? (x & 1U) * cellSize : 0.0F);
     const float safeMinZ = minZ - (canMorph ? (z & 1U) * cellSize : 0.0F);
-    const auto page = vtCoveringPage(_data.sectorSize, _vtRootLevel, desired,
-                                     safeMinX, safeMinZ, minX + size, minZ + size);
+    const auto page = _vtLayout.coveringPage(desired, {{safeMinX, safeMinZ}, {minX + size, minZ + size}});
     patches.push_back(Patch{node, x, z, meshIndex, page, size * density / std::max(distance, 1.0F)});
 }
 
@@ -451,11 +406,9 @@ void LandscapeRenderer::updateModel(ModelState &state, const Patch &patch) {
 
 void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patch) {
     const auto &node = patch.node;
-    const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
-    const float cellSize = nodeSize / 16.0F;
-    const float size = (1U << patch.meshIndex) * cellSize;
-    const float x = node.ix * nodeSize - _data.worldWidth() * 0.5F + patch.x * cellSize;
-    const float z = node.iz * nodeSize - _data.worldDepth() * 0.5F + patch.z * cellSize;
+    const float cellSize = _data.nodeSize(node.level) / 16.0F;
+    const auto region = patchRegion(patch);
+    const float x = region.x, z = region.z, size = region.size;
     model->createBoundingShape(Vec3{x - (patch.x & 1U) * cellSize, node.minY, z - (patch.z & 1U) * cellSize},
                                 Vec3{x + size, node.maxY, z + size});
     model->updateWorldBound();
@@ -465,18 +418,13 @@ void LandscapeRenderer::preparePasses(const ccstd::vector<QuadNode> &geometryNod
     if (!valid() || _initializationFailed) return;
     sync(geometryNodes, surfaceNodes);
     if (_initializationFailed) return;
-    // All pass requests are now protected. Compose once before any pass consumes VT.
-    _vtRenderer->render();
     if (!_ready) return;
     const auto stamp = Root::getInstance()->getFrameCount();
     for (const auto &entry : _active) {
         entry.second.model->updateTransform(stamp);
         entry.second.model->updateUBOs(stamp);
     }
-    for (size_t i = 0; i < _decalActive; ++i) {
-        _decalDraws[i].model->updateTransform(stamp);
-        _decalDraws[i].model->updateUBOs(stamp);
-    }
+    _decals->preparePasses(stamp);
 }
 
 void LandscapeRenderer::rebuildNodeModels() {
@@ -486,7 +434,6 @@ void LandscapeRenderer::rebuildNodeModels() {
         _nodeModels[makeNodeKey(patch.node)].push_back({static_cast<uint8_t>(1U << quadrant), model});
     };
     for (const auto &entry : _active) add(entry.second.patch, entry.second.model);
-    for (size_t i = 0; i < _decalActive; ++i) add(_decalDraws[i].patch, _decalDraws[i].model);
 }
 
 void LandscapeRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
@@ -502,68 +449,55 @@ void LandscapeRenderer::collectPassModels(const ccstd::vector<QuadNode> &selecte
             if (model->getWorldBounds()->aabbFrustum(frustum)) models.push_back(model);
         }
     }
+    _decals->collectPassModels(selected, frustum, shadow, models);
 }
 
 void LandscapeRenderer::onGlobalPipelineStateChanged() {
     for (const auto &entry : _active) entry.second.model->onGlobalPipelineStateChanged();
     for (const auto &pool : _pool) for (const auto &model : pool) model->onGlobalPipelineStateChanged();
-    for (const auto &draw : _decalDraws) draw.model->onGlobalPipelineStateChanged();
+    if (_decals) _decals->onGlobalPipelineStateChanged();
 }
 
 void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
     if (!valid()) return;
-    auto &vt = _vtRenderer->texture();
+    auto &pages = _vtRenderer->pages();
+    const bool frozen = _ready && _debugData.freezeLod;
     const auto &origin = _node->getWorldPosition();
-    const LandscapeSyncCache::Positions positions{
-        _viewPosition.x, _viewPosition.y, _viewPosition.z,
-        _vtViewPosition.x, _vtViewPosition.y, _vtViewPosition.z, origin.x, origin.y, origin.z};
-    if (_debugData.freezeLod && _ready) {
-        // Freeze LOD position and residency, but let each pass change visibility.
-        if (_syncCache.matches(positions, _tilePages->updateRevision(), vt.contentRevision(), geometryNodes, surfaceNodes)) return;
-        buildFramePlan(geometryNodes, surfaceNodes);
-        syncTerrainModels();
-        syncDecals(_patches);
-        rebuildNodeModels();
-        _syncCache.store(positions, _tilePages->updateRevision(), vt.contentRevision(), geometryNodes, surfaceNodes);
-        return;
-    }
+    const SyncCache::Positions positions{
+        _viewPosition.x, _viewPosition.y, _viewPosition.z, origin.x, origin.y, origin.z};
 
-    bool uploadsPolled = false;
-    if (_ready && _syncCache.matches(positions, _tilePages->updateRevision(), vt.contentRevision(), geometryNodes, surfaceNodes)) {
-        // Keep last frame's source protection while polling async completions.
-        // A stationary camera must still advance loading and fine-page publication.
-        _tilePages->update(config::PAGE_UPLOAD_BUDGET);
-        uploadsPolled = true;
-        if (_syncCache.matches(positions, _tilePages->updateRevision(), vt.contentRevision(), geometryNodes, surfaceNodes)) return;
-    }
+    // Poll once, while the previous frame's source set is still protected.
+    // No drawing happens until changed source mappings have been resolved below.
+    if (_ready && !frozen) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    if (_ready && (frozen || pages.ready()) &&
+        _syncCache.matches(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes)) return;
 
     buildFramePlan(geometryNodes, surfaceNodes);
-    if (!syncPageSources(geometryNodes, surfaceNodes, uploadsPolled)) {
-        _initializationFailed = true;
-        CC_LOG_ERROR("[Landscape] Initial synchronous warmup failed while loading source tiles. Fix assets/capacity and re-enable Landscape to retry.");
-        return;
-    }
-    if (!_ready) {
-        // Submit all initial VT pages and mips BEFORE models bind the atlas.
-        // The same graphics queue orders these writes before the first scene
-        // draws, so no extra present, GPU idle wait, or later frame is needed.
-        _vtRenderer->render(config::VT_PAGE_COUNT);
-        if (!initialDataReady()) {
+    if (!frozen) {
+        if (!preparePageSources(geometryNodes, surfaceNodes)) {
             _initializationFailed = true;
-            CC_LOG_ERROR("[Landscape] Initial synchronous warmup failed: cliff sources or VT pages are unavailable. Check atlas capacity and re-enable Landscape to retry.");
+            CC_LOG_ERROR("[Landscape] Initial source warmup failed. Fix assets/capacity and re-enable Landscape.");
             return;
         }
-        _ready = true;
-        _vtRenderer->setFrozen(_debugData.freezeLod);
-        CC_LOG_INFO("[Landscape] Initial view ready (synchronous): %zu geometry nodes, %zu composed VT pages",
-                    geometryNodes.size(), _requestPlan.requests().size());
+        // Compose before resolving instance mappings: newly published fine pages
+        // are usable in THIS frame, with no extra publication/rebinding frame.
+        _vtRenderer->render(_ready ? config::VT_PAGE_UPDATE_BUDGET : config::VT_PAGE_COUNT);
+        if (!_ready) {
+            if (!pages.ready() || !_vtRenderer->sourcesReady()) {
+                _initializationFailed = true;
+                CC_LOG_ERROR("[Landscape] Initial VT warmup failed. Fix sources/capacity and re-enable Landscape.");
+                return;
+            }
+            _ready = true;
+            _vtRenderer->setFrozen(_debugData.freezeLod);
+            CC_LOG_INFO("[Landscape] Initial view ready: %zu geometry nodes, %zu VT pages",
+                        geometryNodes.size(), pages.activeSlots().size());
+        }
     }
     syncTerrainModels();
     syncDecals(_patches);
     rebuildNodeModels();
-    // Snapshot before composition: publishing new pages changes the revision
-    // and forces bindings to advance from ancestor pages on the next frame.
-    _syncCache.store(positions, _tilePages->updateRevision(), vt.contentRevision(), geometryNodes, surfaceNodes);
+    _syncCache.store(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes);
 }
 
 void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
@@ -574,9 +508,12 @@ void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNo
             if ((node.quadrantMask & (1U << q)) != 0) selectPatches(node, (q & 1U) * 8U, (q >> 1U) * 8U, 3U, _patches);
         }
     }
-    _requestPlan.begin(_vtRootLevel);
-    for (const auto &patch : _patches) _requestPlan.addVisible(patch.page, patch.vtPriority);
-    _requestPlan.finish(_data.sectorsX, _data.sectorsZ);
+    if (!_ready || !_debugData.freezeLod) {
+        auto &pages = _vtRenderer->pages();
+        pages.beginRequests();
+        for (const auto &patch : _patches) pages.request(patch.page, patch.vtPriority);
+        pages.endRequests();
+    }
 
     // Only color passes drive VT subdivision/requests. Each shadow-only quadrant
     // uses one 8x8 grid with the same vertices, LOD and morph as the color pass.
@@ -589,77 +526,27 @@ void LandscapeRenderer::buildFramePlan(const ccstd::vector<QuadNode> &geometryNo
     }
 }
 
-bool LandscapeRenderer::syncPageSources(const ccstd::vector<QuadNode> &geometryNodes,
-                                        const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled) {
-    // 1. Protect the complete material working set before allocating VT slots.
-    _vtRenderer->texture().beginFrame(_requestPlan.dynamicKeys());
-
-    // 2. Request and protect ALL source consumers before uploads may recycle
-    //    array layers: cliff references, geometry, and material composition.
+bool LandscapeRenderer::preparePageSources(const ccstd::vector<QuadNode> &geometryNodes,
+                                            const ccstd::vector<QuadNode> &surfaceNodes) {
     _sourceResolver->beginFrame(!_ready);
-    _vtRenderer->syncCliffSources(*_tilePages);
+    resolveFrameSources(geometryNodes, surfaceNodes);
+    if (_ready) return true; // Normal streaming was polled once at frame entry.
+
+    // Warmup may reveal finer normal neighborhoods or geometry parent sources.
+    // Slot admission is already final: these rounds only load/resolve inputs.
+    for (uint32_t round = 0; round <= config::MAX_LOD_LEVELS; ++round) {
+        if (!_tilePages->loadRequestedTiles()) return false;
+        resolveFrameSources(geometryNodes, surfaceNodes);
+        if (_tilePages->requestsReady()) return true;
+    }
+    return false;
+}
+
+void LandscapeRenderer::resolveFrameSources(const ccstd::vector<QuadNode> &geometryNodes,
+                                             const ccstd::vector<QuadNode> &surfaceNodes) {
+    _sourceResolver->invalidate();
     _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
-    prepareVTPageUpdates();
-
-    // 3. Initial preparation stays inside the first scene frame. Re-resolve
-    // after residency changes: exact geometry can introduce its normal parent,
-    // and finer VT normal neighborhoods can introduce additional source tiles.
-    if (!_ready) {
-        for (uint32_t round = 0; round <= config::MAX_LOD_LEVELS; ++round) {
-            if (!_tilePages->loadRequestedTiles()) return false;
-            _vtRenderer->syncCliffSources(*_tilePages);
-            _sourceResolver->invalidate();
-            _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
-            refreshVTPageInputs();
-            if (_tilePages->requestsReady()) break;
-        }
-        // Bound the dependency expansion even if future source rules change.
-        if (!_tilePages->requestsReady()) return false;
-    } else {
-        // Normal streaming keeps the per-frame upload budget and worker I/O.
-        const auto beforeUpload = _tilePages->updateRevision();
-        if (!uploadsPolled) _tilePages->update(config::PAGE_UPLOAD_BUDGET);
-        if (_tilePages->updateRevision() != beforeUpload) {
-            _vtRenderer->syncCliffSources(*_tilePages);
-            _sourceResolver->invalidate();
-            _sourceResolver->protectGeometrySources(geometryNodes, surfaceNodes);
-            refreshVTPageInputs();
-        }
-    }
-
-    // 4. Allocate/update material pages with the final resident source layers.
-    //    Dirty pages are queued here; preparePasses composes them after sync.
-    queueVTPageUpdates();
-    return true;
-}
-
-void LandscapeRenderer::prepareVTPageUpdates() {
-    _vtPageUpdates.clear();
-    _vtPageUpdates.reserve(_requestPlan.requests().size());
-    for (const auto &request : _requestPlan.requests()) {
-        _vtPageUpdates.push_back({request, _sourceResolver->resolvePage(request.page, _debugData.bakeNormalEnabled)});
-    }
-}
-
-void LandscapeRenderer::refreshVTPageInputs() {
-    for (auto &update : _vtPageUpdates) {
-        update.inputs = _sourceResolver->resolvePage(update.request.page, _debugData.bakeNormalEnabled);
-    }
-}
-
-void LandscapeRenderer::queueVTPageUpdates() {
-    auto &vt = _vtRenderer->texture();
-    for (const auto &update : _vtPageUpdates) {
-        const bool sectorRoot = update.request.page.level == _vtRootLevel;
-        vt.acquirePage(update.request, update.inputs, sectorRoot);
-    }
-}
-
-bool LandscapeRenderer::initialDataReady() const {
-    if (!_tilePages->requestsReady() || !_vtRenderer->sourcesReady()) return false;
-    const auto &vt = _vtRenderer->texture();
-    return std::all_of(_requestPlan.requests().begin(), _requestPlan.requests().end(),
-        [&vt](const VTPageRequest &request) { return vt.findReadyPage(request.key) >= 0; });
+    _vtRenderer->resolveSources(*_tilePages, *_sourceResolver);
 }
 
 void LandscapeRenderer::syncTerrainModels() {
@@ -707,85 +594,17 @@ void LandscapeRenderer::syncTerrainModels() {
     }
 }
 
-void LandscapeRenderer::updateDecalInstance(const DecalDraw &draw) {
-    updateInstanceData(draw.model, draw.patch);
-    const auto &d = _asset->decals()[draw.decal];
-    const auto &layer = _asset->decalLayers()[d.layer];
-    setInstanceAttribute(draw.model, "a_decalRegion", Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)});
-    setInstanceAttribute(draw.model, "a_decalGrid", draw.grid);
-    const float distance = (_viewPosition - (_node->getWorldPosition() + _decalCenters[draw.decal])).length();
-    const float t = std::clamp((distance - d.nearDistance) / (d.farDistance - d.nearDistance), 0.0F, 1.0F);
-    setInstanceAttribute(draw.model, "a_decalFade", Vec4{layer.heightScale, 1.0F - t * t * (3.0F - 2.0F * t), 0, 0});
-    auto bounds = draw.patch;
-    bounds.node.maxY += layer.heightScale;
-    updateModelBounds(draw.model, bounds);
-}
-
-void LandscapeRenderer::appendDecalDraw(const Patch &patch, uint32_t decal, const Vec4 &grid) {
-    const size_t at = _decalActive++;
-    if (at == _decalDraws.size()) {
-        IntrusivePtr<scene::Model> model = Root::getInstance()->createModel<scene::Model>();
-        model->setNode(_node);
-        model->setTransform(_node);
-        model->setCastShadow(_castShadow);
-        model->setReceiveShadow(_receiveShadow);
-        model->initSubModel(0, _decalMesh, _debugData.wireframe ? _decalWire.get() : _decalSolid.get());
-        model->attachToScene(_scene);
-        _decalDraws.push_back(DecalDraw{model, patch, decal, {}});
-    }
-    auto &draw = _decalDraws[at];
-    draw.patch = patch;
-    draw.decal = decal;
-    draw.grid = grid;
-    updateDecalInstance(draw);
-    draw.model->setEnabled(_debugData.decal3DEnabled);
-}
-
 void LandscapeRenderer::syncDecals(const ccstd::vector<Patch> &patches) {
-    _decalActive = 0;
-    // View eligibility belongs to the decal, independent of how terrain patches
-    // split underneath it. Evaluate it once while preserving manifest draw order.
-    std::array<uint32_t, config::DECAL_INSTANCE_MAX> candidates;
-    size_t candidateCount = 0;
-    for (uint32_t i = 0; i < _asset->decals().size(); ++i) {
-        const auto &d = _asset->decals()[i];
-        if (_asset->decalLayers()[d.layer].heightScale == 0.0F) continue;
-        const float distance = (_viewPosition - (_node->getWorldPosition() + _decalCenters[i])).length();
-        if (distance >= d.farDistance) continue;
-        candidates[candidateCount++] = i;
-    }
-    // Every decal uses a fixed lattice at 1/16 of the finest terrain cell.
-    // Split on finest-cell boundaries once conceptually: all possible terrain
-    // patches align with them, so changing patch ownership cannot retessellate
-    // the decal. Only its base height and resident material mapping may change.
-    const float step = computeNodeSize(_data.sectorSize, _data.maxLevel, 0) / 16.0F;
-    const float originX = -_data.worldWidth() * 0.5F;
-    const float originZ = -_data.worldDepth() * 0.5F;
+    if (!_decals->beginSync(_viewPosition)) return;
     for (const auto &patch : patches) {
-        const auto &node = patch.node;
-        const float nodeSize = computeNodeSize(_data.sectorSize, _data.maxLevel, node.level);
-        const float cell = nodeSize / 16.0F;
-        const float size = (1U << patch.meshIndex) * cell;
-        const float x = node.ix * nodeSize - _data.worldWidth() * .5F + patch.x * cell;
-        const float z = node.iz * nodeSize - _data.worldDepth() * .5F + patch.z * cell;
-        for (size_t candidate = 0; candidate < candidateCount; ++candidate) {
-            const uint32_t i = candidates[candidate];
-            const auto &d = _asset->decals()[i];
-            if (x + size <= d.x || z + size <= d.z || x >= d.x + d.size || z >= d.z + d.size) continue;
-            const int firstX = static_cast<int>(std::floor((std::max(x, d.x) - originX) / step));
-            const int firstZ = static_cast<int>(std::floor((std::max(z, d.z) - originZ) / step));
-            const int endX = static_cast<int>(std::ceil((std::min(x + size, d.x + d.size) - originX) / step));
-            const int endZ = static_cast<int>(std::ceil((std::min(z + size, d.z + d.size) - originZ) / step));
-            for (int iz = firstZ; iz < endZ; ++iz) for (int ix = firstX; ix < endX; ++ix) {
-                const float left = std::max(originX + ix * step, d.x);
-                const float bottom = std::max(originZ + iz * step, d.z);
-                const float right = std::min(originX + (ix + 1) * step, d.x + d.size);
-                const float top = std::min(originZ + (iz + 1) * step, d.z + d.size);
-                appendDecalDraw(patch, i, Vec4{left, bottom, right - left, top - bottom});
-            }
-        }
+        const auto region = patchRegion(patch);
+        const float cell = _data.nodeSize(patch.node.level) / 16.0F;
+        const uint32_t quadrant = patch.x / 8U + (patch.z / 8U) * 2U;
+        _decals->addPatch({makeNodeKey(patch.node), static_cast<uint8_t>(1U << quadrant), region,
+            Vec3{region.x - (patch.x & 1U) * cell, patch.node.minY, region.z - (patch.z & 1U) * cell},
+            Vec3{region.x + region.size, patch.node.maxY, region.z + region.size}, resolveSurface(patch)});
     }
-    for (size_t i = _decalActive; i < _decalDraws.size(); ++i) _decalDraws[i].model->setEnabled(false);
+    _decals->endSync();
 }
 
 void LandscapeRenderer::setFreezeLod(bool frozen) {
@@ -794,7 +613,7 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
     }
     _debugData.freezeLod = frozen;
     if (_vtRenderer) _vtRenderer->setFrozen(frozen && _ready);
-    for (size_t i = 0; i < _decalActive; ++i) updateDecalInstance(_decalDraws[i]);
+    if (_decals) _decals->refreshInstances(_viewPosition);
     if (!frozen) setBakeNormalEnabled(_debugData.bakeNormalEnabled);
     if (!frozen) setCliffEnabled(_debugData.cliffEnabled);
     for (const auto &entry : _active) {
@@ -810,7 +629,7 @@ void LandscapeRenderer::setCastShadow(bool enabled) {
     for (const auto &pool : _pool) {
         for (const auto &model : pool) model->setCastShadow(enabled);
     }
-    for (const auto &draw : _decalDraws) draw.model->setCastShadow(enabled);
+    if (_decals) _decals->setCastShadow(enabled);
 }
 
 void LandscapeRenderer::setReceiveShadow(bool enabled) {
@@ -822,7 +641,7 @@ void LandscapeRenderer::setReceiveShadow(bool enabled) {
     for (const auto &pool : _pool) {
         for (const auto &model : pool) model->setReceiveShadow(enabled);
     }
-    for (const auto &draw : _decalDraws) draw.model->setReceiveShadow(enabled);
+    if (_decals) _decals->setReceiveShadow(enabled);
     // The receive variant adds an instanced shadow-bias attribute. Rebuild the
     // layouts and restore terrain attributes, including frozen active models.
     setWireframe(_debugData.wireframe);
@@ -830,11 +649,7 @@ void LandscapeRenderer::setReceiveShadow(bool enabled) {
 
 void LandscapeRenderer::setWireframe(bool wireframe) {
     _debugData.wireframe = wireframe;
-    for (size_t i = 0; i < _decalDraws.size(); ++i) {
-        const auto &draw = _decalDraws[i];
-        draw.model->setSubModelMaterial(0, wireframe ? _decalWire.get() : _decalSolid.get());
-        if (i < _decalActive) updateDecalInstance(draw);
-    }
+    if (_decals) _decals->setWireframe(wireframe);
     for (const auto &entry : _active) {
         const auto &state = entry.second;
         state.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
@@ -849,7 +664,6 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
 
 void LandscapeRenderer::setViewPos(const Vec3 &position) {
     if (_debugData.freezeLod && _ready) return;
-    _vtViewPosition = position;
     if (_viewPosition.x == position.x &&
         _viewPosition.y == position.y &&
         _viewPosition.z == position.z) {
@@ -860,7 +674,7 @@ void LandscapeRenderer::setViewPos(const Vec3 &position) {
 }
 
 RenderTexture *LandscapeRenderer::vtAtlas() const {
-    return _vtRenderer ? _vtRenderer->texture().atlas() : nullptr;
+    return _vtRenderer ? _vtRenderer->atlas() : nullptr;
 }
 
 void LandscapeRenderer::setUnlit(bool enabled) {
@@ -869,7 +683,7 @@ void LandscapeRenderer::setUnlit(bool enabled) {
     // variants in place, preserving texture bindings and instanced batching.
     const auto compile = [this](bool unlit) {
         bool success = true;
-        for (auto *material : {_materialSolid.get(), _materialWire.get(), _decalSolid.get(), _decalWire.get()}) {
+        for (auto *material : surfaceMaterials()) {
             for (const auto &pass : *material->getPasses()) {
                 pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = unlit;
                 success = pass->tryCompile() && success;
@@ -901,10 +715,8 @@ void LandscapeRenderer::destroy() {
     _initializationFailed = false;
     _syncCache.invalidate();
     _sourceResolver.reset();
-    _requestPlan = VTRequestPlan{};
     _patches.clear();
     _shadowOnlyNodes.clear();
-    _vtPageUpdates.clear();
     _visiblePatches.clear();
     const auto removeModel = [](const IntrusivePtr<scene::Model> &model) {
         if (model == nullptr) {
@@ -914,10 +726,6 @@ void LandscapeRenderer::destroy() {
         model->destroy();
     };
 
-    for (const auto &draw : _decalDraws) removeModel(draw.model);
-    _decalDraws.clear();
-    _decalActive = 0;
-    _decalCenters.clear();
     for (const auto &entry : _active) {
         removeModel(entry.second.model);
     }
@@ -929,15 +737,13 @@ void LandscapeRenderer::destroy() {
     _nodeModels.clear();
     _instanceAttributeScratch = ccstd::monostate{};
     _vtRenderer.reset();
+    _decals.reset();
 
     _tilePages.reset();
     _asset = nullptr;
     for (auto &mesh : _meshes) mesh = nullptr;
     _materialSolid = nullptr;
     _materialWire = nullptr;
-    _decalSolid = nullptr;
-    _decalWire = nullptr;
-    _decalMesh = nullptr;
     _materialLibrary.reset();
     _node = nullptr;
     _scene = nullptr;

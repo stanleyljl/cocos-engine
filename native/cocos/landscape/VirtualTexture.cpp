@@ -1,265 +1,202 @@
-/****************************************************************************
- Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
-
- http://www.cocos.com
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- of the Software, and to permit persons to whom the Software is furnished to do so,
- subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-****************************************************************************/
+// Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 #include "landscape/VirtualTexture.h"
 
-#include <limits>
 #include <algorithm>
-#include "base/Log.h"
-#include "base/Macros.h"
-#include "core/assets/RenderTexture.h"
-#include "landscape/LandscapeConfig.h"
-#include "renderer/gfx-base/GFXDevice.h"
-#include "renderer/gfx-base/GFXFramebuffer.h"
-#include "renderer/gfx-base/GFXTexture.h"
-#include "scene/RenderWindow.h"
+#include <cassert>
+#include <cmath>
+#include <limits>
+#include "base/std/container/unordered_set.h"
 
-namespace cc {
-namespace landscape {
+namespace cc::landscape {
 namespace {
 bool same(const Vec4 &a, const Vec4 &b) {
     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
 }
 }
 
-VirtualTexture::VirtualTexture() = default;
-VirtualTexture::~VirtualTexture() { destroy(); }
-
-bool VirtualTexture::init(gfx::Device *device) {
-    CC_ASSERT(_atlas == nullptr);
-    if (device == nullptr || device->getCapabilities().maxColorRenderTargets < 2 ||
-        device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
-        return false;
-    }
-    if (!initAtlas(device) || !initMipTargets(device)) {
-        destroy();
-        return false;
-    }
-    initSampler(device);
-    _pages.resize(config::VT_PAGE_COUNT);
-    return valid();
-}
-
-bool VirtualTexture::initAtlas(gfx::Device *device) {
-    gfx::RenderPassInfo passInfo;
-    gfx::ColorAttachment color;
-    color.format = gfx::Format::RGBA8;
-    color.loadOp = gfx::LoadOp::LOAD;
-    color.storeOp = gfx::StoreOp::STORE;
-    gfx::GeneralBarrierInfo barrier;
-    barrier.prevAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    barrier.nextAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    color.barrier = device->getGeneralBarrier(barrier);
-    passInfo.colorAttachments = {color, color};
-    // No depth attachment: page rectangles never overlap.
-    IRenderTextureCreateInfo info;
-    info.name = "landscape-vt-atlas";
-    info.width = config::VT_ATLAS_SIZE;
-    info.height = config::VT_ATLAS_SIZE;
-    info.passInfo = passInfo;
-    info.colorMipLevels = config::VT_MIP_LEVELS;
-    _atlas = ccnew RenderTexture();
-    _atlas->initialize(info);
-    return albedo() != nullptr && normalRoughnessAO() != nullptr && renderPass() != nullptr;
-}
-
-bool VirtualTexture::initMipTargets(gfx::Device *device) {
-    const auto createMipView = [device](gfx::Texture *texture, uint32_t baseLevel, uint32_t levelCount) {
-        gfx::TextureViewInfo view;
-        view.texture = texture;
-        view.format = texture->getFormat();
-        view.baseLevel = baseLevel;
-        view.levelCount = levelCount;
-        return device->createTexture(view);
-    };
-    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
-        auto &mip = _mips[level - 1];
-        mip.albedo = createMipView(albedo(), level, 1);
-        mip.normal = createMipView(normalRoughnessAO(), level, 1);
-        // Prefix views exclude the destination mip and preserve absolute LOD
-        // numbering for texelFetch on Vulkan and GLES alike.
-        mip.sourceAlbedo = createMipView(albedo(), 0, level);
-        mip.sourceNormal = createMipView(normalRoughnessAO(), 0, level);
-        mip.framebuffer = device->createFramebuffer({renderPass(), {mip.albedo, mip.normal}, nullptr});
-        if (!mip.albedo || !mip.normal || !mip.sourceAlbedo || !mip.sourceNormal || !mip.framebuffer) return false;
+bool VirtualTexture::init(const LandscapeData &data, uint32_t capacity) {
+    *this = VirtualTexture{};
+    const uint64_t roots = static_cast<uint64_t>(data.sectorsX) * data.sectorsZ;
+    if (!data.valid() || capacity == 0 || roots > capacity) return false;
+    _data = data;
+    _layout = VTPageLayout(data.sectorSize);
+    _rootCount = static_cast<uint32_t>(roots);
+    _pages.resize(capacity);
+    _active.reserve(capacity);
+    // Root slots are fixed for the cache lifetime, not eviction candidates.
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            const uint32_t slot = z * data.sectorsX + x;
+            auto &p = _pages[slot];
+            p.address = {_layout.rootLevel(), x, z};
+            p.state = State::DIRTY;
+            _lookup.emplace(p.address.key(), slot);
+            _active.push_back(slot);
+        }
     }
     return true;
 }
 
-void VirtualTexture::initSampler(gfx::Device *device) {
-    gfx::SamplerInfo samplerInfo;
-    samplerInfo.minFilter = gfx::Filter::LINEAR;
-    samplerInfo.magFilter = gfx::Filter::LINEAR;
-    samplerInfo.mipFilter = gfx::Filter::LINEAR;
-    samplerInfo.addressU = gfx::Address::CLAMP;
-    samplerInfo.addressV = gfx::Address::CLAMP;
-    samplerInfo.addressW = gfx::Address::CLAMP;
-    _sampler = device->getSampler(samplerInfo);
+void VirtualTexture::beginRequests() {
+    _requests.clear();
+    _requestIndices.clear();
 }
 
-bool VirtualTexture::valid() const {
-    return albedo() != nullptr && normalRoughnessAO() != nullptr &&
-        std::all_of(_mips.begin(), _mips.end(), [](const MipTarget &mip) { return mip.framebuffer != nullptr; });
-}
-RenderTexture *VirtualTexture::atlas() const { return _atlas.get(); }
-gfx::Framebuffer *VirtualTexture::framebuffer() const {
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getFramebuffer() : nullptr;
-}
-gfx::RenderPass *VirtualTexture::renderPass() const {
-    return framebuffer() ? framebuffer()->getRenderPass() : nullptr;
-}
-gfx::Texture *VirtualTexture::albedo() const {
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(0) : nullptr;
-}
-gfx::Texture *VirtualTexture::normalRoughnessAO() const {
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(1) : nullptr;
-}
-
-void VirtualTexture::beginFrame(const ccstd::vector<uint64_t> &keys) {
-    ++_frame;
-    _requestedPages.clear();
-    _requestedPages.insert(keys.begin(), keys.end());
-    _resolvedThisFrame.clear();
-}
-
-int VirtualTexture::findPage(uint64_t key) const {
-    const auto found = _lookup.find(key);
-    return found != _lookup.end() ? static_cast<int>(found->second) : -1;
-}
-
-int VirtualTexture::findReadyPage(uint64_t key) const {
-    const int slot = findPage(key);
-    return slot >= 0 && !_pages[slot].dirty ? slot : -1;
-}
-
-int VirtualTexture::findReadyPageOrRoot(VTPageAddress desired, uint32_t rootLevel) const {
-    for (; desired.level < rootLevel; desired = desired.parent()) {
-        const int slot = findReadyPage(desired.key());
-        if (slot >= 0 && requested(desired.key())) return slot;
+void VirtualTexture::request(VTPageAddress address, float priority) {
+    const auto root = _layout.rootLevel();
+    if (address.level > root || !std::isfinite(priority) || priority < 0) return;
+    const uint32_t side = 1U << (root - address.level);
+    if (address.x >= static_cast<uint64_t>(_data.sectorsX) * side ||
+        address.z >= static_cast<uint64_t>(_data.sectorsZ) * side) return;
+    const uint32_t desired = address.level;
+    for (; address.level < root; address = address.parent(), priority *= 0.5F) {
+        const auto inserted = _requestIndices.emplace(address.key(), _requests.size());
+        if (inserted.second) _requests.push_back({address, priority});
+        auto &r = _requests[inserted.first->second];
+        r.priority = std::max(r.priority, priority);
+        r.direct |= address.level == desired;
     }
-    // Roots bootstrap startup/invalidation on the same queue before Base Pass.
-    // Fine pages do not have that guarantee: never bind a dirty fine page.
-    return findPage(desired.key());
 }
 
-int VirtualTexture::allocatePageSlot(uint64_t key) {
-    int emptySlot = -1;
-    int evictionSlot = -1;
-    uint64_t oldestUse = std::numeric_limits<uint64_t>::max();
-    for (uint32_t slot = 0; slot < _pages.size(); ++slot) {
-        const auto &page = _pages[slot];
-        if (!page.occupied) {
-            if (emptySlot < 0) emptySlot = static_cast<int>(slot);
-        } else if (!page.permanent && !requested(page.key) && page.lastUsed < oldestUse) {
-            oldestUse = page.lastUsed;
-            evictionSlot = static_cast<int>(slot);
+void VirtualTexture::selectRequests() {
+    const size_t capacity = _pages.size() - _rootCount;
+    if (capacity == 0) {
+        _requests.clear();
+        return;
+    }
+    if (_requests.size() > capacity) {
+        // Reserve half the dynamic cache for view-wide coverage. A common
+        // ancestor bias keeps every visible region represented before refinement.
+        const size_t reserve = std::max(size_t{1}, capacity / 2);
+        ccstd::unordered_set<uint64_t> coverage;
+        for (uint32_t bias = 0; bias <= _layout.rootLevel(); ++bias) {
+            coverage.clear();
+            for (const auto &r : _requests) {
+                if (!r.direct) continue;
+                const auto level = std::min(r.address.level + bias, _layout.rootLevel());
+                if (level == _layout.rootLevel()) continue; // permanent coverage
+                const auto shift = level - r.address.level;
+                coverage.insert(VTPageAddress{level, r.address.x >> shift, r.address.z >> shift}.key());
+            }
+            if (coverage.size() <= reserve) break;
         }
+        for (auto &r : _requests) r.coverage = coverage.count(r.address.key()) != 0;
     }
-    // Preserve the existing reuse policy: recycle unused content before growing
-    // into an empty slot. This frame's requested pages and roots are protected.
-    const int slot = evictionSlot >= 0 ? evictionSlot : emptySlot;
-    if (slot < 0) {
-        if (!_warnedFull) {
-            CC_LOG_WARNING("[Landscape] VT cache full; using resident ancestor VT pages");
-            _warnedFull = true;
-        }
-        return -1;
-    }
-    auto &page = _pages[slot];
-    if (page.occupied) _lookup.erase(page.key);
-    page = Page{};
-    page.key = key;
-    page.occupied = true;
-    _lookup.emplace(key, static_cast<uint32_t>(slot));
-    return slot;
-}
-
-int VirtualTexture::acquirePage(const VTPageRequest &request, const VTPageInputs &inputs, bool permanent) {
-    if (!valid()) return -1;
-    _requestedPages.insert(request.key);
-    int slot = findPage(request.key);
-    if (slot < 0) slot = allocatePageSlot(request.key);
-    if (slot < 0) return -1;
-
-    auto &page = _pages[slot];
-    const auto &previous = page.inputs;
-    const bool sameNormals = std::equal(previous.normalSources.begin(), previous.normalSources.end(),
-                                        inputs.normalSources.begin(), same);
-    page.dirty |= !same(previous.region, inputs.region) ||
-                  !same(previous.splatSource, inputs.splatSource) || !sameNormals;
-    page.inputs = inputs;
-    page.permanent |= permanent;
-    page.priority = request.priority;
-    page.lastUsed = _frame;
-    _resolvedThisFrame.insert(request.key);
-    return slot;
-}
-
-void VirtualTexture::collectDirtyPages(ccstd::vector<uint32_t> &slots, uint32_t maxUpdates) const {
-    slots.clear();
-    for (uint32_t i = 0; i < _pages.size(); ++i) {
-        const auto &p = _pages[i];
-        // A protected ancestor may refer to a source tile that has since been
-        // recycled. Only roots or pages with a freshly resolved source can bake.
-        if (p.occupied && p.dirty && (p.permanent || _resolvedThisFrame.count(p.key) != 0)) slots.push_back(i);
-    }
-    std::sort(slots.begin(), slots.end(), [this](uint32_t a, uint32_t b) {
-        const auto &pa = _pages[a];
-        const auto &pb = _pages[b];
-        if (pa.permanent != pb.permanent) return pa.permanent;
-        return pa.priority != pb.priority ? pa.priority > pb.priority : pa.key < pb.key;
+    // The same order drives BOTH slot admission and composition. No priority
+    // boosting, second dirty-page sort, or separate protected-key plan.
+    std::sort(_requests.begin(), _requests.end(), [](const Request &a, const Request &b) {
+        if (a.coverage != b.coverage) return a.coverage;
+        return a.priority != b.priority ? a.priority > b.priority : a.address.key() < b.address.key();
     });
-    const size_t roots = static_cast<size_t>(std::count_if(slots.begin(), slots.end(),
-        [this](uint32_t slot) { return _pages[slot].permanent; }));
-    // Roots bootstrap the first frame and invalidation. Fine pages only become
-    // sampleable after composition, so deferring them cannot expose empty data.
-    if (slots.size() > roots + maxUpdates) slots.resize(roots + maxUpdates);
+    if (_requests.size() > capacity) _requests.resize(capacity);
 }
-void VirtualTexture::markRendered(const ccstd::vector<uint32_t> &slots) {
-    for (uint32_t slot : slots) _pages[slot].dirty = false;
-    if (!slots.empty()) ++_contentRevision;
-}
-void VirtualTexture::invalidate() {
-    for (auto &p : _pages) p.dirty = true;
-    ++_contentRevision;
-}
-void VirtualTexture::destroy() {
-    for (auto &mip : _mips) {
-        mip.framebuffer = nullptr;
-        mip.sourceAlbedo = nullptr;
-        mip.sourceNormal = nullptr;
-        mip.albedo = nullptr;
-        mip.normal = nullptr;
+
+void VirtualTexture::endRequests() {
+    if (_pages.empty()) return;
+    selectRequests();
+    _requestIndices.clear();
+    ++_frame;
+    _active.clear();
+    for (auto &p : _pages) p.inputsResolved = false;
+    for (uint32_t slot = 0; slot < _rootCount; ++slot) {
+        _pages[slot].lastRequested = _frame;
+        _active.push_back(slot);
     }
-    if (_atlas) _atlas->destroy();
-    _atlas = nullptr;
-    _sampler = nullptr;
-    _pages.clear();
-    _lookup.clear();
-    _requestedPages.clear();
-    _resolvedThisFrame.clear();
-    _frame = 0;
-    _warnedFull = false;
+    // Pin the ENTIRE admitted set before allocating any missing page.
+    for (const auto &r : _requests) {
+        const auto it = _lookup.find(r.address.key());
+        if (it != _lookup.end()) _pages[it->second].lastRequested = _frame;
+    }
+    for (const auto &r : _requests) {
+        const auto it = _lookup.find(r.address.key());
+        const int slot = it != _lookup.end() ? static_cast<int>(it->second) : allocate(r.address);
+        assert(slot >= 0 && "Admitted VT working set must fit the physical cache");
+        if (slot < 0) continue;
+        _pages[slot].lastRequested = _frame;
+        _active.push_back(static_cast<uint32_t>(slot));
+    }
+    _requests.clear(); // Only the admitted physical slots survive this phase.
 }
-} // namespace landscape
-} // namespace cc
+
+int VirtualTexture::allocate(VTPageAddress address) {
+    int slot = -1;
+    uint64_t oldest = std::numeric_limits<uint64_t>::max();
+    for (uint32_t i = _rootCount; i < _pages.size(); ++i) {
+        const auto &p = _pages[i];
+        if (p.state == State::EMPTY) {
+            slot = static_cast<int>(i);
+            break;
+        }
+        if (p.lastRequested != _frame && p.lastRequested < oldest) {
+            slot = static_cast<int>(i);
+            oldest = p.lastRequested;
+        }
+    }
+    if (slot < 0) return -1;
+    auto &p = _pages[slot];
+    if (p.state != State::EMPTY) _lookup.erase(p.address.key());
+    p = Page{};
+    p.address = address;
+    p.state = State::DIRTY;
+    _lookup.emplace(address.key(), static_cast<uint32_t>(slot));
+    return slot;
+}
+
+void VirtualTexture::setInputs(uint32_t slot, const VTPageInputs &inputs) {
+    auto &p = _pages[slot];
+    assert(p.state != State::EMPTY && p.lastRequested == _frame);
+    if (!same(p.inputs.region, inputs.region) || !same(p.inputs.splatSource, inputs.splatSource) ||
+        !std::equal(p.inputs.normalSources.begin(), p.inputs.normalSources.end(), inputs.normalSources.begin(), same)) {
+        p.state = State::DIRTY;
+    }
+    p.inputs = inputs;
+    p.inputsResolved = true;
+}
+
+void VirtualTexture::collectUpdates(ccstd::vector<uint32_t> &slots, uint32_t budget) const {
+    slots.clear();
+    for (const uint32_t slot : _active) {
+        const auto &p = _pages[slot];
+        if (p.state != State::DIRTY || !p.inputsResolved) continue;
+        if (slot >= _rootCount) {
+            if (budget == 0) break;
+            --budget;
+        }
+        slots.push_back(slot);
+    }
+}
+
+void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
+    for (const uint32_t slot : slots) {
+        auto &p = _pages[slot];
+        assert(p.inputsResolved && p.lastRequested == _frame && p.state == State::DIRTY);
+        p.state = State::READY;
+    }
+    if (!slots.empty()) ++_revision;
+}
+
+void VirtualTexture::invalidate() {
+    for (auto &p : _pages) {
+        if (p.state != State::EMPTY) p.state = State::DIRTY;
+    }
+    ++_revision;
+}
+
+bool VirtualTexture::ready() const {
+    return !_active.empty() && std::all_of(_active.begin(), _active.end(),
+        [this](uint32_t slot) { return _pages[slot].state == State::READY; });
+}
+
+int VirtualTexture::resolve(VTPageAddress address) const {
+    while (address.level <= _layout.rootLevel()) {
+        const auto it = _lookup.find(address.key());
+        if (it != _lookup.end()) {
+            const auto &p = _pages[it->second];
+            if (p.lastRequested == _frame && p.state == State::READY) return static_cast<int>(it->second);
+        }
+        address = address.parent();
+    }
+    return -1;
+}
+
+} // namespace cc::landscape

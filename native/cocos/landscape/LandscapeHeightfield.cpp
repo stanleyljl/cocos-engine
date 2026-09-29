@@ -29,6 +29,9 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, uint32_t resolu
     if (resolution < 2 || resolution > 4097 ||
         source.length() != resolution * resolution) return 0;
     ccstd::vector<physx::PxHeightFieldSample> samples(source.length());
+    // Source is Z-major (X contiguous). PhysX rows run along X and columns
+    // along Z, so transpose while converting uint16 to signed16 heights.
+    // The tile node's Y offset restores the bias removed here (see TS holder).
     for (uint32_t x = 0; x < resolution; ++x) {
         for (uint32_t z = 0; z < resolution; ++z) {
             auto &sample = samples[x * resolution + z];

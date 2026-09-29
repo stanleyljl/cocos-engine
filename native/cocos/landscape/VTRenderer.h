@@ -31,12 +31,15 @@ namespace cc {
 class Material;
 class RenderingSubMesh;
 namespace landscape {
+class DecalRenderer;
 class LandscapeAsset;
 class MaterialLibrary;
 class TilePagePool;
+class TilePageResolver;
 
-// Owns VT pass geometry, material, instance commands and render scheduling.
-// VirtualTexture owns the independent storage/residency layer below it.
+// GPU half of VT: owns the atlas, composition passes and source bindings.
+// VirtualTexture is the CPU-only page state machine. Geometry submits demands,
+// then resolves sources, renders once, and binds published page mappings.
 class VTRenderer {
 public:
     VTRenderer();
@@ -44,10 +47,16 @@ public:
     VTRenderer(const VTRenderer &) = delete;
     VTRenderer &operator=(const VTRenderer &) = delete;
 
-    bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials);
+    bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals);
     void destroy();
-    VirtualTexture &texture() { return _texture; }
-    const VirtualTexture &texture() const { return _texture; }
+    VirtualTexture &pages() { return _pages; }
+    const VirtualTexture &pages() const { return _pages; }
+    RenderTexture *atlas() const { return _atlas.get(); }
+    gfx::Texture *albedo() const;
+    gfx::Texture *normalRoughnessAO() const;
+    gfx::Sampler *sampler() const { return _sampler; }
+    Vec4 mapping(VTPageAddress address) const;
+    void resolveSources(TilePagePool &tiles, TilePageResolver &resolver);
     bool valid() const;
     bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
@@ -58,24 +67,33 @@ public:
     void setHeightBlendEnabled(bool enabled);
     void setBakeNormalEnabled(bool enabled);
     void setCliffEnabled(bool enabled);
-    void syncCliffSources(TilePagePool &tiles);
 
 private:
-    bool initComposeResources(const LandscapeAsset &asset, TilePagePool &tiles,
-                              const MaterialLibrary &materials, gfx::Device *device);
+    friend struct LandscapePagingTestAccess;
+
+    // A fixed, bounded reference grid keeps projection height/axis selection independent
+    // of camera distance and CDLOD morph. Reuse at most a quarter of the source pool.
+    static uint32_t cliffReferenceLevel(const LandscapeData &data) {
+        uint32_t level = data.minTileLevel;
+        while (level < data.maxLevel &&
+               static_cast<uint64_t>(data.sectorsX) * data.sectorsZ *
+                   (1ULL << (2U * (data.maxLevel - level))) > config::PAGE_POOL_LAYERS / 4U) ++level;
+        return level;
+    }
+
+    bool initAtlas(gfx::Device *device);
+    gfx::Framebuffer *framebuffer() const;
+    gfx::RenderPass *renderPass() const;
+    void syncCliffSources(TilePagePool &tiles);
     bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles,
                              const MaterialLibrary &materials, gfx::Device *device);
-    bool initDecalResources(const LandscapeAsset &asset, const MaterialLibrary &materials, gfx::Device *device);
     bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
     bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
     void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
-    bool initDrawResources(gfx::Device *device);
     bool initPageDrawResources(gfx::Device *device);
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
-    bool initRootPages(const LandscapeData &data, TilePagePool &tiles);
     void buildPageBatch();
-    uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
     void uploadSourceTables();
     void submitPageBatch();
     void recordPagePass(Material *material, gfx::PipelineState *pipelineState,
@@ -95,6 +113,11 @@ private:
     struct MipPass {
         IntrusivePtr<Material> material;
         IntrusivePtr<gfx::PipelineState> pipelineState;
+        IntrusivePtr<gfx::Texture> albedo;
+        IntrusivePtr<gfx::Texture> normal;
+        IntrusivePtr<gfx::Texture> sourceAlbedo;
+        IntrusivePtr<gfx::Texture> sourceNormal;
+        IntrusivePtr<gfx::Framebuffer> framebuffer;
     };
 
     // Applied compose state; deferred requests remain in LandscapeRenderer.
@@ -109,16 +132,16 @@ private:
         IntrusivePtr<gfx::Texture> texture;
         ccstd::vector<Vec4> sources;
     } _cliff;
-    VirtualTexture _texture;
+    VirtualTexture _pages;
+    IntrusivePtr<RenderTexture> _atlas;
+    gfx::Sampler *_sampler{nullptr}; // device-owned
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;
     std::array<MipPass, config::VT_MIP_LEVELS - 1> _mipPasses;
     IntrusivePtr<gfx::Buffer> _instances;
     IntrusivePtr<gfx::Texture> _normalSources;
     ccstd::vector<Vec4> _normalSourceData;
-    IntrusivePtr<gfx::Texture> _decalIndices;
-    ccstd::vector<Vec4> _decalRegions;
-    ccstd::vector<uint8_t> _decalIndexData;
+    DecalRenderer *_decals{nullptr}; // borrowed; owner destroys VT first
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
     IntrusivePtr<gfx::CommandBuffer> _commands;
     IntrusivePtr<gfx::PipelineState> _pipelineState;

@@ -133,9 +133,7 @@ private:
 class TilePageResolver {
 public:
     struct Tile {
-        uint32_t level{0};
-        uint32_t x{0};
-        uint32_t z{0};
+        NodeAddress address;
         int layer{-1};
     };
     TilePageResolver(TilePagePool &pool, const LandscapeData &data);
@@ -146,9 +144,9 @@ public:
     void protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
     // Clear after uploads change residency, so finer sources can be discovered.
     void invalidate() { _cache.clear(); }
-    Tile resolve(const QuadNode &node);
-    Tile normalParent(const QuadNode &node, const Tile &tile);
-    Vec4 params(const Tile &tile) const;
+    Tile resolve(NodeAddress node);
+    Tile normalParent(NodeAddress node, const Tile &tile);
+    Vec4 shaderParams(const Tile &tile) const;
     VTPageInputs resolvePage(const VTPageAddress &page, bool bakeNormals);
 
 private:
@@ -159,7 +157,7 @@ private:
                                       std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &sources);
     TilePagePool &_pool; // owner destroys the resolver before the pool
     LandscapeData _data;
-    uint32_t _vtRootLevel;
+    VTPageLayout _vtLayout;
     ccstd::unordered_map<uint64_t, Tile> _cache;
 };
 

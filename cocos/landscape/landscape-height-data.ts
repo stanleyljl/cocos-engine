@@ -14,6 +14,69 @@ export interface LandscapeHeightLayout {
     files: Record<string, string>;
 }
 
+/** World-space XZ rectangle in meters. */
+export interface LandscapeWorldBounds {
+    minX: number;
+    minZ: number;
+    maxX: number;
+    maxZ: number;
+}
+
+/** Integer source-tile rectangle: begin inclusive, end exclusive. */
+export interface LandscapeTileRect {
+    beginX: number;
+    beginZ: number;
+    endX: number;
+    endZ: number;
+}
+
+/** Coordinate mapping for the finest collision source grid. Tile origins are
+ * landscape-local; world-space operations explicitly receive the node origin.
+ * Point sampling may include the terrain's far edge, but coverage rectangles
+ * are half-open so a tile-aligned maximum never requests the following tile. */
+export class LandscapeHeightGrid {
+    constructor (private readonly _layout: LandscapeHeightLayout) {}
+
+    public tileKey (x: number, z: number): number { return z * this._layout.tilesX + x; }
+
+    public tileAtKey (key: number): { x: number; z: number } {
+        return { x: key % this._layout.tilesX, z: Math.floor(key / this._layout.tilesX) };
+    }
+
+    public tileLocalOrigin (x: number, z: number): { x: number; z: number } {
+        const { tilesX, tilesZ, tileSize } = this._layout;
+        return { x: (x - tilesX / 2) * tileSize, z: (z - tilesZ / 2) * tileSize };
+    }
+
+    public worldBoundsToTiles (bounds: Readonly<LandscapeWorldBounds>, origin: Readonly<{ x: number; z: number }>): LandscapeTileRect {
+        const min = this.tileLocalOrigin(0, 0);
+        const { tileSize } = this._layout;
+        const startX = origin.x + min.x, startZ = origin.z + min.z;
+        return {
+            beginX: Math.floor((bounds.minX - startX) / tileSize),
+            beginZ: Math.floor((bounds.minZ - startZ) / tileSize),
+            endX: Math.ceil((bounds.maxX - startX) / tileSize),
+            endZ: Math.ceil((bounds.maxZ - startZ) / tileSize),
+        };
+    }
+
+    public contains (rect: Readonly<LandscapeTileRect>): boolean {
+        return rect.beginX >= 0 && rect.beginZ >= 0 && rect.endX <= this._layout.tilesX && rect.endZ <= this._layout.tilesZ
+            && rect.beginX < rect.endX && rect.beginZ < rect.endZ;
+    }
+
+    public clip (rect: Readonly<LandscapeTileRect>): LandscapeTileRect {
+        return { beginX: Math.max(0, rect.beginX), beginZ: Math.max(0, rect.beginZ),
+            endX: Math.min(this._layout.tilesX, rect.endX), endZ: Math.min(this._layout.tilesZ, rect.endZ) };
+    }
+
+    public tilesToWorldBounds (rect: Readonly<LandscapeTileRect>, origin: Readonly<{ x: number; z: number }>): LandscapeWorldBounds {
+        const min = this.tileLocalOrigin(rect.beginX, rect.beginZ);
+        const max = this.tileLocalOrigin(rect.endX, rect.endZ);
+        return { minX: origin.x + min.x, minZ: origin.z + min.z, maxX: origin.x + max.x, maxZ: origin.z + max.z };
+    }
+}
+
 export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayout {
     const { sectorCount, maxLevel, minTileLevel, nodeTileResolution, sectorSizeMeters, heightScale, heightBias, files } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2

@@ -953,7 +953,11 @@ void cmdFuncGLES3CreateTextureView(GLES3Device */*device*/, GLES3GPUTextureView 
     gpuTextureView->glTarget = getTextureViewTarget(gpuTextureView);
 }
 
-void cmdFuncGLES3PrepareSamplerInfo(GLES3Device * /*device*/, GLES3GPUSampler *gpuSampler) {
+void cmdFuncGLES3PrepareSamplerInfo(GLES3Device *device, GLES3GPUSampler *gpuSampler) {
+    // No GL calls here: sampler construction can run off the device thread.
+    const float limit = device->constantRegistry()->maxSamplerAnisotropy;
+    gpuSampler->maxAnisotropy = gpuSampler->maxAnisotropy > 0.0F && limit >= 1.0F
+        ? std::min(std::max(gpuSampler->maxAnisotropy, 1.0F), limit) : 0.0F;
     if (gpuSampler->minFilter == Filter::LINEAR || gpuSampler->minFilter == Filter::ANISOTROPIC) {
         if (gpuSampler->mipFilter == Filter::LINEAR || gpuSampler->mipFilter == Filter::ANISOTROPIC) {
             gpuSampler->glMinFilter = GL_LINEAR_MIPMAP_LINEAR;
@@ -993,6 +997,9 @@ GLuint GLES3GPUSampler::getGLSampler(uint16_t minLod, uint16_t maxLod) {
         GL_CHECK(glSamplerParameteri(glSampler, GL_TEXTURE_WRAP_S, glWrapS));
         GL_CHECK(glSamplerParameteri(glSampler, GL_TEXTURE_WRAP_T, glWrapT));
         GL_CHECK(glSamplerParameteri(glSampler, GL_TEXTURE_WRAP_R, glWrapR));
+        if (maxAnisotropy > 0.0F) {
+            GL_CHECK(glSamplerParameterf(glSampler, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAnisotropy));
+        }
         GL_CHECK(glSamplerParameterf(glSampler, GL_TEXTURE_MIN_LOD, static_cast<GLfloat>(minLod)));
         GL_CHECK(glSamplerParameterf(glSampler, GL_TEXTURE_MAX_LOD, static_cast<GLfloat>(maxLod)));
         _cache[hash] = glSampler;

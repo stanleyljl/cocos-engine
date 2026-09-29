@@ -11,7 +11,7 @@ CCEffect %{
         sectorParams: { value: [1, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
-        vtLayout: { value: [4224, 264, 4, 0] }
+        vtLayout: { value: [8448, 528, 8, 4] }
         decalControl: { value: [1, 0, 0, 0] }
         decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         rvtNormalParams: { value: [1, 0, 0, 0] }
@@ -63,7 +63,7 @@ CCProgram landscape-uniforms %{
     vec4 sectorParams; // sector size, half landscape width/depth, unused
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
-    vec4 vtLayout; // atlas size, slot size, border
+    vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
     vec4 decalControl; // Enable nearby decal geometry; cached material is unchanged
     vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
@@ -352,6 +352,11 @@ CCProgram landscape-surface %{
       // Evaluate derivatives before any discard. Width is in screen pixels.
       vec3 wireDistance = v_wireBarycentric / max(fwidth(v_wireBarycentric), vec3(1e-6));
     #endif
+    #if __VERSION__ >= 300
+      // Derivatives must be evaluated before decal discard.
+      vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
+      vec2 localDX = dFdx(localXZ), localDY = dFdy(localXZ);
+    #endif
     #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
       // Flat collar pixels already exist on the terrain: avoid coplanar overlap.
       if (v_decalLift <= 0.001) discard;
@@ -364,16 +369,27 @@ CCProgram landscape-surface %{
     float ao = 1.0;
   #endif
   #if __VERSION__ >= 300
-    // Every rendered node has a valid VT mapping, possibly to an ancestor.
-    vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
+    // Each patch carries one resident mapping covering its entire morph trajectory.
     vec2 nodeUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
     float count = vtLayout.x / vtLayout.y;
     vec2 slot = vec2(mod(v_vtParams.w, count), floor(v_vtParams.w / count));
     vec2 atlasUV = (slot * vtLayout.y + vtLayout.z + nodeUV * (vtLayout.y - 2.0*vtLayout.z)) / vtLayout.x;
-    vec4 cachedAlbedo = texture(vtAlbedo, atlasUV);
+    float gradientScale = (vtLayout.y - 2.0 * vtLayout.z) / (vtLayout.x * v_vtParams.z);
+    vec2 atlasDX = localDX * gradientScale, atlasDY = localDY * gradientScale;
+    // CLAMP protects only the entire atlas, not a physical slot. Bound the
+    // pixel footprint at page edges, including coarse residency fallbacks.
+    // Leave one coarsest-mip texel for bilinear support; scale both gradients
+    // together to preserve their anisotropy and direction.
+    vec2 room = vtLayout.z + min(nodeUV, vec2(1.0) - nodeUV) * (vtLayout.y - 2.0 * vtLayout.z) - vtLayout.w;
+    vec2 span = (abs(atlasDX) + abs(atlasDY)) * vtLayout.x;
+    vec2 scaleLimit = 2.0 * max(room, vec2(0.0)) / max(span, vec2(1e-6));
+    float footprintScale = min(1.0, min(scaleLimit.x, scaleLimit.y));
+    atlasDX *= footprintScale;
+    atlasDY *= footprintScale;
+    vec4 cachedAlbedo = textureGrad(vtAlbedo, atlasUV, atlasDX, atlasDY);
     albedo = cachedAlbedo.rgb;
     #if !LANDSCAPE_DEBUG_UNLIT
-    vec4 nra = texture(vtNormalRoughnessAO, atlasUV);
+    vec4 nra = textureGrad(vtNormalRoughnessAO, atlasUV, atlasDX, atlasDY);
     detailNormal = normalize(vec3(nra.r, cachedAlbedo.a, nra.g) * 2.0 - 1.0);
     if (rvtNormalParams.x < 0.5) {
       // Baseline: geometry LOD and its morph choose the terrain normal level.

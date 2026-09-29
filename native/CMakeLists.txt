@@ -1641,6 +1641,8 @@ cocos_source_files(
                  cocos/landscape/VTPaging.h
                  cocos/landscape/VTRenderer.h
                  cocos/landscape/VTRenderer.cpp
+                 cocos/landscape/DecalRenderer.h
+                 cocos/landscape/DecalRenderer.cpp
                  cocos/landscape/Quadtree.h
                  cocos/landscape/Quadtree.cpp
                  cocos/landscape/LandscapeRenderer.h

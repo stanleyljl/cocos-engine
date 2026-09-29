@@ -36,6 +36,7 @@ GLES3Sampler::GLES3Sampler(const SamplerInfo &info) : Sampler(info) {
     _gpuSampler->minFilter = _info.minFilter;
     _gpuSampler->magFilter = _info.magFilter;
     _gpuSampler->mipFilter = _info.mipFilter;
+    _gpuSampler->maxAnisotropy = static_cast<float>(_info.maxAnisotropy);
     _gpuSampler->addressU = _info.addressU;
     _gpuSampler->addressV = _info.addressV;
     _gpuSampler->addressW = _info.addressW;

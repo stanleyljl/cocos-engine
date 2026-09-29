@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <memory>
 
@@ -32,6 +33,7 @@
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
+#include "landscape/DecalRenderer.h"
 #include "landscape/Landscape.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/VTPaging.h"
@@ -61,8 +63,8 @@ class MaterialLibrary;
 class VTRenderer;
 
 /**
- * Coordinates the frame plan, source residency, terrain models and 3D decals.
- * The quadtree owns visibility/LOD; VTRequestPlan owns material-page budgeting;
+ * Coordinates the frame plan, source residency and terrain models.
+ * The quadtree owns visibility/LOD; VirtualTexture owns material-page residency;
  * TilePageResolver owns source lookup. Four shared grids split selected node
  * quadrants into material-page patches without adding triangles.
  */
@@ -93,6 +95,49 @@ public:
     RenderTexture *vtAtlas() const;
 
 private:
+    friend struct LandscapePagingTestAccess;
+
+    // Skip CPU reconstruction only when both selection and streamed content are
+    // unchanged. Publishing completed pages must refresh direct instance mappings,
+    // even when the camera is stationary.
+    class SyncCache {
+    public:
+        using Positions = std::array<float, 6>; // selection camera and terrain origin
+
+        bool matches(const Positions &positions, uint64_t tileRevision, uint64_t contentRevision,
+                     const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) const {
+            return _valid && positions == _positions && tileRevision == _tileRevision &&
+                contentRevision == _contentRevision && sameNodes(geometryNodes, _geometryNodes) && sameNodes(surfaceNodes, _surfaceNodes);
+        }
+
+        void store(const Positions &positions, uint64_t tileRevision, uint64_t contentRevision,
+                   const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
+            _positions = positions;
+            _tileRevision = tileRevision;
+            _contentRevision = contentRevision;
+            _geometryNodes = geometryNodes;
+            _surfaceNodes = surfaceNodes;
+            _valid = true;
+        }
+
+        void invalidate() { _valid = false; }
+
+    private:
+        static bool sameNodes(const ccstd::vector<QuadNode> &a, const ccstd::vector<QuadNode> &b) {
+            return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](const QuadNode &left, const QuadNode &right) {
+                return left.level == right.level && left.ix == right.ix && left.iz == right.iz &&
+                    left.minY == right.minY && left.maxY == right.maxY && left.quadrantMask == right.quadrantMask;
+            });
+        }
+
+        bool _valid{false};
+        Positions _positions{};
+        uint64_t _tileRevision{0};
+        uint64_t _contentRevision{0};
+        ccstd::vector<QuadNode> _geometryNodes;
+        ccstd::vector<QuadNode> _surfaceNodes;
+    };
+
     void sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
     void rebuildNodeModels();
     void setLodColor(bool enabled);
@@ -120,39 +165,24 @@ private:
         Patch patch;
     };
 
-    struct DecalDraw {
-        IntrusivePtr<scene::Model> model;
-        Patch patch;
-        uint32_t decal{0};
-        Vec4 grid; // fixed landscape-local XZ origin and width/depth
-    };
-    // Keep each request and its resolved inputs together across source uploads.
-    struct VTPageUpdate {
-        VTPageRequest request;
-        VTPageInputs inputs;
-    };
     // Frame stages: selection -> residency/source publication -> models -> decals.
     void buildFramePlan(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
-    bool syncPageSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes, bool uploadsPolled);
-    void prepareVTPageUpdates();
-    void refreshVTPageInputs();
-    void queueVTPageUpdates();
-    bool initialDataReady() const;
+    bool preparePageSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void resolveFrameSources(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
     void syncTerrainModels();
-    void initDecalCenters();
     void bindRuntimeTextures();
     void syncDecals(const ccstd::vector<Patch> &patches);
-    void updateDecalInstance(const DecalDraw &draw);
-    void appendDecalDraw(const Patch &patch, uint32_t decal, const Vec4 &grid);
     IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
     void updateMaterialProperties();
     void updateMorphCameraProperty();
-    void setInstanceAttribute(scene::Model *model, const char *name, const Vec4 &value);
+    LandscapeSurfaceInstance resolveSurface(const Patch &patch);
+    std::array<Material *, 4> surfaceMaterials() const;
     void updateInstanceData(scene::Model *model, const Patch &patch);
     void updateModel(ModelState &state, const Patch &patch);
     void updateModelBounds(scene::Model *model, const Patch &patch);
     void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
                        ccstd::vector<Patch> &patches);
+    LandscapeLocalRegion patchRegion(const Patch &patch) const;
     float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
 
     IntrusivePtr<Node> _node;
@@ -160,12 +190,7 @@ private:
     std::array<IntrusivePtr<RenderingSubMesh>, 4> _meshes;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
-    IntrusivePtr<Material> _decalSolid;
-    IntrusivePtr<Material> _decalWire;
-    IntrusivePtr<RenderingSubMesh> _decalMesh;
-    ccstd::vector<DecalDraw> _decalDraws;
-    size_t _decalActive{0};
-    ccstd::vector<Vec3> _decalCenters;
+    std::unique_ptr<DecalRenderer> _decals;
     IntrusivePtr<LandscapeAsset> _asset;
     std::unique_ptr<TilePagePool> _tilePages;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
@@ -178,13 +203,11 @@ private:
     };
     ccstd::unordered_map<uint64_t, ccstd::vector<NodeModel>> _nodeModels;
     std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
-    uint32_t _vtRootLevel{0};
-    LandscapeSyncCache _syncCache;
+    VTPageLayout _vtLayout;
+    SyncCache _syncCache;
     // Reused across active frames; the stable-camera fast path touches none of these.
-    VTRequestPlan _requestPlan;
     ccstd::vector<Patch> _patches;
     ccstd::vector<QuadNode> _shadowOnlyNodes;
-    ccstd::vector<VTPageUpdate> _vtPageUpdates;
     ccstd::unordered_set<uint64_t> _visiblePatches;
     std::unique_ptr<TilePageResolver> _sourceResolver;
 
@@ -195,7 +218,6 @@ private:
     LandscapeData _data;
     float _heightSampleSpacing{1.0F};
     Vec3 _viewPosition;
-    Vec3 _vtViewPosition;
     ccstd::vector<float> _morphStart;
     ccstd::vector<float> _morphEnd;
     LandscapeDebugData _debugData;
