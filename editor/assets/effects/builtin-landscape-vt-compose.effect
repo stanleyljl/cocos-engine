@@ -16,7 +16,7 @@ CCEffect %{
         - blend: false
         - blend: false
       properties:
-        vtLayout: { value: [8448, 528, 8, 1] }
+        vtLayout: { value: [4352, 272, 8, 1] }
         sourceParams: { value: [129, 1, 0, 0] }
         cliffParams: { value: [0, 1, 0, 0] }
         cliffLayout: { value: [0, 0, 1, 0] }
@@ -52,7 +52,7 @@ CCEffect %{
         - blend: false
         - blend: false
       properties:
-        mipLayout: { value: [8448, 528, 0, 1] }
+        mipLayout: { value: [4352, 272, 0, 1] }
         sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
 }%

@@ -56,11 +56,13 @@ public:
     gfx::Texture *normalRoughnessAO() const;
     gfx::Sampler *sampler() const { return _sampler; }
     Vec4 mapping(VTPageAddress address) const;
+    void requiredSources(ccstd::vector<NodeAddress> &sources) const;
     void resolveSources(TilePagePool &tiles, TilePageResolver &resolver);
     bool valid() const;
     bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
-    void render(uint32_t maxUpdates = config::VT_PAGE_UPDATE_BUDGET);
+    // Returns the actual composed page count for the shared frame budget.
+    uint32_t render(uint32_t maxUpdates);
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
@@ -75,11 +77,8 @@ private:
     // of camera distance and CDLOD morph. Reuse at most a quarter of the source pool.
     static uint32_t cliffReferenceLevel(const LandscapeData &data) {
         uint32_t level = data.minTileLevel;
-        while (level < data.maxLevel &&
-               static_cast<uint64_t>(data.sectorsX) * data.sectorsZ *
-                   (1ULL << (2U * (data.maxLevel - level)))>
-                   config::PAGE_POOL_LAYERS /
-               4U) {
+        const uint64_t sectors = static_cast<uint64_t>(data.sectorsX) * data.sectorsZ;
+        while (level < data.maxLevel && sectors * (1ULL << (2U * (data.maxLevel - level))) > config::PAGE_POOL_LAYERS / 4U) {
             ++level;
         }
         return level;

@@ -59,15 +59,25 @@ public:
         return {page.x * size, page.z * size};
     }
 
+    // Reserve every possible stitched position, independently of camera distance
+    // and the current edge mask. A neighbor may change LOD while this page stays
+    // bound; an odd edge vertex then snaps to the preceding even grid vertex.
+    VTPageAddress coveringPatch(uint32_t desiredLevel, LandscapeGridXZ origin, float cellSize,
+                                uint32_t x, uint32_t z, uint32_t cells) const {
+        return coveringPage(desiredLevel,
+                            {{origin.x + (x - (x & 1U)) * cellSize, origin.z + (z - (z & 1U)) * cellSize},
+                             {origin.x + (x + cells) * cellSize, origin.z + (z + cells) * cellSize}});
+    }
+
     // Bounds use minimum-corner-relative meters and must stay within one sector.
-    // Include the complete morph trajectory, not just the original grid cell.
+    // Include the complete stitched footprint, not just the original grid cell.
     VTPageAddress coveringPage(uint32_t desiredLevel, const LandscapeGridBounds &bounds) const {
         assert(desiredLevel <= _rootLevel);
         for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
             const double size = pageSize(level);
             const VTPageAddress page{level,
-                static_cast<uint32_t>(std::floor(bounds.min.x / size + 1e-7)),
-                static_cast<uint32_t>(std::floor(bounds.min.z / size + 1e-7))};
+                                     static_cast<uint32_t>(std::floor(bounds.min.x / size + 1e-7)),
+                                     static_cast<uint32_t>(std::floor(bounds.min.z / size + 1e-7))};
             if (bounds.max.x <= (page.x + 1.0) * size + size * 1e-7 &&
                 bounds.max.z <= (page.z + 1.0) * size + size * 1e-7) {
                 return page;

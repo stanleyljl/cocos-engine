@@ -195,7 +195,7 @@ void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
     pass.shadow = shadow;
     pass.nodes.clear();
     pass.models.clear();
-    _visibilityDistanceWarning |= selectNodes(frustum, pass.nodes);
+    _visibilityDistanceWarning |= selectNodes(frustum, pass.nodes, !shadow);
 }
 
 bool Landscape::queryTransformValid() const {
@@ -274,14 +274,14 @@ uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array outpu
     return static_cast<uint32_t>(result.status);
 }
 
-bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes) {
+bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes, bool preloadNearby) {
     nodes.clear();
     const Vec3 base = _node->getWorldPosition();
     const auto &data = _asset->data();
     bool visibilityDistanceWarning = false;
     for (uint32_t sectorZ = 0; sectorZ < data.sectorsZ; ++sectorZ) {
         for (uint32_t sectorX = 0; sectorX < data.sectorsX; ++sectorX) {
-            const auto &selected = _quadtree->select(_lodViewPosition, frustum, base, sectorX, sectorZ);
+            const auto &selected = _quadtree->select(_lodViewPosition, frustum, base, sectorX, sectorZ, preloadNearby);
             visibilityDistanceWarning |= _quadtree->visibilityDistanceTooSmall();
             nodes.insert(nodes.end(), selected.begin(), selected.end());
         }
@@ -368,7 +368,7 @@ void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate) {
     _renderer->preparePasses(_geometryNodes, surfaceNodes);
     for (size_t i = 0; i < _passCount; ++i) {
         auto &pass = _passes[i];
-        _renderer->collectPassModels(pass.nodes, *pass.frustum, pass.shadow, pass.models);
+        _renderer->collectPassModels(*pass.frustum, pass.shadow, pass.models);
     }
     removeCSMDuplicates(cascadesToDeduplicate);
 }

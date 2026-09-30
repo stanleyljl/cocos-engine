@@ -50,7 +50,7 @@ TilePagePool::~TilePagePool() {
 
 bool TilePagePool::supportsHeightUnorm(gfx::Device *device) {
     return device != nullptr && hasAllFlags(device->getFormatFeatures(gfx::Format::R16_UNORM),
-        gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
+                                            gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
 }
 
 bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount) {
@@ -76,6 +76,8 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _asset = asset;
     _tileRes = data.tileResolution;
     _layerCount = layerCount;
+    _reservations.data = data;
+    _reservations.capacity = layerCount;
     _heightUnorm = supportsHeightUnorm(device);
     if (_heightUnorm) {
         _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
@@ -85,15 +87,10 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         return false;
     }
     initSamplers();
-    if (!loadRootPages()) {
-        destroy();
-        return false;
-    }
-    initFreeLayers(rootCount);
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
-        _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
-    CC_LOG_INFO("[Landscape] %zu root height/splat/normal pages resident; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
+                _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
+    CC_LOG_INFO("[Landscape] %zu sector roots; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
 #endif
     return true;
 }
@@ -135,34 +132,6 @@ void TilePagePool::initSamplers() {
     _splatSampler = _device->getSampler(si);
 }
 
-bool TilePagePool::loadRootPages() {
-    const auto &data = _asset->data();
-    // Fill all three arrays with root data before any model can render.
-    // Roots deliberately stay out of the LRU, even when outside the view.
-    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
-        for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            LandscapeAsset::TileData tile;
-            if (!_asset->loadTileSet(data.maxLevel, x, z, tile)) {
-                CC_LOG_WARNING("[Landscape] cannot initialize height/splat/normal root L%u (%u,%u)", data.maxLevel, x, z);
-                return false;
-            }
-            const uint32_t layer = z * data.sectorsX + x;
-            uploadHeight(layer, tile.height.data());
-            uploadLayer(_splatArray, layer, tile.splat.data());
-            uploadLayer(_normalArray, layer, tile.normal.data());
-            _resident[tile.key] = layer;
-        }
-    }
-    return true;
-}
-
-void TilePagePool::initFreeLayers(size_t rootCount) {
-    _freeLayers.reserve(_layerCount);
-    for (uint32_t layer = _layerCount; layer > rootCount; --layer) {
-        _freeLayers.push_back(layer - 1);
-    }
-}
-
 void TilePagePool::uploadHeight(uint32_t layer, const uint8_t *data) {
     if (_heightUnorm) {
         // Source PNG bytes remain high/low for CPU queries and physics. Only
@@ -190,174 +159,80 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
     _device->copyBuffersToTexture(buffers, array, &region, 1);
 }
 
-void TilePagePool::beginFrame(bool synchronous) {
-    _synchronous = synchronous;
-    _inUse.clear();
-    _missingRequests.clear();
+bool TilePagePool::canReserve(const ccstd::vector<NodeAddress> &sources) const {
+    return _reservations.canReserve(sources) && std::none_of(sources.begin(), sources.end(),
+                                                             [this](NodeAddress n) { return _failed.count(n.key()) != 0; });
 }
-
-int TilePagePool::query(uint32_t level, uint32_t x, uint32_t z) {
-    const uint64_t key = makeNodeKey(level, x, z);
-    if (!valid()) {
-        return -1;
-    }
-    _inUse.insert(key);
-    const auto it = _resident.find(key);
-    if (it != _resident.end()) {
-        touchLRU(key);
-        return static_cast<int>(it->second);
-    }
-    // Warmup collects the entire protected set before synchronous loading.
-    // Normal streaming queues a worker and temporarily uses a resident ancestor.
-    _missingRequests.insert(key);
-    if (_asset != nullptr && !_synchronous) {
-        _asset->requestTile(level, x, z);
-    }
-    return -1;
+bool TilePagePool::reserve(const ccstd::vector<NodeAddress> &sources) {
+    return canReserve(sources) && _reservations.reserve(sources);
 }
-
-int TilePagePool::peekResident(uint64_t key) {
-    if (!valid()) {
-        return -1;
-    }
-    const auto it = _resident.find(key);
-    if (it == _resident.end()) {
-        return -1;
-    }
-    // Used as a streaming fallback this frame: protect it from eviction and keep
-    // it warm in the LRU so it stays available until the real tile arrives.
-    _inUse.insert(key);
-    touchLRU(key);
-    return static_cast<int>(it->second);
+int TilePagePool::resident(NodeAddress source) const {
+    return _reservations.resident(source);
 }
-
-bool TilePagePool::requestsReady() const {
-    return std::all_of(_missingRequests.begin(), _missingRequests.end(), [this](uint64_t key) {
-        return _resident.count(key) != 0;
-    });
+bool TilePagePool::ready() const {
+    return std::all_of(_reservations.slots.begin(), _reservations.slots.end(), [](const auto &e) { return e.second.ready; });
 }
-
-bool TilePagePool::loadRequestedTiles() {
-    if (!valid() || !_asset || !_synchronous) {
-        return false;
+bool TilePagePool::failed() const {
+    return std::any_of(_reservations.working.begin(), _reservations.working.end(), [this](NodeAddress n) { return _failed.count(n.key()) != 0; });
+}
+bool TilePagePool::loadReserved(bool synchronous) {
+    constexpr size_t MAX_IN_FLIGHT = 8;
+    for (const auto source : _reservations.working) {
+        auto &slot = _reservations.slots.at(source.key());
+        if (slot.ready || _inFlight.count(source.key()) || _failed.count(source.key())) {
+            continue;
+        }
+        if (synchronous) {
+            LandscapeAsset::TileData tile;
+            if (!_asset->loadTileSet(source.level, source.x, source.z, tile)) {
+                _failed.insert(source.key());
+                return false;
+            }
+            uploadHeight(slot.layer, tile.height.data());
+            uploadLayer(_splatArray, slot.layer, tile.splat.data());
+            uploadLayer(_normalArray, slot.layer, tile.normal.data());
+            slot.ready = true;
+            ++_updateRevision;
+        } else {
+            if (_inFlight.size() >= MAX_IN_FLIGHT) {
+                break;
+            }
+            _inFlight.insert(source.key());
+            _asset->requestTile(source.level, source.x, source.z);
+        }
     }
-    const size_t missing = static_cast<size_t>(std::count_if(_missingRequests.begin(), _missingRequests.end(),
-        [this](uint64_t key) { return !_resident.count(key); }));
-    const size_t available = _freeLayers.size() + static_cast<size_t>(std::count_if(_lru.begin(), _lru.end(),
-        [this](uint64_t key) { return !_inUse.count(key); }));
-    if (missing > available) {
-        CC_LOG_ERROR("[Landscape] Initial warmup needs %zu source layers, only %zu available (%u total).", missing, available, _layerCount);
-        return false;
+    return !failed();
+}
+void TilePagePool::update(uint32_t budget) {
+    uint64_t key = 0;
+    while (_asset->takeFailedTile(key)) {
+        _inFlight.erase(key);
+        if (_reservations.slots.count(key)) {
+            _failed.insert(key);
+        }
+        ++_updateRevision;
     }
     LandscapeAsset::TileData tile;
-    for (const auto key : _missingRequests) {
-        if (_resident.count(key)) {
+    for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
+        _inFlight.erase(tile.key);
+        const auto it = _reservations.slots.find(tile.key);
+        if (it == _reservations.slots.end() || it->second.ready) {
             continue;
         }
-        const auto address = NodeAddress::fromKey(key);
-        if (!_asset->loadTileSet(address.level, address.x, address.z, tile)) {
-            return false;
-        }
-        const int layer = acquireLayer();
-        if (layer < 0) {
-            return false;
-        }
-        uploadHeight(static_cast<uint32_t>(layer), tile.height.data());
-        uploadLayer(_splatArray, static_cast<uint32_t>(layer), tile.splat.data());
-        uploadLayer(_normalArray, static_cast<uint32_t>(layer), tile.normal.data());
-        _resident[key] = static_cast<uint32_t>(layer);
-        touchLRU(key);
+        auto &slot = it->second;
+        uploadHeight(slot.layer, tile.height.data());
+        uploadLayer(_splatArray, slot.layer, tile.splat.data());
+        uploadLayer(_normalArray, slot.layer, tile.normal.data());
+        slot.ready = true;
         ++_updateRevision;
     }
-    return true;
 }
-
-void TilePagePool::update(uint32_t maxUploads) {
-    if (!valid()) {
-        return;
-    }
-    // The asset owns worker threads and decoded data. Consume at most the
-    // upload budget here, without doing any file or PNG work on this class.
-    uint32_t done = 0;
-    if (_asset != nullptr) {
-        uint64_t failedKey = 0;
-        while (_asset->takeFailedTile(failedKey)) {
-            ++_updateRevision; // Let a stationary renderer retry failed sources.
-        }
-    }
-    LandscapeAsset::TileData rt;
-    while (_asset != nullptr && done < maxUploads && _asset->takeReadyTile(rt)) {
-        ++_updateRevision;
-        if (_resident.find(rt.key) != _resident.end()) {
-            continue; // already uploaded via an earlier duplicate
-        }
-        const int layer = acquireLayer();
-        if (layer < 0) {
-            // Every resident tile is needed this frame: the visible set exceeds
-            // the pool. Drop the decode (it re-requests when queried) and warn once.
-            if (!_warnedFull) {
-                _warnedFull = true;
-                CC_LOG_WARNING("[Landscape] height/splat page pool full (%u layers); using resident ancestors. Increase PAGE_POOL_LAYERS.", _layerCount);
-            }
-            continue;
-        }
-        uploadHeight(static_cast<uint32_t>(layer), rt.height.data());
-        uploadLayer(_splatArray, static_cast<uint32_t>(layer), rt.splat.data());
-        uploadLayer(_normalArray, static_cast<uint32_t>(layer), rt.normal.data());
-        // Publish only after all three textures occupy the same layer.
-        _resident[rt.key] = static_cast<uint32_t>(layer);
-        touchLRU(rt.key);
-        ++done;
-    }
-}
-
-void TilePagePool::touchLRU(uint64_t key) {
-    if (NodeAddress::fromKey(key).level == _asset->data().maxLevel) {
-        return; // roots are permanent and must never become eviction candidates
-    }
-    const auto it = _lruIter.find(key);
-    if (it != _lruIter.end()) {
-        // Move the existing entry without allocating; its iterator stays valid.
-        _lru.splice(_lru.end(), _lru, it->second);
-        return;
-    }
-    _lru.push_back(key); // most-recently-used at the back
-    _lruIter[key] = std::prev(_lru.end());
-}
-
-int TilePagePool::acquireLayer() {
-    if (!_freeLayers.empty()) {
-        const uint32_t layer = _freeLayers.back();
-        _freeLayers.pop_back();
-        return static_cast<int>(layer);
-    }
-    // Evict the least-recently-used tile that is NOT needed this frame (front of
-    // the LRU list is oldest). Tiles requested this frame are protected.
-    for (auto it = _lru.begin(); it != _lru.end(); ++it) {
-        const uint64_t victim = *it;
-        if (_inUse.find(victim) != _inUse.end()) {
-            continue;
-        }
-        const auto res = _resident.find(victim);
-        const uint32_t layer = res->second;
-        _resident.erase(res);
-        _lruIter.erase(victim);
-        _lru.erase(it);
-        return static_cast<int>(layer);
-    }
-    return -1; // nothing evictable (all resident tiles are in use this frame)
-}
-
 void TilePagePool::destroy() {
-    _heightUnorm = false;
-    ccstd::vector<uint16_t>().swap(_heightUpload);
-    _synchronous = false;
-    _missingRequests.clear();
-    _resident.clear();
-    _lru.clear();
-    _lruIter.clear();
-    _freeLayers.clear();
-    _inUse.clear();
+    _reservations.slots.clear();
+    _reservations.working.clear();
+    _inFlight.clear();
+    _failed.clear();
+    _heightUpload.clear();
     _asset = nullptr;
     _heightArray = nullptr;
     _splatArray = nullptr;
@@ -365,33 +240,18 @@ void TilePagePool::destroy() {
     _heightSampler = nullptr;
     _splatSampler = nullptr;
     _device = nullptr;
-    _warnedFull = false;
 }
-
 TilePageResolver::TilePageResolver(TilePagePool &pool, const LandscapeData &data)
 : _pool(pool), _data(data), _vtLayout(data.sectorSize) {}
-
-void TilePageResolver::beginFrame(bool synchronous) {
-    _pool.beginFrame(synchronous);
-    invalidate();
+TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) const {
+    const uint32_t level = std::max(node.level, _data.minTileLevel);
+    const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
+    return {source, _pool.resident(source)};
 }
-
-void TilePageResolver::protectGeometrySources(const ccstd::vector<QuadNode> &geometryNodes,
-                                             const ccstd::vector<QuadNode> &surfaceNodes) {
-    for (const auto &node : geometryNodes) {
-        resolve(node.address());
-    }
-    // Shadow vertices need heights only. Parent normals are a color-pass input.
-    for (const auto &node : surfaceNodes) {
-        normalParent(node.address(), resolve(node.address()));
-    }
-}
-
 Vec4 TilePageResolver::shaderParams(const Tile &tile) const {
     const auto region = _data.nodeRegion(tile.address);
-    return Vec4{region.x, region.z, region.size, static_cast<float>(tile.layer)};
+    return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
 }
-
 uint32_t TilePageResolver::sourceLevelForWorldSize(float size) const {
     uint32_t level = _data.minTileLevel;
     while (level < _data.maxLevel && _data.nodeSize(level) < size) {
@@ -399,93 +259,49 @@ uint32_t TilePageResolver::sourceLevelForWorldSize(float size) const {
     }
     return level;
 }
-
-TilePageResolver::Tile TilePageResolver::resolveSplat(const VTPageAddress &page) {
-    // A material page can be finer than every height/splat tile. Choose the
-    // containing source independently of the selected geometry node's LOD.
+NodeAddress TilePageResolver::splatSource(VTPageAddress page) const {
     const float size = _vtLayout.pageSize(page.level);
-    const uint32_t level = sourceLevelForWorldSize(size);
-    return resolve(_data.nodeAtGridClamped(level, {(page.x + 0.5F) * size, (page.z + 0.5F) * size}));
+    return _data.nodeAtGridClamped(sourceLevelForWorldSize(size), {(page.x + 0.5) * size, (page.z + 0.5) * size});
 }
-
-std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::resolveNormals(const VTPageAddress &page, bool bakeNormals) {
-    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> sources;
-    if (!bakeNormals) {
-        sources.fill(shaderParams(resolveSplat(page)));
-        return sources;
+std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::normalSources(VTPageAddress page, bool bake) const {
+    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> result;
+    if (!bake) {
+        result.fill(splatSource(page));
+        return result;
     }
-    // Match normal spacing to VT texels, independently of geometry LOD, but
-    // keep each source at least half a page wide to fit the 4x4 neighborhood.
-    // Higher VT resolution interpolates these normals; the outer ring still
-    // supplies real neighboring normals instead of clamping at page edges.
     const float size = _vtLayout.pageSize(page.level);
-    const float target = size * std::max(0.5F,
-        static_cast<float>(_data.tileResolution - 1U) / config::VT_PAGE_INTERIOR);
-    uint32_t level = sourceLevelForWorldSize(target);
-    for (;;) {
-        const uint32_t residentLevel = resolveNormalNeighborhood(page, size, level, sources);
-        // Publish one resolution for the entire page. Fine sources remain
-        // requested; when all arrive, setInputs invalidates this cached page.
-        if (residentLevel == level) {
-            return sources;
-        }
-        level = residentLevel;
-    }
-}
-
-uint32_t TilePageResolver::resolveNormalNeighborhood(
-    const VTPageAddress &page, float pageSize, uint32_t level,
-    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> &sources) {
-    constexpr uint32_t SIDE = 4;
-    static_assert(SIDE * SIDE == config::VT_NORMAL_SOURCE_COUNT, "Normal source table is a 4x4 neighborhood");
-    uint32_t coarsestResidentLevel = level;
-    for (uint32_t row = 0; row < SIDE; ++row) {
-        for (uint32_t column = 0; column < SIDE; ++column) {
-            // Probe centers at -1/4, 1/4, 3/4, 5/4 of the page on each axis:
-            // two interior sources and one neighbor beyond each edge.
-            const float x = (page.x - 0.25F + column * 0.5F) * pageSize;
-            const float z = (page.z - 0.25F + row * 0.5F) * pageSize;
-            const auto tile = resolve(_data.nodeAtGridClamped(level, {x, z}));
-            sources[row * SIDE + column] = shaderParams(tile);
-            coarsestResidentLevel = std::max(coarsestResidentLevel, tile.address.level);
+    const float target = size * std::max(0.5F, static_cast<float>(_data.tileResolution - 1) / config::VT_PAGE_INTERIOR);
+    const uint32_t level = sourceLevelForWorldSize(target);
+    for (uint32_t row = 0; row < 4; ++row) {
+        for (uint32_t col = 0; col < 4; ++col) {
+            result[row * 4 + col] = _data.nodeAtGridClamped(level, {(page.x - 0.25 + col * 0.5) * size, (page.z - 0.25 + row * 0.5) * size});
         }
     }
-    return coarsestResidentLevel;
+    return result;
 }
-
-TilePageResolver::Tile TilePageResolver::normalParent(NodeAddress node, const Tile &tile) {
-    // Finer geometry already shares the finest source normal map. A streaming
-    // fallback likewise must not morph towards an extra-coarse level again.
-    if (node.level != tile.address.level || node.level >= _data.maxLevel) {
-        return tile;
-    }
-    return resolve(node.ancestor(node.level + 1U));
+void TilePageResolver::pageSources(VTPageAddress page, bool bake, ccstd::vector<NodeAddress> &output) const {
+    output.push_back(splatSource(page));
+    const auto normals = normalSources(page, bake);
+    output.insert(output.end(), normals.begin(), normals.end());
 }
-
-TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) {
-    Tile tile;
-    tile.address = node.ancestor(std::max(node.level, _data.minTileLevel));
-    const uint64_t key = tile.address.key();
-    const auto cached = _cache.find(key);
-    if (cached != _cache.end()) {
-        return cached->second;
+bool TilePageResolver::resolvePage(VTPageAddress page, bool bake, VTPageInputs &output) const {
+    const auto splat = resolve(splatSource(page));
+    if (splat.layer < 0) {
+        return false;
     }
-    // Only the desired tile starts an asynchronous request. Ancestors are
-    // queried without loading and remain protected while used as fallbacks.
-    tile.layer = _pool.query(tile.address.level, tile.address.x, tile.address.z);
-    while (tile.layer < 0 && tile.address.level < _data.maxLevel) {
-        tile.address = tile.address.ancestor(tile.address.level + 1U);
-        tile.layer = _pool.peekResident(tile.address.key());
-    }
-    _cache.emplace(key, tile);
-    return tile; // initialization guarantees a resident root for every sector
-}
-
-VTPageInputs TilePageResolver::resolvePage(const VTPageAddress &page, bool bakeNormals) {
     const float size = _vtLayout.pageSize(page.level);
     const auto region = _data.regionAtGrid(_vtLayout.pageOrigin(page), size);
-    return {Vec4{region.x, region.z, region.size, 0.0F}, shaderParams(resolveSplat(page)), resolveNormals(page, bakeNormals)};
+    output.region = {region.x, region.z, size, 0};
+    output.splatSource = shaderParams(splat);
+    const auto normals = normalSources(page, bake);
+    for (size_t i = 0; i < normals.size(); ++i) {
+        const auto tile = resolve(normals[i]);
+        if (tile.layer < 0) {
+            return false;
+        }
+        output.normalSources[i] = shaderParams(tile);
+    }
+    return true;
 }
-
 } // namespace landscape
 } // namespace cc

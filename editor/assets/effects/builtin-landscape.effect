@@ -11,7 +11,7 @@ CCEffect %{
         sectorParams: { value: [1, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
-        vtLayout: { value: [8448, 528, 8, 4] }
+        vtLayout: { value: [4352, 272, 8, 4] }
         decalControl: { value: [1, 0, 0, 0] }
         decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         rvtNormalParams: { value: [1, 0, 0, 0] }
@@ -90,10 +90,9 @@ CCProgram landscape-vertex %{
   #endif
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_quadrantInst; // parent UV offset XY, patch UV size Z
+    in vec4 a_quadrantInst; // UV offset XY, patch UV size Z, coarse-neighbor edge mask W
     in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
     #if !LANDSCAPE_SHADOW_PASS
-      in vec4 a_normalParentInst; // parent normal region XZ origin, size, array layer
       in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
     #endif
     #if LANDSCAPE_DECAL_MESH
@@ -111,9 +110,8 @@ CCProgram landscape-vertex %{
     #if !LANDSCAPE_SHADOW_PASS
       flat out float v_lod;
       flat out vec4 v_vtParams;
-      out vec4 v_normalUV;
-      flat out vec2 v_normalLayers;
-      out float v_normalMorph;
+      out vec2 v_normalUV;
+      flat out float v_normalLayer;
     #endif
   #else
     #if !LANDSCAPE_SHADOW_PASS
@@ -169,14 +167,17 @@ CCProgram landscape-vertex %{
 
   #if __VERSION__ >= 300 && USE_INSTANCING
   vec4 terrainVertex(vec2 parentUV) {
-    vec2 xz = a_gridInst.xy + parentUV * a_gridInst.z;
-    mat4 world;
-    CCGetWorldMatrix(world);
-    vec3 baseWorld = (world * vec4(xz.x, sampleHeight(xz), xz.y, 1.0)).xyz;
-    vec2 range = lodMorph[int(a_gridInst.w)].xy;
-    float morph = clamp((distance(morphCameraPos.xyz, baseWorld) - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
-    xz -= fract(parentUV * 8.0) * 2.0 * (a_gridInst.z / 16.0) * morph;
-    return vec4(xz.x, sampleHeight(xz), xz.y, morph);
+    vec2 grid = floor(parentUV * 16.0 + 0.5);
+    int edges = int(a_quadrantInst.w + 0.5);
+    // Only the fine side of an actual 2:1 boundary collapses odd vertices.
+    // The coarse side remains fixed. This applies identically to color,
+    // shadow, wireframe and decal reconstruction, regardless of IO latency.
+    bool coarseX = (grid.x < 0.5 && (edges & 1) != 0) || (grid.x > 15.5 && (edges & 2) != 0);
+    bool coarseZ = (grid.y < 0.5 && (edges & 4) != 0) || (grid.y > 15.5 && (edges & 8) != 0);
+    if (coarseX) grid.y -= mod(grid.y, 2.0);
+    if (coarseZ) grid.x -= mod(grid.x, 2.0);
+    vec2 xz = a_gridInst.xy + grid * (a_gridInst.z / 16.0);
+    return vec4(xz.x, sampleHeight(xz), xz.y, 0.0);
   }
   #if LANDSCAPE_DECAL_MESH
   bool decalTriangleHeight(vec2 xz, vec4 a, vec4 b, vec4 c, out vec2 heightMorph) {
@@ -245,9 +246,8 @@ CCProgram landscape-vertex %{
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
-    v_normalUV = vec4(0.5);
-    v_normalLayers = vec2(0.0);
-    v_normalMorph = 0.0;
+    v_normalUV = vec2(0.5);
+    v_normalLayer = 0.0;
     #if USE_INSTANCING
       v_vtParams = a_vtInst;
     #endif
@@ -275,17 +275,13 @@ CCProgram landscape-vertex %{
     #endif
     localXZ = base.xz;
     height = base.y;
-    #if !LANDSCAPE_SHADOW_PASS
-      v_normalMorph = base.w;
-    #endif
   #endif
   #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
     // Identical final world coordinates for geometry and both normal levels.
     float resolution = max(heightParams.y, 2.0);
-    v_normalUV = vec4((localXZ - a_tileInst.xy) / a_tileInst.z,
-                     (localXZ - a_normalParentInst.xy) / a_normalParentInst.z);
+    v_normalUV = (localXZ - a_tileInst.xy) / a_tileInst.z;
     v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
-    v_normalLayers = vec2(a_tileInst.w, a_normalParentInst.w);
+    v_normalLayer = a_tileInst.w;
   #endif
     // Sample base terrain at the final morphed coordinate.
     return vec3(localXZ.x, height, localXZ.y);
@@ -318,9 +314,8 @@ CCProgram landscape-surface %{
     flat in vec4 v_vtParams;
     #if !LANDSCAPE_DEBUG_UNLIT
       uniform highp sampler2DArray terrainNormalMap;
-      in vec4 v_normalUV;
-      flat in vec2 v_normalLayers;
-      in float v_normalMorph;
+      in vec2 v_normalUV;
+      flat in float v_normalLayer;
     #endif
   #endif
   #if __VERSION__ >= 300
@@ -369,7 +364,7 @@ CCProgram landscape-surface %{
     float ao = 1.0;
   #endif
   #if __VERSION__ >= 300
-    // Each patch carries one resident mapping covering its entire morph trajectory.
+    // Each patch carries one resident mapping covering its entire stitched geometry footprint.
     vec2 nodeUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
     float count = vtLayout.x / vtLayout.y;
     vec2 slot = vec2(mod(v_vtParams.w, count), floor(v_vtParams.w / count));
@@ -377,7 +372,7 @@ CCProgram landscape-surface %{
     float gradientScale = (vtLayout.y - 2.0 * vtLayout.z) / (vtLayout.x * v_vtParams.z);
     vec2 atlasDX = localDX * gradientScale, atlasDY = localDY * gradientScale;
     // CLAMP protects only the entire atlas, not a physical slot. Bound the
-    // pixel footprint at page edges, including coarse residency fallbacks.
+    // pixel footprint at page edges, at every actual material precision.
     // Leave one coarsest-mip texel for bilinear support; scale both gradients
     // together to preserve their anisotropy and direction.
     vec2 room = vtLayout.z + min(nodeUV, vec2(1.0) - nodeUV) * (vtLayout.y - 2.0 * vtLayout.z) - vtLayout.w;
@@ -392,10 +387,8 @@ CCProgram landscape-surface %{
     vec4 nra = textureGrad(vtNormalRoughnessAO, atlasUV, atlasDX, atlasDY);
     detailNormal = normalize(vec3(nra.r, cachedAlbedo.a, nra.g) * 2.0 - 1.0);
     if (rvtNormalParams.x < 0.5) {
-      // Baseline: geometry LOD and its morph choose the terrain normal level.
-      vec2 fineNormal = texture(terrainNormalMap, vec3(v_normalUV.xy, v_normalLayers.x)).rg;
-      vec2 parentNormal = texture(terrainNormalMap, vec3(v_normalUV.zw, v_normalLayers.y)).rg;
-      vec2 terrainXZ = mix(fineNormal, parentNormal, v_normalMorph) * 2.0 - 1.0;
+      // The exact source of the committed height node supplies its base normal.
+      vec2 terrainXZ = texture(terrainNormalMap, vec3(v_normalUV, v_normalLayer)).rg * 2.0 - 1.0;
       terrainNormal = normalize(vec3(terrainXZ.x, sqrt(max(1.0 - dot(terrainXZ, terrainXZ), 0.0)), terrainXZ.y));
     }
     roughness = nra.b;

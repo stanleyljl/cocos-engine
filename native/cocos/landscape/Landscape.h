@@ -120,7 +120,7 @@ private:
     void reportVisibilityDistanceStatus();
     void finalizePassSelection(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
-    bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes);
+    bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes, bool preloadNearby = false);
     bool queryTransformValid() const;
 
     struct PassSelection {

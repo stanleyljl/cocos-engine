@@ -84,7 +84,6 @@ void LandscapeSurfaceInstance::apply(scene::Model *model, TypedArray &scratch) c
     if (!needsMaterial) {
         return;
     }
-    setLandscapeInstanceAttribute(model, scratch, "a_normalParentInst", normalParent);
     setLandscapeInstanceAttribute(model, scratch, "a_vtInst", vt);
 }
 
@@ -104,8 +103,8 @@ bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm
     _mesh = GridMesh::create(Root::getInstance()->getDevice(), 16);
     _scratch = Float32Array(4);
     return _mesh && _solid && _wire &&
-        _solid->getPasses() && !_solid->getPasses()->empty() &&
-        _wire->getPasses() && !_wire->getPasses()->empty();
+           _solid->getPasses() && !_solid->getPasses()->empty() &&
+           _wire->getPasses() && !_wire->getPasses()->empty();
 }
 
 std::array<Material *, 2> DecalRenderer::materials() const {
@@ -161,7 +160,7 @@ bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrar
     for (size_t i = 0; i < _asset->decalLayers().size(); ++i) {
         const auto &layer = _asset->decalLayers()[i];
         layers[i] = Vec4{layer.modulateColor ? 1.0F : 0.0F,
-            static_cast<float>(layer.detailMaterial0 + 1), static_cast<float>(layer.detailMaterial1 + 1), 0};
+                         static_cast<float>(layer.detailMaterial0 + 1), static_cast<float>(layer.detailMaterial1 + 1), 0};
     }
     material->setPropertyVec4Array("decalRegions", regions);
     material->setPropertyVec4Array("decalLayerParams", layers);
@@ -316,7 +315,7 @@ void DecalRenderer::preparePasses(uint32_t stamp) {
 }
 
 void DecalRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
-                                     bool shadow, ccstd::vector<const scene::Model *> &models) const {
+                                      bool shadow, ccstd::vector<const scene::Model *> &models) const {
     for (const auto &node : selected) {
         const auto it = _nodeDraws.find(makeNodeKey(node));
         if (it == _nodeDraws.end()) {

@@ -128,9 +128,9 @@ Vec4 computeTilingParams(const ccstd::vector<uint8_t> &albedo, float pixelsPerMe
         const float encodedMean = linearToSrgb(static_cast<float>(mean[c] / pixelCount));
         shaderMean[c] = encodedMean * encodedMean;
     }
-    // The shader samples normalized UVs, so convert source pixels/m to repeats/m.
-    const float uvScale = std::min(pixelsPerMeter, static_cast<float>(config::VT_PAGE_INTERIOR)) /
-                          static_cast<float>(resolution);
+    // Authored repeats/m must not change with the VT cache resolution.
+    // Texture filtering handles the reduced sampling density of smaller pages.
+    const float uvScale = pixelsPerMeter / static_cast<float>(resolution);
     return Vec4{uvScale, shaderMean[0], shaderMean[1], shaderMean[2]};
 }
 

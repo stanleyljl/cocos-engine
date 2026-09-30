@@ -29,8 +29,8 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
-#include "landscape/LandscapeAsset.h"
 #include "landscape/Quadtree.h"
+#include "landscape/LandscapeAsset.h"
 #include "math/Vec4.h"
 #include "scene/Model.h"
 
@@ -38,8 +38,13 @@ namespace cc {
 class Material;
 class Node;
 class RenderingSubMesh;
-namespace gfx { class Device; class Texture; }
-namespace scene { class RenderScene; }
+namespace gfx {
+class Device;
+class Texture;
+} // namespace gfx
+namespace scene {
+class RenderScene;
+}
 namespace landscape {
 class MaterialLibrary;
 
@@ -51,7 +56,6 @@ struct LandscapeSurfaceInstance {
     Vec4 grid;
     Vec4 quadrant;
     Vec4 tile;
-    Vec4 normalParent;
     Vec4 vt;
     bool needsMaterial{true};
     void apply(scene::Model *model, TypedArray &scratch) const;

@@ -1,23 +1,27 @@
 // Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
-#include "landscape/VTPaging.h"
-#include "landscape/VirtualTexture.h"
 #include "landscape/LandscapeRenderer.h"
+#include "landscape/Quadtree.h"
+#include "landscape/TilePagePool.h"
+#include "landscape/VTPaging.h"
 #include "landscape/VTRenderer.h"
+#include "landscape/VirtualTexture.h"
 
 // Access internal CPU state without making it part of the engine's public API.
 namespace cc::landscape {
 struct LandscapePagingTestAccess {
     using SyncCache = LandscapeRenderer::SyncCache;
+    using StreamingBudget = LandscapeRenderer::StreamingBudget;
     static uint32_t cliffReferenceLevel(const LandscapeData &data) {
         return VTRenderer::cliffReferenceLevel(data);
     }
 };
-}
+} // namespace cc::landscape
 
 #include <cstdlib>
 #include <iostream>
 #include <map>
 #include <random>
+#include <set>
 
 using namespace cc::landscape;
 
@@ -28,403 +32,400 @@ void require(bool condition, const char *message) {
     }
 }
 
-// Test-only oracle for the removed planner's admission policy.
-struct ReferenceRequest {
-    VTPageAddress page;
-    float priority{0};
-    bool required{false};
-};
-
 LandscapeData cacheData(uint32_t root, uint32_t sectorsX = 1, uint32_t sectorsZ = 1) {
-    LandscapeData data;
-    data.sectorsX = sectorsX;
-    data.sectorsZ = sectorsZ;
-    data.maxLevel = std::min(root, config::MAX_LOD_LEVELS - 1);
-    data.tileResolution = 129;
-    data.sectorSize = static_cast<float>(1U << root);
-    data.heightScale = 1;
-    return data;
+    LandscapeData d;
+    d.sectorsX = sectorsX;
+    d.sectorsZ = sectorsZ;
+    d.maxLevel = std::min(root, 8U);
+    d.tileResolution = 129;
+    d.sectorSize = static_cast<float>(1U << root);
+    d.heightScale = 1;
+    return d;
 }
 
-ccstd::vector<ReferenceRequest> activeRequests(const VirtualTexture &cache, uint32_t root) {
-    ccstd::vector<ReferenceRequest> result;
-    for (uint32_t slot : cache.activeSlots()) {
-        const auto &p = cache.page(slot);
-        if (p.address.level < root) {
-            result.push_back({p.address});
+void testHeightReservations() {
+    TilePagePool::Reservations slots;
+    slots.data = cacheData(3);
+    slots.capacity = 5;
+    const NodeAddress root{3, 0, 0};
+    require(slots.reserve({root}), "reserve exact height root");
+    slots.slots.at(root.key()).ready = true;
+    const int layer = slots.resident(root);
+    require(slots.resident({0, 0, 0}) == -1, "Missing height source must not resolve to a ready root");
+    ccstd::vector<NodeAddress> transition{root, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}};
+    require(slots.reserve(transition), "all-or-nothing height split reservation");
+    require(slots.resident(root) == layer && slots.slots.size() == 5, "Displayed height layer moved during preparation");
+    for (size_t i = 1; i < transition.size(); ++i) {
+        require(slots.resident(transition[i]) == -1, "Reservation was mistaken for uploaded data");
+    }
+    auto excess = transition;
+    excess.push_back({0, 0, 0});
+    require(!slots.reserve(excess) && slots.resident(root) == layer && slots.slots.size() == 5, "Capacity refusal modified live slots");
+    std::set<uint32_t> layers;
+    for (const auto &entry : slots.slots) {
+        layers.insert(entry.second.layer);
+    }
+    require(layers.size() == 5 && *layers.rbegin() < slots.capacity, "Reserved layers overlap or exceed capacity");
+    auto repeated = transition;
+    repeated.insert(repeated.end(), transition.begin(), transition.end());
+    require(slots.reserve(repeated) && slots.working.size() == 5, "Duplicate requests inflated the budget");
+    transition.erase(transition.begin());
+    require(slots.reserve(transition), "release retired parent");
+    for (const auto n : transition) {
+        slots.slots.at(n.key()).ready = true;
+    }
+    require(slots.resident(root) == -1, "Retired height binding survived");
+    // The released slot permits a later merge even though all four children
+    // remain protected until the replacement parent is uploaded.
+    transition.push_back(root);
+    require(slots.reserve(transition), "merge transition cannot make progress");
+    require(slots.resident(root) == -1, "Reallocated parent incorrectly inherited old ready state");
+    std::cout << "PASS: exact height slots, capacity, deduplication, readiness and merge headroom\n";
+}
+
+void testExactPageLifecycle() {
+    VirtualTexture pages;
+    require(pages.init(cacheData(3), 5), "cache init");
+    const VTPageAddress root{3, 0, 0}, fine{0, 0, 0};
+    require(pages.reserve({root}), "reserve root");
+    VTPageInputs inputs{};
+    pages.setInputs(pages.activeSlots()[0], inputs);
+    ccstd::vector<uint32_t> updates;
+    pages.collectUpdates(updates, 1);
+    pages.publish(updates);
+    const int rootSlot = pages.resolve(root);
+    require(rootSlot >= 0 && pages.resolve(fine) == -1, "Missing fine pages must NEVER resolve to a resident ancestor");
+    ccstd::vector<VTPageAddress> transition{root, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}};
+    require(pages.reserve(transition), "reserve parent and four children together");
+    for (const auto slot : pages.activeSlots()) {
+        if (pages.page(slot).state == VirtualTexture::State::DIRTY) {
+            pages.setInputs(slot, inputs);
         }
     }
-    return result;
+    for (int frame = 0; frame < 3; ++frame) {
+        pages.collectUpdates(updates, 1);
+        pages.publish(updates);
+        require(!pages.ready() && pages.resolve(root) == rootSlot, "Partial child completion must preserve the parent");
+    }
+    auto excess = transition;
+    excess.push_back(fine);
+    require(!pages.reserve(excess) && pages.resolve(root) == rootSlot && pages.activeSlots().size() == 5, "Failed admission must not alter the working set");
+    pages.collectUpdates(updates, 1);
+    pages.publish(updates);
+    require(pages.ready(), "All children complete");
+    transition.erase(transition.begin());
+    require(pages.reserve(transition), "commit children");
+    require(pages.resolve(root) == -1 && pages.resolve(fine) == -1, "Neither inactive pages nor ancestors satisfy an exact draw lookup");
+    pages.invalidate();
+    require(!pages.ready(), "invalidated composition must be rebuilt");
+    require(pages.resolve(transition[0]) >= 0, "Previously published pixels survive a pending refresh");
+    std::cout << "PASS: exact VT lookup, atomic admission, partial completion, refresh and capacity\n";
 }
 
-// Frozen pre-refactor oracle, independent of the production planner's helpers.
-inline float referenceAncestorPriority(float requiredPagePriority, uint32_t ancestorSteps) {
-    // Ancestors provide fallback, not additional visible coverage. Recomputing
-    // size/distance for them incorrectly promotes bigger, blurrier pages ahead
-    // of the fine page actually requested by the visible patch.
-    return std::ldexp(requiredPagePriority, -static_cast<int>(std::min(ancestorSteps, 27U)));
-}
-
-// Find a common ancestor bias whose view-wide coverage fits the reserved budget.
-// Sector roots need no dynamic slots and are omitted from this set.
-inline ccstd::unordered_set<uint64_t> referenceCoveragePages(
-    const ccstd::vector<ReferenceRequest> &requests, uint32_t rootLevel, size_t capacity) {
-    ccstd::unordered_set<uint64_t> coverage;
-    for (uint32_t bias = 0; bias <= rootLevel; ++bias) {
-        coverage.clear();
-        for (const auto &request : requests) {
-            if (!request.required) {
-                continue;
+// Independent raster oracle: full coverage, no overlaps, and 2:1 at EVERY cell
+// boundary (including all four sectors), rather than using production neighbors.
+void checkCut(const RenderSelection &selection, const LandscapeData &d) {
+    const uint32_t w = d.sectorsX << d.maxLevel, h = d.sectorsZ << d.maxLevel;
+    std::vector<int> cells(w * h, -1);
+    for (const auto key : selection.leaves()) {
+        const auto n = NodeAddress::fromKey(key);
+        for (uint32_t z = n.z << n.level; z < (n.z + 1) << n.level; ++z) {
+            for (uint32_t x = n.x << n.level; x < (n.x + 1) << n.level; ++x) {
+                require(cells[z * w + x] == -1, "Draw coverage overlaps");
+                cells[z * w + x] = static_cast<int>(n.level);
+                require(selection.at(x, z).key() == key, "Draw lookup disagrees with raster coverage");
             }
-            const auto &page = request.page;
-            const auto level = std::min(page.level + bias, rootLevel);
-            if (level == rootLevel) {
-                continue;
-            }
-            const auto shift = level - page.level;
-            coverage.insert(makeNodeKey(level, page.x >> shift, page.z >> shift));
         }
-        if (coverage.size() <= capacity) {
+    }
+    for (uint32_t z = 0; z < h; ++z) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const int level = cells[z * w + x];
+            require(level >= 0, "Draw coverage has a hole");
+            if (x) {
+                require(std::abs(level - cells[z * w + x - 1]) <= 1, "Unbalanced horizontal sector edge");
+            }
+            if (z) {
+                require(std::abs(level - cells[(z - 1) * w + x]) <= 1, "Unbalanced vertical sector edge");
+            }
+        }
+    }
+}
+
+// Independently reconstruct nested height tiles and compare both sides of every
+// stitched edge. Quantization is applied to stored samples before interpolation.
+double sourceHeight(const LandscapeData &d, NodeAddress geometry, double x, double z) {
+    const uint32_t level = std::max(geometry.level, d.minTileLevel), shift = level - geometry.level;
+    const double size = d.nodeSize(level), originX = (geometry.x >> shift) * size, originZ = (geometry.z >> shift) * size;
+    const double cells = d.tileResolution - 1;
+    const double gx = std::clamp((x - originX) / size * cells, 0.0, cells), gz = std::clamp((z - originZ) / size * cells, 0.0, cells);
+    const auto stored = [&](double ix, double iz) {
+        const double wx = originX + ix * size / cells, wz = originZ + iz * size / cells;
+        return std::round((0.5 + 0.2 * std::sin(wx * 2.7) + 0.2 * std::cos(wz * 3.1)) * 65535.0);
+    };
+    const double x0 = std::floor(gx), z0 = std::floor(gz), x1 = std::min(x0 + 1, cells), z1 = std::min(z0 + 1, cells);
+    const double tx = gx - x0, tz = gz - z0;
+    return ((1 - tx) * stored(x0, z0) + tx * stored(x1, z0)) * (1 - tz) + ((1 - tx) * stored(x0, z1) + tx * stored(x1, z1)) * tz;
+}
+
+void checkStitchedEdges(const RenderSelection &selection, const LandscapeData &d) {
+    ccstd::vector<QuadNode> nodes;
+    for (const auto key : selection.leaves()) {
+        const auto n = NodeAddress::fromKey(key);
+        nodes.push_back({n.level, n.x, n.z, 0, 1});
+    }
+    for (const auto &node : nodes) {
+        const auto n = node.address();
+        const double size = d.nodeSize(n.level), x = n.x * size, z = n.z * size, step = size / 16;
+        const uint8_t mask = selection.edgeMask(n);
+        for (uint32_t edge = 0; edge < 4; ++edge) {
+            if ((edge == 0 && x == 0) || (edge == 1 && x + size == d.worldWidth()) || (edge == 2 && z == 0) || (edge == 3 && z + size == d.worldDepth())) {
+                continue;
+            }
+            for (uint32_t j = 0; j <= 16; ++j) {
+                const double along = (mask & (1U << edge)) ? j - (j & 1) : j;
+                const double px = edge < 2 ? x + (edge == 1 ? size : 0) : x + along * step;
+                const double pz = edge < 2 ? z + along * step : z + (edge == 3 ? size : 0);
+                const double probeX = edge < 2 ? px + (edge == 0 ? -1 : 1) * 1e-5 : x + std::clamp(static_cast<double>(j), 0.001, 15.999) * step;
+                const double probeZ = edge < 2 ? z + std::clamp(static_cast<double>(j), 0.001, 15.999) * step : pz + (edge == 2 ? -1 : 1) * 1e-5;
+                bool found = false;
+                for (const auto &peer : nodes) {
+                    const double peerSize = d.nodeSize(peer.level), peerX = peer.ix * peerSize, peerZ = peer.iz * peerSize;
+                    if (probeX < peerX || probeX >= peerX + peerSize || probeZ < peerZ || probeZ >= peerZ + peerSize) {
+                        continue;
+                    }
+                    found = true;
+                    require(((mask & (1U << edge)) != 0) == (peer.level > n.level), "Edge mask does not describe the actual neighbor");
+                    require(std::abs(sourceHeight(d, n, px, pz) - sourceHeight(d, peer.address(), px, pz)) < 1e-6, "Exact height sources disagree at a stitched vertex");
+                    const double coordinate = edge < 2 ? (pz - peerZ) : (px - peerX);
+                    const double lattice = coordinate / (peerSize / 16);
+                    require(std::abs(lattice - std::round(lattice)) < 1e-6, "Fine edge did not collapse onto coarse lattice");
+                    break;
+                }
+                require(found, "Shared edge has no neighbor");
+            }
+        }
+    }
+}
+
+void testLocalTransitions() {
+    auto d = cacheData(4, 2, 2);
+    d.minTileLevel = 2;
+    RenderSelection selection;
+    selection.init(d);
+    TilePagePool::Reservations heights;
+    heights.data = d;
+    heights.capacity = 64;
+    VirtualTexture pages;
+    require(pages.init(d, 64), "transaction pages init");
+    RenderSelection::Change pending;
+    std::mt19937 random(731);
+    size_t commits = 0, refused = 0;
+    for (uint32_t frame = 0; frame < 1600; ++frame) {
+        const uint32_t quadrant = frame / 200;
+        const uint32_t x = quadrant & 1 ? 16 : 15, z = quadrant & 2 ? 16 : 15;
+        selection.target({{0, x, z, 0, 1}});
+        auto resources = [&](const RenderSelection::Change &change) {
+            ccstd::vector<NodeAddress> result;
+            for (const auto key : selection.leaves()) {
+                auto n = NodeAddress::fromKey(key);
+                result.push_back(n.ancestor(std::max(n.level, d.minTileLevel)));
+            }
+            for (auto n : change.added) {
+                result.push_back(n.ancestor(std::max(n.level, d.minTileLevel)));
+            }
+            return result;
+        };
+        auto material = [&](const RenderSelection::Change &change) {
+            ccstd::vector<VTPageAddress> result;
+            for (const auto key : selection.leaves()) {
+                const auto n = NodeAddress::fromKey(key);
+                result.push_back({n.level, n.x, n.z});
+            }
+            for (auto n : change.added) {
+                result.push_back({n.level, n.x, n.z});
+            }
+            return result;
+        };
+        if (pending.empty()) {
+            for (const auto &request : selection.requests()) {
+                RenderSelection::Change change;
+                if (!selection.plan(request, change)) {
+                    continue;
+                }
+                if (!heights.canReserve(resources(change)) || !pages.canReserve(material(change)) || frame % 19 == 0) {
+                    ++refused;
+                    continue;
+                }
+                pending = std::move(change);
+                break;
+            }
+        }
+        const auto before = selection.leaves();
+        require(heights.reserve(resources(pending)) && pages.reserve(material(pending)), "Admitted local resources did not fit");
+        for (auto &entry : heights.slots) {
+            if (random() % 3) {
+                entry.second.ready = true;
+            }
+        }
+        for (const auto slot : pages.activeSlots()) {
+            if (pages.page(slot).state == VirtualTexture::State::DIRTY && random() % 3) {
+                pages.setInputs(slot, {});
+            }
+        }
+        ccstd::vector<uint32_t> updates;
+        pages.collectUpdates(updates, 2);
+        pages.publish(updates);
+        const bool ready = std::all_of(heights.working.begin(), heights.working.end(), [&](auto n) { return heights.resident(n) >= 0; });
+        if (ready && pages.ready() && !pending.empty()) {
+            selection.commit(pending);
+            // Verify the production commit changed precisely the requested set.
+            auto expected = before;
+            for (auto n : pending.removed) {
+                expected.erase(n.key());
+            }
+            for (auto n : pending.added) {
+                expected.insert(n.key());
+            }
+            require(selection.leaves() == expected, "Commit touched nodes outside the local transaction");
+            pending = {};
+            ++commits;
+        } else {
+            require(selection.leaves() == before, "Pending preparation changed displayed geometry");
+        }
+        checkCut(selection, d);
+        if (frame % 16 == 0) {
+            checkStitchedEdges(selection, d);
+        }
+        if (frame > 15) {
+            for (const auto key : selection.leaves()) {
+                const auto n = NodeAddress::fromKey(key);
+                require(heights.resident(n.ancestor(std::max(n.level, d.minTileLevel))) >= 0 &&
+                            pages.resolve({n.level, n.x, n.z}) >= 0,
+                        "Committed geometry lost an exact source/page");
+            }
+        }
+    }
+    require(commits > 20 && refused > 0, "Insufficient local transition coverage");
+    std::cout << "PASS: 1600 streaming frames, local deltas, cross-sector balance, stitched heights and delayed exact resources\n";
+}
+
+void testIndexedDemand() {
+    const auto d = cacheData(5, 2, 2);
+    RenderSelection selection;
+    selection.init(d);
+    // Construct a uniform coarse cut, then compare indexed requests against a
+    // brute-force spatial oracle with thousands of targets (including duplicates).
+    for (;;) {
+        bool changed = false;
+        for (auto key : selection.leaves()) {
+            const auto n = NodeAddress::fromKey(key);
+            if (n.level <= 2) {
+                continue;
+            }
+            RenderSelection::Change change;
+            require(selection.plan({n, true, 1}, change), "Uniform subdivision");
+            selection.commit(change);
+            changed = true;
+            break;
+        }
+        if (!changed) {
             break;
         }
     }
-    return coverage;
-}
-
-inline void referenceBudget(ccstd::vector<ReferenceRequest> &requests, uint32_t rootLevel, size_t capacity) {
-    if (capacity == 0U) {
-        requests.clear();
-        return;
+    ccstd::vector<QuadNode> target;
+    std::mt19937 random(53);
+    for (uint32_t i = 0; i < 4096; ++i) {
+        target.push_back({0, random() % 48U, random() % 48U, 0, 1});
     }
-    if (requests.size() > capacity) {
-        // Detail-first truncation alone can drop EVERY ancestor of a visible
-        // patch. Its only remaining fallback is then a whole-sector root page.
-        // Reserve a bounded, view-wide coverage set before spending on detail.
-        // All non-root ancestors already exist in the input request set.
-        const size_t coverageBudget = std::max(size_t{1}, capacity / 2U);
-        const auto coverage = referenceCoveragePages(requests, rootLevel, coverageBudget);
-        float maximumPriority = 0.0F;
-        for (const auto &request : requests) {
-            maximumPriority = std::max(maximumPriority, request.priority);
-        }
-        for (auto &request : requests) {
-            // Also compose coverage before refinement under the per-frame
-            // update budget, so movement does not leave lasting root fallbacks.
-            if (coverage.count(request.page.key()) != 0U) {
-                request.priority += maximumPriority + 1.0F;
-            }
+    selection.target(target);
+    ccstd::unordered_set<uint64_t> indexed;
+    for (const auto &request : selection.requests()) {
+        if (request.split) {
+            indexed.insert(request.node.key());
         }
     }
-    std::sort(requests.begin(), requests.end(), [](const auto &a, const auto &b) {
-        return a.priority != b.priority ? a.priority > b.priority : a.page.key() < b.page.key();
-    });
-    if (requests.size() > capacity) {
-        requests.resize(capacity);
+    for (auto key : selection.leaves()) {
+        const auto n = NodeAddress::fromKey(key);
+        const bool expected = std::any_of(target.begin(), target.end(), [&](const QuadNode &t) {
+            return t.level < n.level && t.address().ancestor(n.level).key() == key;
+        });
+        require((indexed.count(key) != 0) == expected, "Indexed demand differs from spatial oracle");
     }
+    // Actual visibility traverses committed leaves, independently of targets.
+    ccstd::unordered_set<uint64_t> coverage;
+    selection.cull([](NodeAddress) { return true; }, [&](NodeAddress n) { require(coverage.insert(n.key()).second, "Pass coverage overlaps"); });
+    require(coverage == selection.leaves(), "Pass selection misses committed coverage");
+    std::cout << "PASS: indexed 4096-target demand and committed pass coverage\n";
 }
 
-
-// Reference the pre-refactor request loop, including deduplication, priority
-// promotion and root order. Exercise one reused planner across changing frames.
-void testRequestPlanEquivalence() {
-    std::mt19937 generator(0x51A7U);
-    const auto random = [&generator]() -> uint32_t { return generator(); };
-    VirtualTexture cache;
-    for (uint32_t frame = 0; frame < 400; ++frame) {
-        const uint32_t root = 1U + random() % 11U;
-        const uint32_t sectorsX = frame % 9U == 0 ? 16U : 1U + random() % 4U;
-        const uint32_t sectorsZ = frame % 9U == 0 ? 16U : 1U + random() % 4U;
-        const size_t roots = static_cast<size_t>(sectorsX) * sectorsZ;
-        ccstd::unordered_map<uint64_t, ReferenceRequest> unique;
-        require(cache.init(cacheData(root, sectorsX, sectorsZ)), "Cache initialization failed");
-        cache.beginRequests();
-        const uint32_t count = frame % 7U == 0 ? 0U : random() % 1200U;
-        for (uint32_t i = 0; i < count; ++i) {
-            const uint32_t level = random() % (root + 1U);
-            const VTPageAddress visible{level, random() % (sectorsX << (root - level)),
-                                       random() % (sectorsZ << (root - level))};
-            // Include equal/zero priorities and duplicates with different weights.
-            for (float weight : {static_cast<float>(random() % 32U) / 8.0F, 0.5F}) {
-                cache.request(visible, weight);
-                auto page = visible;
-                for (; page.level < root; ++page.level, page.x >>= 1U, page.z >>= 1U) {
-                    const float priority = referenceAncestorPriority(weight, page.level - visible.level);
-                    const uint64_t key = makeNodeKey(page.level, page.x, page.z);
-                    auto inserted = unique.emplace(key, ReferenceRequest{page, priority});
-                    inserted.first->second.priority = std::max(inserted.first->second.priority, priority);
-                    inserted.first->second.required |= page.level == visible.level;
-                }
+void testCommittedVisibility() {
+    const auto d = cacheData(5, 2, 2);
+    RenderSelection selection;
+    selection.init(d);
+    // A coarse mesh bridges a small valley: its bounds reach Y=10, whereas
+    // desired fine metadata in the small view region is flat at Y=0.
+    // The frustum-like box at Y=[1,4] rejects the fine target, not the coarse draw.
+    const auto visible = [&](double x0, double z0, double x1, double z1) {
+        ccstd::unordered_set<uint64_t> result;
+        selection.cull([&](NodeAddress n) {
+            const double size = d.nodeSize(n.level);
+            const double lowX = n.x * size, lowZ = n.z * size;
+            const double maxY = n.level == 0 ? 0.0 : 10.0;
+            return lowX < x1 && lowX + size > x0 && lowZ < z1 && lowZ + size > z0 && maxY >= 1.0; }, [&](NodeAddress n) { require(result.insert(n.key()).second, "Duplicate visible leaf"); });
+        return result;
+    };
+    selection.target({}); // The distance/target traversal selected nothing.
+    const auto coarse = visible(0.25, 0.25, 0.75, 0.75);
+    require(coarse.size() == 1 && coarse.count(NodeAddress{5, 0, 0}.key()),
+            "An empty fine selection hid visible coarse geometry");
+    selection.target({{0, 0, 0, 0, 0}});
+    RenderSelection::Change pending;
+    const auto requests = selection.requests();
+    require(!requests.empty() && selection.plan(requests.front(), pending), "Visibility transition setup");
+    require(visible(0.25, 0.25, 0.75, 0.75) == coarse,
+            "Unpublished refinement changed pass visibility");
+    // Commit refinement until the actual draw reaches the flat fine region.
+    for (uint32_t round = 0; round < 100; ++round) {
+        bool changed = false;
+        for (const auto &request : selection.requests()) {
+            RenderSelection::Change change;
+            if (selection.plan(request, change)) {
+                selection.commit(change);
+                changed = true;
+                break;
             }
         }
-        ccstd::vector<ReferenceRequest> expected;
-        for (const auto &entry : unique) {
-            expected.push_back(entry.second);
-        }
-        referenceBudget(expected, root, config::VT_PAGE_COUNT - roots);
-        cache.endRequests();
-        const auto actual = activeRequests(cache, root);
-        require(actual.size() == expected.size(), "Admission count changed");
-        require(cache.activeSlots().size() == actual.size() + roots, "All roots must remain active");
-        require(cache.activeSlots().size() <= config::VT_PAGE_COUNT, "Physical capacity exceeded");
-        for (size_t i = 0; i < expected.size(); ++i) {
-            require(actual[i].page.key() == expected[i].page.key(), "Coverage/refinement admission order changed");
-        }
-    }
-    std::cout << "PASS: request planner matches the original loop across 400 changing frames\n";
-}
-
-void testNearGroundCoverage() {
-    constexpr float sectorSize = 2048.0F;
-    const VTPageLayout pageLayout(sectorSize);
-    const auto root = pageLayout.rootLevel();
-    constexpr size_t capacity = config::VT_PAGE_COUNT - 4U;
-    // Near-ground 64 x 64 m view with meter cells. Triplanar density increases
-    // demand beyond the physical cache; every visible cell still needs coverage.
-    for (float density : {1.0F, 4.0F}) {
-        std::map<uint64_t, ReferenceRequest> unique;
-        for (uint32_t z = 0; z < 64; ++z) {
-            for (uint32_t x = 0; x < 64; ++x) {
-                const float dx = x - 31.5F, dz = z - 31.5F;
-                const float distance = std::sqrt(dx * dx + dz * dz + 1.7F * 1.7F);
-                const auto desired = pageLayout.levelForDistance(distance / density);
-                const float priority = density / std::max(distance, 1.0F);
-                for (auto level = desired; level < root; ++level) {
-                    const VTPageAddress page{level, x >> level, z >> level};
-                    const auto key = makeNodeKey(level, page.x, page.z);
-                    auto &request = unique[key];
-                    request.page = page;
-                    request.priority = std::max(request.priority, referenceAncestorPriority(priority, level - desired));
-                    request.required |= level == desired;
-                }
-            }
-        }
-        ccstd::vector<ReferenceRequest> requests, required;
-        VirtualTexture cache;
-        require(cache.init(cacheData(root, 2, 2)), "Cache initialization failed");
-        cache.beginRequests();
-        for (const auto &entry : unique) {
-            if (entry.second.required) {
-                cache.request(entry.second.page, entry.second.priority);
-            }
-        }
-        for (const auto &entry : unique) {
-            requests.push_back(entry.second);
-            if (entry.second.required) {
-                required.push_back(entry.second);
-            }
-        }
-        const auto maximumGap = [&required, root](const ccstd::vector<ReferenceRequest> &resident) {
-            ccstd::unordered_set<uint64_t> keys;
-            for (const auto &r : resident) {
-                keys.insert(r.page.key());
-            }
-            uint32_t worst = 0;
-            for (const auto &r : required) {
-                auto page = r.page;
-                while (page.level < root && keys.count(makeNodeKey(page.level, page.x, page.z)) == 0U) {
-                    ++page.level;
-                    page.x >>= 1U;
-                    page.z >>= 1U;
-                }
-                worst = std::max(worst, page.level - r.page.level);
-            }
-            return worst;
-        };
-        if (density > 1.0F) {
-            auto truncated = requests;
-            std::sort(truncated.begin(), truncated.end(), [](const auto &a, const auto &b) {
-                return a.priority != b.priority ? a.priority > b.priority : a.page.key() < b.page.key();
-            });
-            truncated.resize(capacity);
-            require(maximumGap(truncated) >= 8U, "Regression fixture must expose root-only fallback in old truncation");
-        }
-        cache.endRequests();
-        requests = activeRequests(cache, root);
-        require(requests.size() <= capacity, "Coverage must not enlarge the physical cache");
-        require(maximumGap(requests) <= 2U, "Near-ground view lost intermediate coverage under cache pressure");
-        if (density == 1.0F) {
-            require(maximumGap(requests) == 0U, "A fitting working set must retain full detail");
-        } else {
-            auto initialBatch = requests;
-            initialBatch.resize(capacity / 2U);
-            require(maximumGap(initialBatch) <= 2U, "Coverage must be composed before optional detail pages");
+        if (!changed) {
+            break;
         }
     }
-    std::cout << "PASS: near-ground cache overflow retains view-wide coverage and prioritizes its publication\n";
+    require(selection.at(0, 0).level == 0 && visible(0.25, 0.25, 0.75, 0.75).empty(),
+            "Culling must follow the committed geometry's height bounds");
+    // Independent shadow/camera frusta must still find a different sector even
+    // when it is absent from the target list. Rejected subtrees stop at the root.
+    const auto shadow = visible(32.25, 32.25, 32.75, 32.75);
+    require(shadow.size() == 1 && shadow.count(NodeAddress{5, 1, 1}.key()),
+            "Pass visibility leaked the main camera's target selection");
+    uint32_t visited = 0, emitted = 0;
+    selection.cull([&](NodeAddress) { ++visited; return false; }, [&](NodeAddress) { ++emitted; });
+    require(visited == d.sectorsX * d.sectorsZ && emitted == 0,
+            "Invisible sectors must be pruned without scanning their leaves");
+    std::cout << "PASS: actual-cut culling, empty targets, pending refinement, independent passes and subtree pruning\n";
 }
 
-VTPageInputs pageInputs(const VirtualTexture &cache, uint32_t slot, const LandscapeData &data, float version = 0) {
-    const auto address = cache.page(slot).address;
-    const VTPageLayout layout(data.sectorSize);
-    const auto region = data.regionAtGrid(layout.pageOrigin(address), layout.pageSize(address.level));
-    VTPageInputs inputs;
-    inputs.region = cc::Vec4{region.x, region.z, region.size, 0};
-    inputs.splatSource = cc::Vec4{region.x, region.z, region.size, version};
-    inputs.normalSources.fill(inputs.splatSource);
-    return inputs;
-}
-
-void resolveInputs(VirtualTexture &cache, const LandscapeData &data) {
-    for (uint32_t slot : cache.activeSlots()) {
-        cache.setInputs(slot, pageInputs(cache, slot, data));
-    }
-}
-
-void testPageLifecycle() {
-    const auto data = cacheData(3);
-    VirtualTexture cache;
-    require(!cache.init(data, 0), "Zero capacity must fail");
-    require(!cache.init(cacheData(3, 2, 2), 3), "Roots must fit before initialization");
-    require(cache.init(data, 8), "Cache initialization failed");
-    const VTPageAddress fine{0, 1, 1};
-    ccstd::vector<uint32_t> updates;
-    require(!cache.ready() && cache.resolve(fine) < 0, "Unbaked roots must not be sampleable");
-    cache.collectUpdates(updates, 8);
-    require(updates.empty(), "Unresolved roots must not compose");
-    resolveInputs(cache, data);
-    cache.collectUpdates(updates, 0);
-    require(updates.size() == 1 && updates[0] == 0, "Root publication must bypass detail budget");
-    cache.publish(updates);
-    require(cache.ready() && cache.resolve(fine) == 0, "Root fallback missing");
-
-    cache.beginRequests();
-    cache.request(fine, 1);
-    cache.endRequests();
-    require(cache.activeSlots().size() == 4, "Expected root, fine page and two ancestors");
-    cache.collectUpdates(updates, 8);
-    require(updates.empty(), "Admission must not reuse unresolved source layers");
-    require(cache.resolve(fine) == 0, "Dirty fine page must fall back to ready root");
-    resolveInputs(cache, data);
-    cache.collectUpdates(updates, 1);
-    require(updates.size() == 1 && cache.page(updates[0]).address.key() == fine.key(),
-            "Direct demand must precede optional ancestors");
-    const int fineSlot = static_cast<int>(updates[0]);
-    const auto revision = cache.revision();
-    cache.publish(updates);
-    require(cache.resolve(fine) == fineSlot && cache.revision() > revision,
-            "Fine mapping must be available immediately after publication");
-
-    // Ready content survives input re-resolution only when the actual inputs match.
-    cache.setInputs(fineSlot, pageInputs(cache, fineSlot, data));
-    require(cache.resolve(fine) == fineSlot, "Unchanged inputs must preserve ready content");
-    auto changed = pageInputs(cache, fineSlot, data);
-    changed.normalSources[15].w += 1;
-    cache.setInputs(fineSlot, changed);
-    require(cache.resolve(fine) == 0, "Changed normal source must invalidate fine content");
-    cache.collectUpdates(updates, 0);
-    require(updates.empty(), "Zero detail budget must defer fine recomposition");
-
-    cache.invalidate();
-    require(cache.resolve(fine) < 0, "Invalidated roots cannot be bound before rendering");
-    cache.collectUpdates(updates, 0);
-    require(updates.size() == 1 && updates[0] == 0, "Dirty roots must still fit zero detail budget");
-    cache.publish(updates);
-    cache.collectUpdates(updates, 8);
-    cache.publish(updates);
-    require(cache.ready(), "All resolved pages should be ready after full publication");
-
-    // End a frame without requests: cached but inactive fine pages are not mappings.
-    cache.beginRequests();
-    cache.endRequests();
-    require(cache.activeSlots().size() == 1 && cache.resolve(fine) == 0,
-            "Inactive pages must not leak into current mappings");
-    cache.beginRequests();
-    cache.request({99, 0, 0}, 1);
-    cache.request({0, 999, 0}, 1);
-    cache.request(fine, std::numeric_limits<float>::infinity());
-    cache.endRequests();
-    require(cache.activeSlots().size() == 1, "Invalid demands must not enter the cache");
-
-    require(cache.init(data, 1), "Root-only capacity must be supported");
-    cache.beginRequests();
-    cache.request(fine, 1);
-    cache.endRequests();
-    resolveInputs(cache, data);
-    cache.collectUpdates(updates, 0);
-    cache.publish(updates);
-    require(cache.activeSlots().size() == 1 && cache.resolve(fine) == 0,
-            "Root-only cache must retain complete fallback coverage");
-    std::cout << "PASS: real VT lifecycle, unresolved inputs, invalidation, publication and root-only capacity\n";
-}
-
-void testCacheStreaming() {
-    constexpr uint32_t ROOT = 5, CAPACITY = 32, ROOTS = 4;
-    const auto data = cacheData(ROOT, 2, 2);
-    VirtualTexture cache;
-    require(cache.init(data, CAPACITY), "Cache initialization failed");
-    std::mt19937 random(0xCA5E123U);
-    ccstd::vector<uint32_t> updates;
-    for (uint32_t frame = 0; frame < 1200; ++frame) {
-        ccstd::vector<VTPageAddress> demands;
-        cache.beginRequests();
-        for (uint32_t i = 0, count = random() % 100; i < count; ++i) {
-            const uint32_t level = random() % ROOT;
-            const uint32_t side = 2U << (ROOT - level);
-            const VTPageAddress page{level, static_cast<uint32_t>(random() % side), static_cast<uint32_t>(random() % side)};
-            demands.push_back(page);
-            cache.request(page, static_cast<float>(i % 7));
-        }
-        cache.endRequests();
-        require(cache.activeSlots().size() <= CAPACITY, "Cache exceeded its physical slots");
-        ccstd::unordered_set<uint32_t> active;
-        ccstd::unordered_map<uint64_t, uint32_t> admitted;
-        for (uint32_t slot : cache.activeSlots()) {
-            require(slot < CAPACITY && active.insert(slot).second, "Duplicate or invalid active slot");
-            const auto &p = cache.page(slot);
-            require(p.state != VirtualTexture::State::EMPTY && admitted.emplace(p.address.key(), slot).second,
-                    "Duplicate page identity or empty active page");
-            if (slot < ROOTS) {
-                require(p.address.level == ROOT && p.address.x == slot % 2 && p.address.z == slot / 2,
-                        "Permanent root slot was evicted");
-            }
-            // Intentionally leave some fine inputs unresolved to model source preparation.
-            if (slot < ROOTS || random() % 3 != 0) {
-                cache.setInputs(slot, pageInputs(cache, slot, data, static_cast<float>(frame / 17)));
-            }
-        }
-        if (frame % 23 == 0) {
-            cache.invalidate();
-        }
-        const auto budget = frame % 4;
-        cache.collectUpdates(updates, budget);
-        uint32_t details = 0;
-        for (uint32_t slot : updates) {
-            const auto &p = cache.page(slot);
-            require(active.count(slot) && p.inputsResolved && p.state == VirtualTexture::State::DIRTY,
-                    "Scheduled stale, inactive or ready page");
-            if (slot >= ROOTS) {
-                ++details;
-            }
-        }
-        require(details <= budget, "Composition exceeded detail budget");
-        cache.publish(updates);
-        for (auto wanted : demands) {
-            int expected = -1;
-            for (auto p = wanted; p.level <= ROOT; p = p.parent()) {
-                const auto it = admitted.find(p.key());
-                if (it != admitted.end() && cache.page(it->second).state == VirtualTexture::State::READY) {
-                    expected = static_cast<int>(it->second);
-                    break;
-                }
-            }
-            require(expected >= 0 && cache.resolve(wanted) == expected,
-                    "Mapping is not the finest active ready ancestor");
-        }
-
-        // Request order changes must not let an early allocation evict a later hit.
-        const auto previous = admitted;
-        cache.beginRequests();
-        for (size_t i = demands.size(); i > 0; --i) {
-            cache.request(demands[i - 1], static_cast<float>((i - 1) % 7));
-        }
-        cache.endRequests();
-        require(previous.size() == cache.activeSlots().size(), "Demand permutation changed admission");
-        for (uint32_t slot : cache.activeSlots()) {
-            const auto it = previous.find(cache.page(slot).address.key());
-            require(it != previous.end() && it->second == slot, "Admitted page was evicted during ordered allocation");
-        }
-    }
-    std::cout << "PASS: 1200 streaming frames with real eviction, capacity, publication and mapping checks\n";
+void testStitchedPageBounds() {
+    const VTPageLayout layout(4096);
+    // Near-camera patch at x=1, z=0: the top edge can snap x=1 to x=0 even
+    // before the old distance morph threshold. Reproduce the former undersized page.
+    const auto unsafe = layout.coveringPage(0, {{1, 0}, {2, 1}});
+    require(unsafe.level == 0 && unsafe.x == 1, "Near-edge regression setup");
+    const auto safe = layout.coveringPatch(0, {0, 0}, 1, 1, 0, 1);
+    require(safe.level == 1 && safe.x == 0 && safe.z == 0,
+            "Near-camera stitching escaped its explicitly planned VT page");
+    const auto vertical = layout.coveringPatch(0, {4096, 4096}, 1, 0, 1, 1);
+    require(vertical.level == 1 && vertical.x == 2048 && vertical.z == 2048,
+            "Vertical/cross-sector stitch coverage differs from horizontal coverage");
+    std::cout << "PASS: near-camera VT coverage reserves possible neighbor stitching\n";
 }
 
 void testSyncCache() {
@@ -539,7 +540,10 @@ void testCoordinateLayouts() {
     require(NodeRangeLayout{}.globalNodeIndex(0, 0, 0) == invalid, "Empty layout must reject addresses");
     for (uint32_t root = 0; root < config::MAX_LOD_LEVELS; ++root) {
         LandscapeData data;
-        data.sectorsX = 2; data.sectorsZ = 3; data.maxLevel = root; data.sectorSize = 1000;
+        data.sectorsX = 2;
+        data.sectorsZ = 3;
+        data.maxLevel = root;
+        data.sectorSize = 1000;
         const NodeRangeLayout layout(data);
         size_t expected = 0;
         // Independently enumerate the serialized storage order. Every address
@@ -602,10 +606,12 @@ void testAtlasFilterFootprint() {
     std::uniform_real_distribution<float> uv(0.0F, 1.0F);
     std::uniform_real_distribution<float> direction(-1.0F, 1.0F);
     // Mirror the shader in base-level texels. Include exact edges/corners and
-    // huge gradients caused by grazing views or a coarse resident fallback.
+    // huge gradients caused by grazing views or coarse material precision.
     for (uint32_t probe = 0; probe < 20000; ++probe) {
-        const float u = probe % 4 == 0 ? 0.0F : probe % 4 == 1 ? 1.0F : uv(random);
-        const float v = probe % 5 == 0 ? 0.0F : probe % 5 == 1 ? 1.0F : uv(random);
+        const float u = probe % 4 == 0 ? 0.0F : probe % 4 == 1 ? 1.0F
+                                                               : uv(random);
+        const float v = probe % 5 == 0 ? 0.0F : probe % 5 == 1 ? 1.0F
+                                                               : uv(random);
         const float magnitude = std::ldexp(1.0F, static_cast<int>(probe % 17) - 4);
         const float dxU = direction(random) * magnitude, dxV = direction(random) * magnitude;
         const float dyU = direction(random) * magnitude, dyV = direction(random) * magnitude;
@@ -614,7 +620,7 @@ void testAtlasFilterFootprint() {
         const float spanU = std::abs(dxU) + std::abs(dyU);
         const float spanV = std::abs(dxV) + std::abs(dyV);
         const float scale = std::min({1.0F, 2.0F * std::max(roomU, 0.0F) / std::max(spanU, 1e-6F),
-                                     2.0F * std::max(roomV, 0.0F) / std::max(spanV, 1e-6F)});
+                                      2.0F * std::max(roomV, 0.0F) / std::max(spanV, 1e-6F)});
         require(std::isfinite(scale) && scale > 0.0F && scale <= 1.0F, "Invalid atlas gradient scale");
         if (spanU <= 2.0F * roomU && spanV <= 2.0F * roomV) {
             require(scale == 1.0F, "Safe footprints must retain their original gradients");
@@ -625,31 +631,88 @@ void testAtlasFilterFootprint() {
             const float extentU = spanU * scale * 0.5F + support;
             const float extentV = spanV * scale * 0.5F + support;
             require(centerU - extentU >= -1e-4F && centerU + extentU <= slot + 1e-4F &&
-                    centerV - extentV >= -1e-4F && centerV + extentV <= slot + 1e-4F,
+                        centerV - extentV >= -1e-4F && centerV + extentV <= slot + 1e-4F,
                     "Filter footprint plus mip support escaped the physical VT slot");
         }
     }
     std::cout << "PASS: 20000 atlas filter footprints across all mips\n";
 }
 
+void testFrameStreamingBudget() {
+    LandscapePagingTestAccess::StreamingBudget budget;
+    VirtualTexture pages;
+    require(pages.init(cacheData(3), 16), "streaming budget cache init");
+    require(budget.begin(42, 100.0), "first sync must start a frame budget");
+    ccstd::vector<VTPageAddress> active;
+    ccstd::vector<uint32_t> updates;
+    uint32_t composed = 0, committed = 0;
+    // Two small transactions finish in one frame. The third stays pending
+    // after consuming exactly the remaining pages, preserving earlier bindings.
+    for (uint32_t count : {3U, 3U, 4U}) {
+        require(budget.nextStep(100.5), "ready transactions must share one frame");
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto index = static_cast<uint32_t>(active.size());
+            active.push_back({0, index % 8, index / 8});
+        }
+        require(pages.reserve(active), "transaction reservation failed");
+        for (const auto slot : pages.activeSlots()) {
+            if (pages.page(slot).state == VirtualTexture::State::DIRTY) {
+                pages.setInputs(slot, VTPageInputs{});
+            }
+        }
+        pages.collectUpdates(updates, budget.pages);
+        budget.pages -= static_cast<uint32_t>(updates.size());
+        composed += static_cast<uint32_t>(updates.size());
+        pages.publish(updates);
+        committed += pages.ready();
+    }
+    require(composed == 8 && committed == 2 && !pages.ready(), "transactions exceeded the shared eight-page budget");
+    require(pages.resolve(active.front()) >= 0 && pages.resolve(active.back()) == -1,
+            "partial composition damaged old bindings or published unfinished pages");
+    budget.attempts -= 7;
+    require(!budget.begin(42, 101.0) && budget.pages == 0 && budget.attempts == config::STREAMING_ADMISSION_BUDGET - 7,
+            "another camera replenished the same frame's budgets");
+    pages.collectUpdates(updates, budget.pages);
+    require(updates.empty(), "zero remaining budget still composed pages");
+    require(budget.begin(43, 200.0) && budget.nextStep(200.5), "next frame must resume pending work");
+    pages.collectUpdates(updates, budget.pages);
+    budget.pages -= static_cast<uint32_t>(updates.size());
+    pages.publish(updates);
+    require(updates.size() == 2 && pages.ready() && budget.pages == 6, "pending transaction did not resume exactly");
+    require(!budget.nextStep(202.0), "time slice expiration must stop further transactions");
+    require(!budget.begin(43, 203.0) && !budget.nextStep(203.0), "same-frame sync bypassed the deadline");
+    require(budget.begin(44, 300.0), "new frame must reset the step budget");
+    budget.pages = 0;
+    for (uint32_t i = 0; i < config::STREAMING_STEP_BUDGET; ++i) {
+        require(budget.nextStep(300.5), "cached transactions must proceed without new page composition");
+    }
+    require(!budget.nextStep(300.5), "cached transactions bypassed the step limit");
+    require(budget.begin(45, 400.0) && budget.nextStep(403.0) && !budget.nextStep(403.0),
+            "an expensive upload/selection must allow one progress step, not unbounded work");
+    std::cout << "PASS: shared frame budget, multiple commits, partial composition, pass reuse and time/step limits\n";
+}
+
 int main() {
+    testHeightReservations();
+    testExactPageLifecycle();
+    testLocalTransitions();
+    testIndexedDemand();
+    testCommittedVisibility();
+    testStitchedPageBounds();
+    testSyncCache();
     testAtlasFilterFootprint();
     testCoordinateLayouts();
     testPassResourceSelection();
-    testRequestPlanEquivalence();
-    testNearGroundCoverage();
-    testPageLifecycle();
-    testCacheStreaming();
-    testSyncCache();
+    testFrameStreamingBudget();
     constexpr float sectorSize = 4096.0F;
     const VTPageLayout pageLayout(sectorSize);
     const uint32_t root = pageLayout.rootLevel();
     require(root == 12, "VT must have meter pages even when geometry has only nine LODs");
     require(pageLayout.pageSize(0) == 1.0F, "Finest VT page must still cover one meter");
-    require(config::VT_PAGE_INTERIOR / pageLayout.pageSize(0) == 512.0F, "Finest VT density must be 512 texels/m");
-    require(config::VT_ATLAS_SIZE == 8448 && config::VT_PAGE_COUNT == 256, "Double atlas resolution without losing slots");
-    require(config::VT_PAGE_UPDATE_BUDGET * config::VT_PAGE_RES * config::VT_PAGE_RES == 8U * 264U * 264U,
-            "Doubling page resolution must preserve the per-frame composition pixel budget");
+    require(config::VT_PAGE_INTERIOR / pageLayout.pageSize(0) == 256.0F, "Finest VT density must be 256 texels/m");
+    require(config::VT_ATLAS_SIZE == 4352 && config::VT_PAGE_COUNT == 256, "Smaller pages must retain all 256 physical slots");
+    require(config::VT_PAGE_UPDATE_BUDGET * config::VT_PAGE_RES * config::VT_PAGE_RES == 8U * 272U * 272U,
+            "Eight 256-texel pages must retain eight-texel filtering gutters");
     for (uint32_t mip = 0; mip < config::VT_MIP_LEVELS; ++mip) {
         const uint32_t interior = config::VT_PAGE_INTERIOR >> mip;
         const uint32_t border = config::VT_PAGE_BORDER >> mip;
@@ -657,7 +720,7 @@ int main() {
         require(interior + 2U * border == slot && border >= 1U, "VT mips must retain complete gutters");
         require(slot * config::VT_PAGES_PER_SIDE == (config::VT_ATLAS_SIZE >> mip), "Mip slots must exactly tile the atlas");
     }
-    require(pageLayout.pageSize(root) == sectorSize, "Root fallback must cover the sector");
+    require(pageLayout.pageSize(root) == sectorSize, "Root page must cover the sector");
     require(pageLayout.levelForDistance(1.5F) == 0, "Near view must request maximum material precision");
     require(pageLayout.levelForDistance(8.0F) == 2, "Material precision must fall independently with distance");
 
@@ -689,26 +752,6 @@ int main() {
     require(oldCliffLevel == newCliffLevel + 2, "Distant narrow wall must retain two extra levels");
     require(cliffDensityScale(0, 512, cliffDensityScale(0, 16)) == 1, "Flat hierarchy must not request extra pages");
 
-    // Within the optional detail budget, direct requests outrank redundant
-    // ancestors. The separate coverage test above validates cache truncation.
-    struct PriorityRequest { float priority; bool direct; };
-    ccstd::vector<PriorityRequest> candidates;
-    constexpr size_t capacity = config::VT_PAGE_COUNT - 4;
-    for (size_t i = 0; i < capacity; ++i) {
-        candidates.push_back({referenceAncestorPriority(1.0F, 0), true});
-    }
-    for (uint32_t ancestor = 1; ancestor <= 8; ++ancestor) {
-        candidates.push_back({referenceAncestorPriority(1.0F, ancestor), false});
-        require(referenceAncestorPriority(1.0F, ancestor) < referenceAncestorPriority(1.0F, ancestor - 1),
-                "Coarser fallback must not inflate visible coverage priority");
-    }
-    std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) { return a.priority > b.priority; });
-    candidates.resize(capacity);
-    require(std::all_of(candidates.begin(), candidates.end(), [](const auto &r) { return r.direct; }),
-            "Raw refinement priority must favor direct requests over redundant ancestors");
-    require(referenceAncestorPriority(4.0F, 1) > referenceAncestorPriority(0.25F, 0),
-            "Important nearby fallback should still outrank tiny distant coverage");
-
     const auto fine = pageLayout.coveringPage(0, {{17, 29}, {18, 30}});
     require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
     const auto morph = pageLayout.coveringPage(0, {{16, 28}, {18, 30}});
@@ -727,18 +770,15 @@ int main() {
                 for (uint32_t x = 0; x < 16; x += cells) {
                     for (uint32_t desired = 0; desired <= root; ++desired) {
                         for (float sectorOrigin : {0.0F, sectorSize * 3.0F}) {
-                            const float minX = sectorOrigin + (x - (x & 1U)) * cell;
-                            const float minZ = sectorOrigin + (z - (z & 1U)) * cell;
-                            const auto page = pageLayout.coveringPage(desired,
-                                {{minX, minZ}, {sectorOrigin + (x + cells) * cell, sectorOrigin + (z + cells) * cell}});
+                            const auto page = pageLayout.coveringPatch(desired, {sectorOrigin, sectorOrigin}, cell, x, z, cells);
                             const float size = pageLayout.pageSize(page.level);
                             for (uint32_t vz = z; vz <= z + cells; ++vz) {
                                 for (uint32_t vx = x; vx <= x + cells; ++vx) {
-                                    for (float amount : {0.0F, 0.125F, 0.5F, 0.875F, 1.0F}) {
+                                    for (float amount : {0.0F, 1.0F}) {
                                         const float px = sectorOrigin + (vx - (vx & 1U) * amount) * cell;
                                         const float pz = sectorOrigin + (vz - (vz & 1U) * amount) * cell;
                                         require(px >= page.x * size && px <= (page.x + 1) * size &&
-                                                pz >= page.z * size && pz <= (page.z + 1) * size,
+                                                    pz >= page.z * size && pz <= (page.z + 1) * size,
                                                 "A morphed triangle escaped its physical VT page");
                                         ++checked;
                                     }
@@ -753,8 +793,8 @@ int main() {
     // Non-power-of-two sectors retain a dyadic hierarchy without exceeding the
     // requested density. Pages must still line up at distant sector boundaries.
     const VTPageLayout oddLayout(1000.0F);
-    require(config::VT_PAGE_INTERIOR / oddLayout.pageSize(0) <= 512.0F, "Finest page must not exceed 512 texels/m");
+    require(config::VT_PAGE_INTERIOR / oddLayout.pageSize(0) <= 256.0F, "Finest page must not exceed 256 texels/m");
     const auto boundary = pageLayout.coveringPage(root, {{8191, 4095}, {8192, 4096}});
     require(boundary.x == 1 && boundary.z == 0, "Boundary must remain in its own permanent sector root");
-    std::cout << "PASS: VT density, independent levels, fallback boundaries and " << checked << " morph samples\n";
+    std::cout << "PASS: VT density, independent levels, page boundaries and " << checked << " stitch samples\n";
 }

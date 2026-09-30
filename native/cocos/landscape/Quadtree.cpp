@@ -121,7 +121,7 @@ void Quadtree::computeRanges(float lodQualityScale) {
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
         _lodMorphEnd[level] = _lodRange[level];
         _lodMorphStart[level] = previousMorphStart +
-            (_lodMorphEnd[level] - previousMorphStart) * config::MORPH_START_RATIO;
+                                (_lodMorphEnd[level] - previousMorphStart) * config::MORPH_START_RATIO;
         previousMorphStart = _lodMorphStart[level];
     }
 }
@@ -144,7 +144,8 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
 }
 
 const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum,
-                                                const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ) {
+                                                const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ,
+                                                bool preloadNearby) {
     _camPos = camPos;
     _frustum = &frustum;
     _landscapeWorldOrigin = landscapeWorldOrigin;
@@ -155,6 +156,9 @@ const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geomet
     if (!_data.valid() || sectorX >= _data.sectorsX || sectorZ >= _data.sectorsZ) {
         return _selected;
     }
+    // Keep the two nearest LOD bands ready in every direction. This is a
+    // residency demand only; actual color/shadow draws still use their frustum.
+    _preloadDistance = preloadNearby ? _lodRange[std::min(1U, _data.maxLevel)] : -1.0F;
     traverse(_data.maxLevel, 0U, 0U);
     return _selected;
 }
@@ -171,11 +175,11 @@ Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t 
     _box->setCenter(x + size * 0.5F, (minY + maxY) * 0.5F + _landscapeWorldOrigin.y, z + size * 0.5F);
     _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
 
-    if (!_box->aabbFrustum(*_frustum)) {
+    const float minDistance = distanceToAABB(_camPos, *_box);
+    if (minDistance > _preloadDistance && !_box->aabbFrustum(*_frustum)) {
         return SelectResult::CULLED;
     }
 
-    const float minDistance = distanceToAABB(_camPos, *_box);
     if (minDistance > _lodRange[level]) {
         return SelectResult::OUT_OF_RANGE;
     }

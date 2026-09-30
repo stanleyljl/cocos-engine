@@ -58,19 +58,22 @@ constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
 constexpr uint32_t DECAL_LIBRARY_MAX = 8;
 constexpr uint32_t DECAL_INSTANCE_MAX = 128;
 
-// 512 usable texels per meter at the finest page. Keep 16 x 16 physical slots.
-constexpr uint32_t VT_PAGE_INTERIOR = 512;
+// 256 usable texels per meter at the finest page. Keep 16 x 16 physical slots.
+constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 16; // 2x2 interior sources plus a one-source gutter ring.
 constexpr uint32_t VT_PAGE_BORDER = 8;
-constexpr uint32_t VT_MIP_LEVELS = 3; // interiors 512/256/128, borders 8/4/2
+constexpr uint32_t VT_MIP_LEVELS = 3; // interiors 256/128/64, borders 8/4/2
 constexpr uint32_t VT_MAX_ANISOTROPY = 4;
 // Base-level texel width of the coarsest mip. Reserve this much filter support
 // when constraining a fragment's footprint to its physical atlas slot.
 constexpr uint32_t VT_FILTER_MARGIN = 1U << (VT_MIP_LEVELS - 1U);
 constexpr uint32_t VT_PAGE_RES = VT_PAGE_INTERIOR + 2 * VT_PAGE_BORDER;
 constexpr uint32_t VT_ATLAS_SIZE = VT_PAGE_RES * 16;
-// Four times as many texels per page: retain the previous per-frame pixel budget.
-constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 2;
+// Shared by all resource transactions and camera passes in one frame.
+constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
+constexpr uint32_t STREAMING_STEP_BUDGET = 8;
+constexpr uint32_t STREAMING_ADMISSION_BUDGET = 16;
+constexpr double STREAMING_TIME_BUDGET_MS = 2.0;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 static_assert(VT_PAGE_RES % (1U << (VT_MIP_LEVELS - 1)) == 0 &&
