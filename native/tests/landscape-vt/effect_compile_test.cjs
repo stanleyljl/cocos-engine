@@ -33,6 +33,10 @@ async function main() {
         const source = fs.readFileSync(path.join(engine, 'editor/assets/effects', `${name}.effect`), 'utf8');
         const effect = compiler.buildEffect(name, source);
         if (!effect || !effect.shaders.length) throw new Error(`No shaders produced for ${name}`);
+        if (process.env.LANDSCAPE_EFFECT_OUTPUT) {
+            fs.mkdirSync(process.env.LANDSCAPE_EFFECT_OUTPUT, { recursive: true });
+            fs.writeFileSync(path.join(process.env.LANDSCAPE_EFFECT_OUTPUT, `${name}.json`), JSON.stringify(effect));
+        }
         console.log(`PASS: ${name}, ${effect.shaders.length} shader programs`);
     }
 }

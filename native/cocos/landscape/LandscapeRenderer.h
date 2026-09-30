@@ -89,6 +89,7 @@ public:
     void collectPassModels(const geometry::Frustum &frustum,
                            bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
+    void setHoleMode(uint32_t mode);
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
     void setGlobalColorStrength(float strength);
@@ -98,6 +99,8 @@ public:
 
 private:
     friend struct LandscapePagingTestAccess;
+    uint32_t _holeMode{0};
+    bool _vertexHoleCullingSupported{false};
 
     // A camera/pass change must not replenish any per-frame streaming budget.
     // The time limit is checked between indivisible steps; allow the first step

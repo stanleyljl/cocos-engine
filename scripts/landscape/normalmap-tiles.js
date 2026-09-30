@@ -56,13 +56,13 @@ function encodeTile(normals, width, x, z, resolution) {
 function generateNormalTiles(manifestPath, output) {
     const original = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(original), root = path.dirname(manifestPath);
-    const { sectorSizeMeters: sectorSize, sectorCount, maxLevel, minTileLevel, nodeTileResolution: resolution, heightScale } = manifest;
+    const { sectorSizeMeters: sectorSize, sectorCount, maxLevel, minTileLevel, heightScale } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2 || sectorCount.some(v => !Number.isInteger(v) || v < 1)
-        || !Number.isInteger(maxLevel) || maxLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
-        || !Number.isInteger(resolution) || resolution < 3 || resolution % 2 !== 1
+        || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
         || !Number.isFinite(sectorSize) || sectorSize <= 0 || !Number.isFinite(heightScale) || heightScale <= 0) {
         throw new Error('Unsupported height tile layout');
     }
+    const resolution = 129;
     const divisions = 2 ** (maxLevel - minTileLevel), edge = resolution - 1;
     const nx = sectorCount[0] * divisions, nz = sectorCount[1] * divisions;
     let width = nx * edge + 1, depth = nz * edge + 1;
@@ -93,17 +93,7 @@ function generateNormalTiles(manifestPath, output) {
         console.log(`L${level}: RGB8 PNG normals written (${width}x${depth} global samples)`);
         if (level < maxLevel) ({ normals, width, depth } = downsampleNormals(normals, width, depth));
     }
-    const normalMap = { format: 'RGB8', fileFormat: 'PNG', resolution, space: 'terrain-local', upAxis: 'Y',
-        path: 'nodes/L{level}/n_{x}_{z}.png', minTileLevel, maxTileLevel: maxLevel };
-    // Preserve the existing manifest formatting and its large height arrays.
-    let updated;
-    if (manifest.normalMap !== undefined) {
-        if (JSON.stringify(manifest.normalMap) !== JSON.stringify(normalMap)) throw new Error('Existing normalMap layout differs');
-        updated = original;
-    } else {
-        updated = original.replace(/\s*}\s*$/, ',\n  "normalMap": ' + JSON.stringify(normalMap, null, 2).replace(/\n/g, '\n  ') + '\n}\n');
-    }
-    fs.writeFileSync(path.join(output, path.basename(manifestPath)), updated);
+    fs.writeFileSync(path.join(output, path.basename(manifestPath)), original);
     console.log(`Generated ${tiles} normal tiles; same resolution and spacing as height tiles`);
     return tiles;
 }

@@ -26,16 +26,6 @@ import png
 DEFAULT_PIXELS_PER_METER = 128
 
 
-def migrate_layer_density(layer, resolution):
-    """Convert legacy repeats/m using the original texture resolution."""
-    result = layer.copy()
-    if "pixelsPerMeter" not in result:
-        result["pixelsPerMeter"] = (result["uvScale"] * resolution if "uvScale" in result
-                                    else DEFAULT_PIXELS_PER_METER)
-    result.pop("uvScale", None)
-    return result
-
-
 def decode(data, suffix, scratch):
     if suffix == ".exr":
         path = scratch / "source.exr"
@@ -94,11 +84,14 @@ def save_verified(path, pixels):
 
 def replace_library(text, library):
     match = re.search(r'(?m)^\s*"materialLibrary":\s*', text)
-    if match is None:
-        raise ValueError("Manifest has no materialLibrary field")
-    _, end = json.JSONDecoder().raw_decode(text, match.end())
     eol = "\r\n" if "\r\n" in text else "\n"
     replacement = json.dumps(library, ensure_ascii=False, indent=2).replace("\n", eol + "  ")
+    if match is None:
+        # Height generation can precede material authoring.
+        end = text.rfind("}")
+        separator = "," if json.loads(text) else ""
+        return text[:end].rstrip() + separator + eol + '  "materialLibrary": ' + replacement + eol + text[end:]
+    _, end = json.JSONDecoder().raw_decode(text, match.end())
     return text[:match.end()] + replacement + text[end:]
 
 
@@ -121,10 +114,13 @@ def main():
         raise ValueError(f"Expected 1..32 material archives, got {len(archives)}")
     manifest_text = args.manifest.read_bytes().decode("utf-8")
     original = json.loads(manifest_text)
-    previous = {layer.get("name", Path(layer.get("file", "")).stem):
-                migrate_layer_density(layer, original["materialLibrary"]["resolution"])
-                for layer in original.get("materialLibrary", {}).get("layers", [])}
-    previous_by_id = {layer["id"]: layer for layer in previous.values()}
+    previous_layers = original.get("materialLibrary", {}).get("layers", [])
+    previous = {layer["name"]: layer for layer in previous_layers}
+    previous_by_id = dict(enumerate(previous_layers))
+    previous_ids = {layer["name"]: index for index, layer in previous_by_id.items()}
+    for layer in previous_layers:
+        if not isinstance(layer["pixelsPerMeter"], (int, float)) or not 0 < layer["pixelsPerMeter"] < float("inf"):
+            raise ValueError("Material pixelsPerMeter must be positive and finite")
     if args.append_archive and args.resolution != original["materialLibrary"]["resolution"]:
         raise ValueError("Appending must retain the material array resolution")
     if not args.append_archive and len(archives) < len(previous_by_id):
@@ -139,7 +135,7 @@ def main():
                 albedo = find_source(source.namelist(), ["diff", "col"])
                 name = re.sub(r"_(?:diff|col)_\d+k$", "", Path(albedo).stem)
             if args.append_archive:
-                index = previous[name]["id"] if name in previous else max(previous_by_id, default=-1) + 1
+                index = previous_ids[name] if name in previous else max(previous_by_id, default=-1) + 1
             elif index in previous_by_id and name != previous_by_id[index]["name"]:
                 raise ValueError(f"{archive.name}: source name differs from manifest")
             archive_names.append(name)
@@ -153,17 +149,15 @@ def main():
         raise ValueError("--layers contains invalid IDs")
     textures = args.output / "textures"
     textures.mkdir(parents=True)
-    library = {"count": len(archives), "dir": "textures", "resolution": args.resolution,
-               "format": "RGBA8", "layers": []}
+    library = {"dir": "textures", "resolution": args.resolution, "layers": []}
+    packed_layers = {}
     if args.append_archive:
         library.update(original["materialLibrary"])
-        library["layers"] = [layer.copy() for layer in original["materialLibrary"]["layers"]
-                             if layer["id"] not in archive_ids]
-        for layer in library["layers"]:
+        packed_layers = {index: layer.copy() for index, layer in previous_by_id.items() if index not in archive_ids}
+        for layer in packed_layers.values():
             for key in ("albedoHeight", "normalRoughnessAO"):
                 if not (args.manifest.parent / library["dir"] / layer[key]).is_file():
                     raise ValueError(f"Missing preserved texture: {layer[key]}")
-        library["count"] = len(library["layers"]) + len(archive_ids)
     report = []
     with tempfile.TemporaryDirectory(prefix="landscape-exr-") as temp:
         for index, archive, name in zip(archive_ids, archives, archive_names):
@@ -174,7 +168,7 @@ def main():
                 for key in ("albedoHeight", "normalRoughnessAO"):
                     if not (args.manifest.parent / original["materialLibrary"]["dir"] / old[key]).is_file():
                         raise ValueError(f"Missing preserved texture: {old[key]}")
-                library["layers"].append(old.copy())
+                packed_layers[index] = old.copy()
                 continue
             stats, decoded, source_names = {}, {}, {}
             with zipfile.ZipFile(archive) as source:
@@ -221,15 +215,15 @@ def main():
             hashes = {ah_name: save_verified(textures / ah_name, ah),
                       nra_name: save_verified(textures / nra_name, nra)}
             old = previous.get(name, {})
-            library["layers"].append({"id": index, "name": name, "albedoHeight": ah_name,
+            packed_layers[index] = {"name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
                                       "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER),
                                       "detailHeightScale": old.get("detailHeightScale", 1.0),
-                                      "detailHeightBias": old.get("detailHeightBias", 0.0)})
+                                      "detailHeightBias": old.get("detailHeightBias", 0.0)}
             report.append({"id": index, "name": name, "sourceArchive": archive.name,
                            "sources": source_names, "statistics": stats, "sha256": hashes})
             print(f"{index:02d} {name}: {ah_name}, {nra_name}", flush=True)
-    library["layers"].sort(key=lambda layer: layer["id"])
+    library["layers"] = [packed_layers[index] for index in range(len(packed_layers))]
     updated_text = replace_library(manifest_text, library)
     updated = json.loads(updated_text)
     if {k: v for k, v in updated.items() if k != "materialLibrary"} != {

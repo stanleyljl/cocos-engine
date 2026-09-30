@@ -24,9 +24,10 @@ class Loader extends LandscapeHeightLoader {
     public layout = layout;
     public async loadLayout () { return this.layout; }
     public async loadTile () { ++this.loads; return samples(); }
+    public async loadHoles () { return new Uint8Array((this.layout.resolution - 1) ** 2); }
 }
 async function settle (manager: LandscapePhysics) {
-    for (let i = 0; i < 8; ++i) { await Promise.resolve(); manager.update(); }
+    for (let i = 0; i < 16; ++i) { await Promise.resolve(); manager.update(); }
     PhysicsSystem.instance.syncSceneToPhysics();
 }
 function hit (x: number, z: number) {
@@ -55,6 +56,57 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         manager._setEnabled(true);
     });
     afterEach(() => { manager._destroy(); scene.active = false; scene._destroyImmediate(); });
+
+    test('hole tiles omit both cell triangles, keep adjacent surface and unload', async () => {
+        jest.spyOn(loader, 'loadHoles').mockResolvedValue(new Uint8Array([1, 0, 0, 0]));
+        const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });
+        await settle(manager);
+        expect(manager.getRegionError(id)).toBe('');
+        expect(manager.isRegionReady(id)).toBe(true);
+        expect(hit(-1.8, -0.8)).toBeUndefined();
+        expect(hit(-1.2, -0.2)).toBeUndefined();
+        expect(hit(-0.5, -0.5)).toBeCloseTo(7, 3);
+        manager.forEachCollider(collider => expect(collider).toBeInstanceOf(physics.MeshCollider));
+        if (backend === 'physx') {
+            manager.forEachCollider(collider => expect(PX.MESH_STATIC[(collider as physics.MeshCollider).mesh!._uuid]).toBeUndefined());
+        }
+        manager.removeRegion(id); manager.update(); PhysicsSystem.instance.syncSceneToPhysics();
+        expect(hit(-0.5, -0.5)).toBeUndefined();
+        expect(manager.getStats().sourceBytes).toBe(0);
+    });
+
+    test('dynamic spheres fall through holes and land on neighboring solid mesh cells', async () => {
+        jest.spyOn(loader, 'loadTile').mockResolvedValue(new Uint16Array(9).fill(32778));
+        jest.spyOn(loader, 'loadHoles').mockResolvedValue(new Uint8Array([1, 0, 0, 0]));
+        manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 }); await settle(manager);
+        const bodies = [-1.5, -0.5].map(x => {
+            const body = new Node(); scene.addChild(body); body.setPosition(x, 13, -0.5);
+            body.addComponent(physics.RigidBody); body.addComponent(physics.SphereCollider).radius = 0.15;
+            return body;
+        });
+        const system = PhysicsSystem.instance;
+        for (let i = 0; i < 120; ++i) {
+            system.syncSceneToPhysics(); system.step(1 / 60); system.physicsWorld.syncAfterEvents();
+        }
+        expect(bodies[0].worldPosition.y).toBeLessThan(5);
+        expect(bodies[1].worldPosition.y).toBeCloseTo(10.15, 1);
+        for (const body of bodies) { body.active = false; body._destroyImmediate(); }
+    });
+
+    test('all-hole tile is ready without collision; missing holes never publish solid terrain', async () => {
+        jest.spyOn(loader, 'loadHoles').mockResolvedValue(new Uint8Array(4).fill(1));
+        const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });
+        await settle(manager);
+        expect(manager.isRegionReady(id)).toBe(true);
+        const visit = jest.fn(); manager.forEachCollider(visit); expect(visit).not.toHaveBeenCalled();
+        expect(hit(-1.5, -0.5)).toBeUndefined();
+        manager.removeRegion(id); manager.update();
+        jest.spyOn(loader, 'loadHoles').mockRejectedValue(new Error('Missing splat'));
+        const failed = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });
+        await settle(manager);
+        expect(manager.getRegionStatus(failed)).toBe(Status.Error);
+        expect(hit(-1.5, -0.5)).toBeUndefined();
+    });
 
     test('ordinary TerrainAsset keeps its diagonal and shared PhysX cache', async () => {
         const registeredShape = physics.selector.wrapper.TerrainShape;
@@ -125,7 +177,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         expect(hit(-1.8, -0.7)).toBeCloseTo(1.6, 3);
         expect(hit(-1.2, -0.3)).toBeCloseTo(6.4, 3);
         const colliders: physics.TerrainCollider[] = [];
-        manager.forEachCollider(collider => colliders.push(collider));
+        manager.forEachCollider(collider => colliders.push(collider as physics.TerrainCollider));
         expect(colliders).toHaveLength(1);
         const collider = colliders[0];
         // Debug geometry must use the backend's centered heightfield and node
@@ -228,7 +280,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         const sphere = bodyNode.addComponent(physics.SphereCollider);
         sphere.radius = 0.25;
         let terrain!: physics.TerrainCollider;
-        manager.forEachCollider(collider => { terrain = collider; });
+        manager.forEachCollider(collider => { terrain = collider as physics.TerrainCollider; });
         const contacts: physics.TerrainCollider[] = [];
         sphere.on('onCollisionEnter', event => { contacts.push(event.otherCollider as physics.TerrainCollider); });
         const system = PhysicsSystem.instance;
@@ -245,7 +297,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         manager.configure({ group: 2, mask: 1 });
         manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 }); await settle(manager);
         let terrain!: physics.TerrainCollider;
-        manager.forEachCollider(collider => { terrain = collider; });
+        manager.forEachCollider(collider => { terrain = collider as physics.TerrainCollider; });
         const ray = new geometry.Ray(-1.5, 100, -0.5, 0, -1, 0);
         const system = PhysicsSystem.instance;
         expect(system.raycastClosest(ray, 1, 200)).toBe(false);
@@ -281,5 +333,17 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         manager.removeRegion(id); manager.update();
         const replacement = manager.addRegion(bounds); await settle(manager);
         expect(manager.isRegionReady(replacement)).toBe(true);
+    });
+
+    test('a failed height request keeps its admission slot until splat also settles', async () => {
+        let complete!: (data: Uint8Array) => void;
+        jest.spyOn(loader, 'loadTile').mockRejectedValueOnce(new Error('height unavailable'));
+        jest.spyOn(loader, 'loadHoles').mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+        const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 }); await settle(manager);
+        manager.setRegionBounds(id, { minX: 0, minZ: -1, maxX: 2, maxZ: 1 }); await settle(manager);
+        expect(manager.getStats().inFlight).toBe(1);
+        expect(loader.loadTile).toHaveBeenCalledTimes(1);
+        complete(new Uint8Array(4)); await settle(manager);
+        expect(manager.isRegionReady(id)).toBe(true);
     });
 });

@@ -35,6 +35,7 @@
 #include "core/Root.h"
 #include "core/TypedArray.h"
 #include "core/assets/Material.h"
+#include "core/assets/RenderTexture.h"
 #include "core/assets/RenderingSubMesh.h"
 #include "core/geometry/AABB.h"
 #include "core/scene-graph/Node.h"
@@ -44,6 +45,11 @@
 #include "landscape/VTRenderer.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXBuffer.h"
+#include "renderer/gfx-base/GFXCommandBuffer.h"
+#include "renderer/gfx-base/GFXInputAssembler.h"
+#include "renderer/gfx-base/GFXPipelineState.h"
+#include "renderer/gfx-base/GFXQueue.h"
+#include "renderer/gfx-base/GFXRenderPass.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXFramebuffer.h"
@@ -51,9 +57,91 @@
 #include "renderer/gfx-base/states/GFXSampler.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
+#include "scene/RenderWindow.h"
 
 namespace cc {
 namespace landscape {
+
+namespace {
+// Verify the current device instead of assuming non-finite position behavior
+// from an API/vendor name. Both triangles share the marked vertex. A control
+// draw also detects failed rendering/readback, which must select fragment holes.
+bool probeVertexHoleCulling(gfx::Device *device) {
+    struct ProbeResources {
+        IntrusivePtr<Material> material{ccnew Material()};
+        IntrusivePtr<RenderTexture> target{ccnew RenderTexture()};
+        ~ProbeResources() {
+            target->destroy();
+            material->destroy();
+        }
+    } resources;
+    auto &material = resources.material;
+    IMaterialInfo info;
+    info.effectName = ccstd::string{"builtin-landscape"};
+    info.technique = 1;
+    material->initialize(info);
+    if (!material->getPasses() || material->getPasses()->empty()) {
+        return false;
+    }
+    auto *pass = material->getPasses()->front().get();
+    if (!pass->getHandle("probeParams")) {
+        return false;
+    }
+    auto *shader = pass->getShaderVariant();
+    if (!shader) {
+        return false;
+    }
+    IntrusivePtr<RenderingSubMesh> mesh = GridMesh::createVTQuad(device);
+    if (!mesh) return false;
+    gfx::InputAssemblerInfo input;
+    input.attributes = mesh->getAttributes();
+    input.vertexBuffers = mesh->getVertexBuffers();
+    input.indexBuffer = mesh->getIndexBuffer();
+    IntrusivePtr<gfx::InputAssembler> ia = device->createInputAssembler(input);
+    IRenderTextureCreateInfo targetInfo;
+    targetInfo.name = "landscape-hole-probe";
+    targetInfo.width = targetInfo.height = 8;
+    gfx::ColorAttachment color;
+    color.format = gfx::Format::RGBA8;
+    color.loadOp = gfx::LoadOp::CLEAR;
+    color.storeOp = gfx::StoreOp::STORE;
+    color.barrier = device->getGeneralBarrier({gfx::AccessFlagBit::NONE, gfx::AccessFlagBit::TRANSFER_READ});
+    gfx::RenderPassInfo renderInfo;
+    renderInfo.colorAttachments = {color};
+    targetInfo.passInfo = renderInfo;
+    auto &target = resources.target;
+    target->initialize(targetInfo);
+    if (!target->getWindow() || !target->getWindow()->getFramebuffer()) return false;
+    auto *framebuffer = target->getWindow()->getFramebuffer();
+    IntrusivePtr<gfx::PipelineState> pipeline = device->createPipelineState({shader, pass->getPipelineLayout(), framebuffer->getRenderPass(),
+        {input.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(), *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
+    IntrusivePtr<gfx::CommandBuffer> commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
+    if (!ia || !pipeline || !commands) {
+        return false;
+    }
+    for (uint32_t test = 0; test < 2; ++test) {
+        material->setPropertyVec4("probeParams", Vec4{static_cast<float>(test), 0, 0, 0});
+        pass->update();
+        commands->begin();
+        const gfx::Color clear{0, 0, 0, 0};
+        commands->beginRenderPass(framebuffer->getRenderPass(), framebuffer, {0, 0, 8, 8}, &clear, 1.0F, 0);
+        commands->bindPipelineState(pipeline);
+        commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), pass->getDescriptorSet());
+        commands->bindInputAssembler(ia);
+        commands->draw(ia->getDrawInfo());
+        commands->endRenderPass();
+        commands->end();
+        gfx::CommandBuffer *command = commands.get();
+        device->flushCommands(&command, 1);
+        device->getQueue()->submit(&command, 1);
+        const auto pixels = target->readPixels(0, 0, 8, 8);
+        if (pixels.size() != 8U * 8U * 4U || !std::all_of(pixels.begin(), pixels.end(), [test](uint8_t v) { return v == (test == 0 ? 255 : 0); })) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
 
 LandscapeRenderer::LandscapeRenderer() = default;
 
@@ -92,6 +180,8 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
         return false;
     }
     _instanceAttributeScratch = Float32Array(4);
+    _vertexHoleCullingSupported = probeVertexHoleCulling(device);
+    CC_LOG_INFO("[Landscape] hole culling: %s", _vertexHoleCullingSupported ? "vertex NaN verified" : "fragment fallback");
     _decals->setEnabled(_debugData.decal3DEnabled);
     _decals->setWireframe(_debugData.wireframe);
     _decals->setCastShadow(_castShadow);
@@ -179,6 +269,7 @@ void LandscapeRenderer::bindRuntimeTextures() {
                 }
             }
         };
+        setRuntimeTexture("holeSplatmap", _tilePages->splatArray(), _tilePages->splatSampler());
         setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
         setRuntimeTexture("terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
@@ -321,6 +412,7 @@ void LandscapeRenderer::updateMaterialProperties() {
     }
 
     for (auto *material : surfaceMaterials()) {
+        material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U && _vertexHoleCullingSupported ? 0.0F : 1.0F, 0, 0, 0});
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize,
                                                        _data.worldWidth() * 0.5F, _data.worldDepth() * 0.5F, 0.0F});
@@ -417,15 +509,7 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     const auto local = _data.gridToLocal({minX, minZ});
     const float localX = static_cast<float>(local.x), localZ = static_cast<float>(local.z);
     const float distance = patchDistance(node, localX, localZ, size, false);
-    float density = 1.0F;
-    if (_debugData.cliffEnabled) {
-        float minY = node.minY, maxY = node.maxY;
-        const uint32_t rangeLevel = node.level + meshIndex >= 4U ? node.level + meshIndex - 4U : 0U;
-        const auto address = _data.nodeAtGridClamped(rangeLevel, {minX, minZ});
-        _asset->getHeightRange(rangeLevel, address.x, address.z, minY, maxY);
-        density = cliffDensityScale(maxY - minY, size, _asset->getSurfaceStretch(rangeLevel, address.x, address.z));
-    }
-    const uint32_t desired = std::min(_vtLayout.rootLevel(), _vtLayout.levelForDistance(distance / density) + _materialBias);
+    const uint32_t desired = std::min(_vtLayout.rootLevel(), _vtLayout.levelForDistance(distance) + _materialBias);
     if (meshIndex > 0 && _vtLayout.pageSize(desired) < size) {
         const uint32_t half = cells / 2U;
         for (uint32_t q = 0; q < 4; ++q) {
@@ -436,7 +520,7 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     // Stitching follows committed neighbors, including near-camera boundaries
     // delayed by streaming. Page coverage must not depend on distance morphing.
     const auto page = _vtLayout.coveringPatch(desired, {node.ix * nodeSize, node.iz * nodeSize}, cellSize, x, z, cells);
-    patches.push_back(Patch{node, x, z, meshIndex, page, size * density / std::max(distance, 1.0F)});
+    patches.push_back(Patch{node, x, z, meshIndex, page, size / std::max(distance, 1.0F)});
 }
 
 void LandscapeRenderer::updateModel(ModelState &state, const Patch &patch) {
@@ -1055,6 +1139,11 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
         const auto &state = entry.second;
         updateModelBounds(state.model, state.patch);
     }
+}
+
+void LandscapeRenderer::setHoleMode(uint32_t mode) {
+    _holeMode = mode == 0U ? 0U : 1U;
+    updateMaterialProperties();
 }
 
 void LandscapeRenderer::setCastShadow(bool enabled) {

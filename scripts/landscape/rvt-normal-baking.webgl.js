@@ -12,8 +12,9 @@ try {
   };
   const programs = effect.shaders.map(s => {
     const p = gl.createProgram();
-    gl.attachShader(p, compile(gl.VERTEX_SHADER, s.glsl3.vert));
-    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, s.glsl3.frag)); gl.linkProgram(p);
+    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n';
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, prefix + s.glsl3.vert));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, prefix + s.glsl3.frag)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     return p;
   });
@@ -61,7 +62,7 @@ try {
   gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1]);
   if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete framebuffer');
   gl.viewport(0,0,1,1);
-  const pack=([a,b,w])=>a|(b<<5)|(w<<10);
+  const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,0,0,0);
@@ -78,41 +79,42 @@ try {
   const close=(a,b,label,tolerance=2)=>{if(a.some((v,i)=>Math.abs(v-b[i])>tolerance))throw new Error(label+': '+a+' vs '+b);checks++;};
   const expected=(pairs,x=.5,y=.5)=>{
     const spatial=x>=y?[1-x,x-y,0,y]:[1-y,0,y-x,x], w=new Array(8).fill(0);
-    pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/63);w[b]+=spatial[i]*t/63;});
+    pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/31);w[b]+=spatial[i]*t/31;});
     return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(128,128,255,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
   };
   const repeat=p=>[p,p,p,p];
   close(render(repeat([0,1,0])),expected(repeat([0,0,0])),'pure bottom');
-  close(render(repeat([1,0,63])),expected(repeat([0,0,0])),'pure top');
-  close(render(repeat([3,3,29])),expected(repeat([3,3,29])),'identical IDs');
-  const pairs=[[0,1,15],[1,2,29],[0,2,44],[2,0,55]];
+  close(render(repeat([1,0,31])),expected(repeat([0,0,0])),'pure top');
+  close(render(repeat([3,3,14])),expected(repeat([3,3,14])),'identical IDs');
+  const pairs=[[0,1,7],[1,2,14],[0,2,22],[2,0,27]];
   close(render(pairs,{strength:0}),expected(pairs),'disabled height blend');
+  close(render(pairs.map(v=>[...v,1]),{strength:0}),render(pairs,{strength:0}),'hole bit never changes VT material weight',0);
   close(render(pairs,{scale:64}),render(pairs),'height blending retained at coarse footprint');
-  close(render(repeat([0,1,32])),expected(repeat([1,1,63])),'higher material covers lower');
-  close(render(repeat([0,1,32])),render(repeat([1,0,31])),'pair reversal');
-  const repeated=[[0,1,63],[0,2,20],[3,0,50],[0,1,0]];
+  close(render(repeat([0,1,16])),expected(repeat([1,1,31])),'higher material covers lower');
+  close(render(repeat([0,1,16])),render(repeat([1,0,15])),'pair reversal');
+  const repeated=[[0,1,31],[0,2,10],[3,0,25],[0,1,0]];
   close(render(repeated,{strength:0}),expected(repeated),'first duplicate has zero weight');
   close(render(repeated,{x:0,y:0}),expected(repeat([1,1,0])),'zero spatial weights');
   // Both cells share the right/left edge but have unrelated outer corners.
-  const left=[[0,2,20],[0,1,32],[1,2,40],[1,2,28]];
-  const right=[[0,1,32],[0,2,5],[1,2,28],[0,2,60]];
+  const left=[[0,2,10],[0,1,16],[1,2,20],[1,2,14]];
+  const right=[[0,1,16],[0,2,2],[1,2,14],[0,2,30]];
   close(render(left,{x:1,y:.37}),render(right,{x:0,y:.37}),'shared cell edge');
   let seed=83;const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
   for(let n=0;n<100;n++){
-    const q=Array.from({length:4},()=>[[0,2,7][Math.floor(rand()*3)],[0,2,7][Math.floor(rand()*3)],Math.floor(rand()*64)]);
+    const q=Array.from({length:4},()=>[[0,2,7][Math.floor(rand()*3)],[0,2,7][Math.floor(rand()*3)],Math.floor(rand()*32)]);
     const x=rand(),y=rand();
     close(render(q,{strength:0,x,y}),expected(q,x,y),'random linear recovery '+n);
     close(render(q,{scale:64,x,y}),render(q,{x,y}),'random distance independence '+n);
-    const swapped=q.map(([a,b,w])=>[b,a,63-w]);
+    const swapped=q.map(([a,b,w])=>[b,a,31-w]);
     close(render(q,{x,y}),render(swapped,{x,y}),'random pair symmetry '+n);
   }
 
-  const a=[[0,1,30],[1,2,20],[6,7,10],[0,2,50]];
-  const b=a.map(v=>v.slice());b[2]=[3,4,60];
+  const a=[[0,1,15],[1,2,10],[6,7,5],[0,2,25]];
+  const b=a.map(v=>v.slice());b[2]=[3,4,30];
   close(render(a,{x:.75,y:.25}),render(b,{x:.75,y:.25}),'lower triangle ignores fourth texel',0);
-  a[1]=[5,6,20];a[2]=[1,2,32];b[1]=[3,4,0];b[2]=[1,2,32];
+  a[1]=[5,6,10];a[2]=[1,2,16];b[1]=[3,4,0];b[2]=[1,2,16];
   close(render(a,{x:.25,y:.75}),render(b,{x:.25,y:.75}),'upper triangle ignores fourth texel',0);
-  const diagonal=[[0,1,12],[1,2,31],[0,2,45],[0,1,52]];
+  const diagonal=[[0,1,6],[1,2,15],[0,2,22],[0,1,26]];
   close(render(diagonal,{x:.49999,y:.5}),render(diagonal,{x:.50001,y:.5}),'diagonal continuity');
 
 
@@ -240,7 +242,7 @@ try {
       close(render(material,{...at,sourceSize:2}),ref,'cliff UV independent of material source resolution',0);
       const normal=unit([ref[4]/127.5-1,ref[3]/127.5-1,ref[5]/127.5-1]);
       close(normal.map(v=>v*127.5+127.5),enc(decode(n)),'flat material recovers signed terrain normal',3);
-      close(render(repeat([0,1,32]),at),render(repeat([1,1,0]),at),'height blending retained on cliffs',1);
+      close(render(repeat([0,1,16]),at),render(repeat([1,1,0]),at),'height blending retained on cliffs',1);
       constants[5]=0;const off=render(material,at);constants[5]=1;
       close(off.slice(0,3),ref.slice(0,3),'F11 does not change cliff color',0);
       close([off[4],off[3],off[5]],[128,128,255],'F11 OFF keeps tangent encoding',2);
@@ -347,11 +349,11 @@ try {
   const vs='precision highp float;in vec2 a_position;void main(){gl_Position=vec4(a_position*2.0-1.0,0.0,1.0);}';
   const fs=unlit=>[
     'precision highp float;precision highp int;precision highp sampler2DArray;',
-    '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_DECAL_MESH 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
+    '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_DECAL_MESH 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
     'uniform sampler2D vtAlbedo,vtNormalRoughnessAO;uniform sampler2DArray terrainNormalMap;',
-    'uniform vec4 mainColor,terrainParams,morphCameraPos,vtLayout,rvtNormalParams,v_vtParams,lodMorph[9];',
+    'uniform vec4 mainColor,terrainParams,sectorParams,morphCameraPos,vtLayout,rvtNormalParams,v_vtParams,lodMorph[9];',
     'uniform float v_normalMorph;const float v_lod=0.0;',
-    'const vec4 v_normalUV=vec4(0.5);const vec2 v_normalLayers=vec2(0.0,1.0);',
+    'const vec2 v_normalUV=vec2(0.5);const float v_normalLayer=0.0;void discardLandscapeHole(){}',
     'const vec2 FSInput_texcoord=vec2(0.5,-0.5);const vec3 FSInput_worldPos=vec3(0);',
     'const vec3 FSInput_worldNormal=vec3(0,1,0),FSInput_worldTangent=vec3(1,0,0);const float FSInput_mirrorNormal=1.0;',
     'struct SurfacesMaterialData {vec4 baseColor;vec3 worldNormal;float roughness;float ao;float metallic;float specularIntensity;vec3 emissive;};',
@@ -390,8 +392,8 @@ try {
     }
   }
   for(const morph of [0,.3,.8,1]){
-    const xz=[0,1].map(i=>terrainBytes[i]*(1-morph)+terrainBytes[2+i]*morph);
-    close(baseRender(false,morph,[0,0,1]).slice(4,7),enc(decode(xz)),'OFF retains geometry normal morph');
+    const xz=[...terrainBytes.slice(0,2)];
+    close(baseRender(false,morph,[0,0,1]).slice(4,7),enc(decode(xz)),'OFF uses the committed normal tile');
   }
   if(gl.getError()!==gl.NO_ERROR)throw new Error('WebGL Base Pass error');
   result.textContent='PASS: compose, mip, Base Pass and shadow GLSL ES 3 variants compiled and linked; '+checks+' pixel checks passed.';

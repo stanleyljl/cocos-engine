@@ -16,6 +16,8 @@ public:
     LandscapeHeightfield &operator=(const LandscapeHeightfield &) = delete;
 
     uint32_t create(const Uint16Array &samples, uint32_t resolution, uint32_t wrapperObjectID);
+    // Transfer a streamed mesh out of the JSB wrapper's permanent asset cache.
+    bool adoptTriangleMesh(uint32_t objectID, uint32_t wrapperObjectID);
     bool adoptShape();
     // Called AFTER TerrainShape::onDestroy removes the actor/event mappings.
     void destroy();

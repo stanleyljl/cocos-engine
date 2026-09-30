@@ -3,11 +3,14 @@ import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { isValid } from '../core';
 import { Node } from '../scene-graph/node';
 import { director, DirectorEvent } from '../game/director';
+import { MeshCollider } from '../physics/framework/components/colliders/mesh-collider';
+import { Mesh } from '../3d/assets/mesh';
+import { createMesh } from '../3d/misc/create-mesh';
 import { TerrainCollider } from '../physics/framework/components/colliders/terrain-collider';
 import { PhysicsSystem } from '../physics/framework/physics-system';
 import { PhysicsMaterial } from '../physics/framework/assets/physics-material';
 import { selector } from '../physics/framework/physics-selector';
-import { LandscapePhysicsCollider, LandscapePhysicsHeightfield } from './landscape-physics-collider';
+import { LandscapePhysicsCollider, LandscapePhysicsMeshCollider, LandscapePhysicsHeightfield } from './landscape-physics-collider';
 import type { Landscape } from './landscape';
 import { LandscapeHeightGrid, LandscapeHeightLayout, LandscapeHeightLoader, LandscapeWorldBounds } from './landscape-height-data';
 
@@ -26,9 +29,9 @@ export enum LandscapePhysicsStatus {
 export interface LandscapePhysicsOptions {
     /** Maximum unique source tiles across all regions. Default 64. */
     maxTiles: number;
-    /** Maximum outstanding height loads, including obsolete requests. Default 1. */
+    /** Maximum outstanding height/splat tile pairs, including obsolete requests. Default 1. */
     maxConcurrentLoads: number;
-    /** Maximum new backend heightfields per update. Default 1. */
+    /** Maximum new backend collision tiles per update. Default 1. */
     maxCreationsPerStep: number;
     group: number;
     mask: number;
@@ -46,6 +49,8 @@ interface Tile {
     z: number;
     loading: boolean;
     samples?: Uint16Array;
+    holes?: Uint8Array;
+    mesh?: Mesh;
     node?: Node;
     error?: string;
 }
@@ -226,7 +231,7 @@ export class LandscapePhysics {
                 ++residentTiles;
             }
             if (tile.samples) {
-                sourceBytes += tile.samples.byteLength;
+                sourceBytes += tile.samples.byteLength + (tile.holes?.byteLength || 0);
             }
             if (!tile.node && !tile.error) {
                 ++queuedTiles;
@@ -238,10 +243,10 @@ export class LandscapePhysics {
     /** Visit the live colliders submitted to the backend, for optional debug
      * visualization. No geometry copies or GPU resources are created here.
      * Do not change regions or destroy nodes inside the visitor. */
-    public forEachCollider (visitor: (collider: TerrainCollider) => void): void {
+    public forEachCollider (visitor: (collider: TerrainCollider | MeshCollider) => void): void {
         for (const tile of this._tiles.values()) {
             if (tile.node && isValid(tile.node) && tile.node.activeInHierarchy) {
-                const collider = tile.node.getComponent(TerrainCollider);
+                const collider = tile.node.getComponent(TerrainCollider) || tile.node.getComponent(MeshCollider);
                 if (collider) {
                     visitor(collider);
                 }
@@ -468,14 +473,22 @@ export class LandscapePhysics {
         const generation = this._generation; const layout = this._layout!;
         const key = this._grid!.tileKey(tile.x, tile.z);
         tile.loading = true; ++this._inFlight;
-        void this._loader.loadTile(this._url, layout, tile.x, tile.z).then(samples => {
+        // Keep the admission slot until BOTH downloads settle, even if one fails.
+        const settle = <T>(request: Promise<T>): Promise<{ value: T | null; error: unknown }> => request.then(
+            value => ({ value, error: null }), error => ({ value: null, error }));
+        void Promise.all([settle(this._loader.loadTile(this._url, layout, tile.x, tile.z)),
+            settle(this._loader.loadHoles(this._url, layout, tile.x, tile.z))]).then(([heightResult, holeResult]) => {
             if (generation !== this._generation || this._tiles.get(key) !== tile) {
                 return;
             }
-            if (samples.length !== layout.resolution ** 2) {
-                throw new Error('Invalid height sample count');
+            const samples = heightResult.value; const holes = holeResult.value;
+            if (!samples) throw heightResult.error;
+            if (!holes) throw holeResult.error;
+            if (samples.length !== layout.resolution ** 2 || holes.length !== (layout.resolution - 1) ** 2) {
+                throw new Error('Invalid height or hole sample count');
             }
             tile.samples = samples;
+            tile.holes = holes;
         }).catch(error => {
             if (generation === this._generation && this._tiles.get(key) === tile) {
                 tile.error = String(error);
@@ -492,8 +505,28 @@ export class LandscapePhysics {
             const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
             const heightfield = new LandscapePhysicsHeightfield(tile.samples!, layout);
             node.setPosition(local.x, heightfield.localOriginY, local.z);
-            const collider = node.addComponent(LandscapePhysicsCollider);
-            collider.terrain = heightfield;
+            let collider: TerrainCollider | MeshCollider;
+            if (tile.holes!.some(hole => hole !== 0)) {
+                const n = layout.resolution, edge = n - 1;
+                const positions: number[] = [], indices: number[] = [];
+                for (let z = 0; z < n; ++z) for (let x = 0; x < n; ++x) {
+                    positions.push(x * heightfield.tileSize, heightfield.getHeight(x, z), z * heightfield.tileSize);
+                }
+                for (let z = 0; z < edge; ++z) for (let x = 0; x < edge; ++x) {
+                    if (tile.holes![z * edge + x]) continue;
+                    const a = z * n + x;
+                    indices.push(a, a + n, a + 1, a + 1, a + n, a + n + 1);
+                }
+                // An entirely empty tile is ready and owns no backend shape.
+                if (!indices.length) { node.active = true; return node; }
+                tile.mesh = createMesh({ positions, indices }, undefined, { calculateBounds: true });
+                collider = node.addComponent(LandscapePhysicsMeshCollider);
+                collider.convex = false;
+                collider.mesh = tile.mesh;
+            } else {
+                collider = node.addComponent(LandscapePhysicsCollider);
+                collider.terrain = heightfield;
+            }
             collider.sharedMaterial = this._options.material;
             node.active = true;
             if (!collider.shape?.impl) {
@@ -501,7 +534,7 @@ export class LandscapePhysics {
             }
             collider.setGroup(this._options.group); collider.setMask(this._options.mask);
             return node;
-        } catch (error) { node._destroyImmediate(); throw error; }
+        } catch (error) { node._destroyImmediate(); tile.mesh?.destroy(); tile.mesh = undefined; throw error; }
     }
 
     private _disposeTile (tile: Tile): void {
@@ -511,7 +544,8 @@ export class LandscapePhysics {
             // than retaining entire old regions until JS/native GC runs.
             tile.node._destroyImmediate();
         }
-        tile.node = undefined; tile.samples = undefined;
+        tile.mesh?.destroy(); tile.mesh = undefined;
+        tile.node = undefined; tile.samples = undefined; tile.holes = undefined;
     }
     private _clearTiles (): void {
         for (const tile of this._tiles.values()) {

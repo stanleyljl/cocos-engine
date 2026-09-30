@@ -121,21 +121,18 @@ function main () {
     }
     const sectorsX = safeInteger(manifest.sectorCount[0], 'Manifest sectorCount[0]', 1);
     const sectorsY = safeInteger(manifest.sectorCount[1], 'Manifest sectorCount[1]', 1);
-    const maxLevel = safeInteger(manifest.maxLevel, 'Manifest maxLevel', 0, 7);
-    const tileSize = safeInteger(manifest.nodeTileResolution, 'Manifest nodeTileResolution', 2);
-    const minTileLevel = manifest.minTileLevel === undefined
-        ? 0 : safeInteger(manifest.minTileLevel, 'Manifest minTileLevel', 0, maxLevel);
+    const maxLevel = safeInteger(manifest.maxLevel, 'Manifest maxLevel', 0, 8);
+    const tileSize = 129;
+    const minTileLevel = safeInteger(manifest.minTileLevel, 'Manifest minTileLevel', 0, maxLevel);
     const scaleValue = manifest.heightScale;
     const biasValue = manifest.heightBias;
     const scale = finiteNumber(scaleValue, 'Manifest heightScale');
     const bias = finiteNumber(biasValue, 'Manifest heightBias');
     if (scale <= 0) fail('Manifest heightScale must be positive');
-    if (!Array.isArray(manifest.levels)) fail('Manifest has no levels[] array');
+    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxLevel + 1) fail('Manifest requires maxLevel + 1 levels');
     const levelEntries = new Map();
-    for (const lv of manifest.levels) {
+    for (const [level, lv] of manifest.levels.entries()) {
         if (!lv || typeof lv !== 'object' || Array.isArray(lv)) fail('Manifest levels[] contains a malformed entry');
-        const level = safeInteger(lv.level, 'Manifest level', 0, maxLevel);
-        if (levelEntries.has(level)) fail(`Manifest contains duplicate level ${level}`);
         levelEntries.set(level, lv);
     }
     for (let level = 0; level <= maxLevel; ++level) {
@@ -214,24 +211,12 @@ function main () {
         }
     }
 
-    // Inject into the manifest, keyed by each level entry's `level` field.
-    if (!Array.isArray(manifest.levels)) fail('Manifest has no levels[] array');
-    for (const lv of manifest.levels) {
-        const level = lv.level;
+    // Array indices define levels, with L0 finest.
+    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxLevel + 1) fail('Manifest requires maxLevel + 1 levels');
+    for (const [level, lv] of manifest.levels.entries()) {
         if (level < 0 || level > maxLevel) fail(`Unexpected level ${level}`);
         lv.heightRange = { min: bounds[level].min, max: bounds[level].max };
     }
-    // Remove descriptions and derived fields no longer consumed by the loader.
-    // Keep materialLibrary for the retained material/VT pipeline.
-    for (const key of ['worldSizeMeters', 'nodeCoordinateSpace', 'sectorFromNode', 'heightRangeEncoding', 'height', 'splat']) {
-        delete manifest[key];
-    }
-    for (const lv of manifest.levels) {
-        for (const key of ['nodeSizeMeters', 'hasTile', 'sampleStepMeters', 'nodeCount']) {
-            delete lv[key];
-        }
-    }
-
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));
     // Report the world-space span of the root so the effect is easy to verify.
     const rMin = bias + (bounds[maxLevel].min[0] / HEIGHT_MAX) * scale;

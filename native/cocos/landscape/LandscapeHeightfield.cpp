@@ -13,6 +13,7 @@ namespace cc::landscape {
 struct LandscapeHeightfield::Impl {
 #if CC_USE_PHYSICS_PHYSX
     physx::PxHeightField *heightfield{nullptr};
+    physx::PxTriangleMesh *triangleMesh{nullptr};
     physx::PxShape *shape{nullptr};
     uint32_t objectID{0};
     uint32_t uninitializedWrapperID{0};
@@ -62,9 +63,24 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, uint32_t resolu
 #endif
 }
 
+bool LandscapeHeightfield::adoptTriangleMesh(uint32_t objectID, uint32_t wrapperObjectID) {
+#if CC_USE_PHYSICS_PHYSX
+    if (_impl->heightfield || _impl->triangleMesh || !objectID) return false;
+    auto &world = physics::PhysXWorld::getInstance();
+    auto *mesh = reinterpret_cast<physx::PxTriangleMesh *>(world.getPXPtrWithPXObjectID(objectID));
+    if (!mesh) return false;
+    _impl->triangleMesh = mesh;
+    _impl->objectID = objectID;
+    _impl->uninitializedWrapperID = wrapperObjectID;
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool LandscapeHeightfield::adoptShape() {
 #if CC_USE_PHYSICS_PHYSX
-    if (!_impl->heightfield || _impl->shape) {
+    if ((!_impl->heightfield && !_impl->triangleMesh) || _impl->shape) {
         return false;
     }
     auto &world = physics::PhysXWorld::getInstance();
@@ -74,7 +90,9 @@ bool LandscapeHeightfield::adoptShape() {
     }
     auto &shape = wrapper->getShape();
     physx::PxHeightFieldGeometry geometry;
-    if (!shape.getHeightFieldGeometry(geometry) || geometry.heightField != _impl->heightfield) {
+    physx::PxTriangleMeshGeometry meshGeometry;
+    if (_impl->heightfield ? (!shape.getHeightFieldGeometry(geometry) || geometry.heightField != _impl->heightfield)
+                           : (!shape.getTriangleMeshGeometry(meshGeometry) || meshGeometry.triangleMesh != _impl->triangleMesh)) {
         return false;
     }
     // Adopt the original createShape reference, not a new reference. Legacy
@@ -107,6 +125,10 @@ void LandscapeHeightfield::destroy() {
     if (_impl->heightfield) {
         _impl->heightfield->release();
         _impl->heightfield = nullptr;
+    }
+    if (_impl->triangleMesh) {
+        _impl->triangleMesh->release();
+        _impl->triangleMesh = nullptr;
     }
 #endif
 }

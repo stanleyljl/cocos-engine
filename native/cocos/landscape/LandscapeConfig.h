@@ -42,13 +42,14 @@ namespace cc {
 namespace landscape {
 namespace config {
 
-constexpr int       VERTS_PER_NODE_SIDE = 17;
-constexpr float     LOD_DISTANCE_RATIO = 2.0F;
-constexpr float     MORPH_START_RATIO = 0.70F;
+constexpr int VERTS_PER_NODE_SIDE = 17;
+constexpr float LOD_DISTANCE_RATIO = 2.0F;
+constexpr float MORPH_START_RATIO = 0.70F;
 // L0-L8: maximum sector size = 4096 m at 1 m finest-grid spacing
 // (16 cells per node side * 2^8). Keep the shader/importer limits in sync.
-constexpr uint32_t  MAX_LOD_LEVELS = 9;
-constexpr uint8_t   ALL_QUADRANTS = 0x0FU;
+constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
+constexpr uint32_t MAX_LOD_LEVELS = 9;
+constexpr uint8_t ALL_QUADRANTS = 0x0FU;
 
 // Active height-page cache configuration.
 constexpr uint32_t PAGE_POOL_LAYERS = 1024;
@@ -77,7 +78,7 @@ constexpr double STREAMING_TIME_BUDGET_MS = 2.0;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 static_assert(VT_PAGE_RES % (1U << (VT_MIP_LEVELS - 1)) == 0 &&
-              VT_PAGE_BORDER % (1U << (VT_MIP_LEVELS - 1)) == 0,
+                  VT_PAGE_BORDER % (1U << (VT_MIP_LEVELS - 1)) == 0,
               "Every VT mip requires aligned slots and whole-texel gutters");
 static_assert(VT_PAGE_RES > 2 * VT_PAGE_BORDER && VT_ATLAS_SIZE % VT_PAGE_RES == 0,
               "VT pages must fit the atlas and leave a non-empty interior");
@@ -203,10 +204,6 @@ struct QuadNode {
 constexpr uint32_t NODE_KEY_COORD_BITS = 28U;
 constexpr uint64_t NODE_KEY_COORD_MASK = (1ULL << NODE_KEY_COORD_BITS) - 1ULL;
 constexpr uint32_t NODE_KEY_LEVEL_SHIFT = NODE_KEY_COORD_BITS * 2U;
-
-// Conservative surface-stretch estimate shared by metadata aggregation and
-// material demand. Preserve steep child features, capped at two extra VT levels.
-float cliffDensityScale(float heightRange, float width, float childScale = 1.0F);
 
 uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
 uint64_t makeNodeKey(const QuadNode &node);

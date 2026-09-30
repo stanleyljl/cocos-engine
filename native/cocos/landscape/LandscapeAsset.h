@@ -31,11 +31,11 @@
 #include <memory>
 #include <mutex>
 
-#include "base/std/container/string.h"
-#include "base/std/container/unordered_set.h"
-#include "base/std/container/unordered_map.h"
-#include "base/std/container/vector.h"
 #include "base/RefCounted.h"
+#include "base/std/container/string.h"
+#include "base/std/container/unordered_map.h"
+#include "base/std/container/unordered_set.h"
+#include "base/std/container/vector.h"
 #include "landscape/LandscapeConfig.h"
 #include "landscape/LandscapeQuery.h"
 
@@ -62,7 +62,7 @@ public:
         ccstd::string normalRoughnessAO;
         ccstd::string height;
         float heightScale{0.0F};
-        bool modulateColor{false}; // preserve underlying terrain color for imprints
+        bool modulateColor{false};   // preserve underlying terrain color for imprints
         int32_t detailMaterial0{-1}; // optional tiled material-library pair, RVT-only
         int32_t detailMaterial1{-1}; // normalRoughnessAO.B stores pair blend weight
     };
@@ -77,8 +77,6 @@ public:
         float z{0};
         float size{1};
         uint32_t layer{0};
-        float nearDistance{12};
-        float farDistance{40};
     };
 
     struct TileData {
@@ -91,7 +89,7 @@ public:
     LandscapeAsset();
     ~LandscapeAsset() override;
 
-    bool load(const ccstd::string &dataDir);
+    bool load(const ccstd::string &manifestPath);
     // Main-thread synchronous decode for roots and the initial view warmup.
     bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const;
     // Call on the main thread: resolves absolute file paths before scheduling
@@ -105,13 +103,14 @@ public:
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                         float &minY, float &maxY) const;
-    float getSurfaceStretch(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
     // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
                          ccstd::vector<uint8_t> &data);
 
     const ccstd::vector<DecalLayer> &decalLayers() const { return _decalLayers; }
     const ccstd::vector<Decal> &decals() const { return _decals; }
+    float decalNearDistance() const { return _decalNearDistance; }
+    float decalFarDistance() const { return _decalFarDistance; }
     uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
     const ccstd::string &dataDir() const { return _dataDir; }
@@ -132,12 +131,11 @@ private:
     struct HeightRange {
         float minY{0.0F};
         float maxY{0.0F};
-        float surfaceStretch{1.0F}; // maximum local stretch, propagated from finer nodes
     };
 
     void resetAsyncState();
     static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
-                               uint32_t resolution, TileData &tile);
+                              uint32_t resolution, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 
     ccstd::string _dataDir;
@@ -149,6 +147,8 @@ private:
     ccstd::vector<DecalLayer> _decalLayers;
     ccstd::vector<Decal> _decals;
     uint32_t _decalResolution{1};
+    float _decalNearDistance{12.0F};
+    float _decalFarDistance{40.0F};
     NodeRangeLayout _nodeLayout;
     ccstd::vector<HeightRange> _heightRanges;
     ccstd::unordered_set<uint64_t> _pendingTiles;

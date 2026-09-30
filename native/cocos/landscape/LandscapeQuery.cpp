@@ -211,6 +211,12 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     auto &entry = it->second;
     entry.lastUse = ++_clock;
     const auto location = locateSample(grid, address);
+    uint16_t encoded;
+    std::memcpy(&encoded, entry.tile.splat.data() + location.texels[0] * 2U, sizeof(encoded));
+    if ((encoded & 0x8000U) != 0U) {
+        result.status = LandscapeQueryStatus::MISS;
+        return result;
+    }
     if (!interpolateHeightNormal(entry, location, local, result)) {
         return result;
     }
@@ -271,7 +277,7 @@ void LandscapeQuery::interpolateSurface(const Entry &entry, const SampleLocation
     for (size_t i = 0; i < splatAt.size(); ++i) {
         uint16_t encoded;
         std::memcpy(&encoded, entry.tile.splat.data() + splatAt[i] * 2U, sizeof(encoded));
-        const float blend = float(encoded >> 10U) / 63.0F;
+        const float blend = float((encoded >> 10U) & 31U) / 31.0F;
         material[encoded & 31U] += spatial[i] * (1-blend);
         material[(encoded >> 5U) & 31U] += spatial[i] * blend;
     }

@@ -112,6 +112,7 @@ void Landscape::initializeRenderer() {
 
 void Landscape::applyRendererSettings(LandscapeRenderer &renderer) const {
     renderer.setDebugData(_debugData);
+    renderer.setHoleMode(_holeMode);
     renderer.setGlobalColorMap(_globalColorMap);
     renderer.setGlobalColorStrength(_globalColorStrength);
     renderer.setCastShadow(_castShadow);
@@ -417,6 +418,13 @@ void Landscape::onGlobalPipelineStateChanged() {
 
 bool Landscape::isReady() const {
     return _renderer != nullptr && _renderer->isReady();
+}
+
+void Landscape::setHoleMode(uint32_t mode) {
+    _holeMode = mode == 0U ? 0U : 1U;
+    if (_renderer) {
+        _renderer->setHoleMode(_holeMode);
+    }
 }
 
 void Landscape::setDebugData(const LandscapeDebugData &data) {

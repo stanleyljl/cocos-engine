@@ -7,6 +7,8 @@ CCEffect %{
       frag: landscape-fs
       properties:
         mainColor: { value: [1, 1, 1, 1], linear: true, editor: { type: color } }
+        holeParams: { value: [0, 0, 0, 0] }
+        holeSplatmap: { sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         terrainParams: { value: [3000, 0, 0, 0] }
         sectorParams: { value: [1, 0, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
@@ -51,6 +53,14 @@ CCEffect %{
       phase: deferred-forward
       propertyIndex: 0
       embeddedMacros: { CC_FORCE_FORWARD_SHADING: true }
+  - name: hole-probe
+    passes:
+    - vert: landscape-hole-probe-vs:vert
+      frag: landscape-hole-probe-fs:frag
+      rasterizerState: { cullMode: none }
+      depthStencilState: { depthTest: false, depthWrite: false }
+      properties:
+        probeParams: { value: [0, 0, 0, 0] }
 }%
 
 CCProgram landscape-uniforms %{
@@ -68,6 +78,7 @@ CCProgram landscape-uniforms %{
     vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
+    vec4 holeParams; // 0 = verified vertex NaN, 1 = fragment discard
   };
 }%
 
@@ -84,7 +95,37 @@ CCProgram landscape-macros %{
   #include <surfaces/effect-macros/terrain>
 }%
 
+CCProgram landscape-hole-sampling %{
+  #if __VERSION__ >= 300
+    uniform highp usampler2DArray holeSplatmap;
+    bool landscapeHole(vec2 localXZ, vec4 region, bool vertexSample) {
+      vec2 grid = clamp((localXZ - region.xy) / region.z, vec2(0.0), vec2(1.0)) * (heightParams.y - 1.0);
+      // Vertices use aligned point samples. Fragments/physics use the cell's minimum corner.
+      ivec2 p = vertexSample ? ivec2(floor(grid + 0.5)) : min(ivec2(floor(grid)), ivec2(int(heightParams.y) - 2));
+      return (texelFetch(holeSplatmap, ivec3(p, int(region.w + 0.5)), 0).r & 32768u) != 0u;
+    }
+  #endif
+}%
+
+CCProgram landscape-hole-fragment %{
+  #include <landscape-hole-sampling>
+  #if __VERSION__ >= 300
+    in highp vec2 v_holeXZ;
+    flat in highp vec4 v_holeRegion;
+  #endif
+  void discardLandscapeHole() {
+    #if __VERSION__ >= 300
+      if (holeParams.x > 0.5 && landscapeHole(v_holeXZ, v_holeRegion, false)) discard;
+    #endif
+  }
+}%
+
 CCProgram landscape-vertex %{
+  #include <landscape-hole-sampling>
+  #if __VERSION__ >= 300
+    out highp vec2 v_holeXZ;
+    flat out highp vec4 v_holeRegion;
+  #endif
   #if LANDSCAPE_WIREFRAME && !LANDSCAPE_SHADOW_PASS
     out vec3 v_wireBarycentric;
   #endif
@@ -283,6 +324,14 @@ CCProgram landscape-vertex %{
     v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
     v_normalLayer = a_tileInst.w;
   #endif
+    #if __VERSION__ >= 300
+      v_holeXZ = localXZ;
+      v_holeRegion = vec4(0.0, 0.0, 1.0, 0.0);
+      #if USE_INSTANCING
+        v_holeRegion = a_tileInst;
+        if (holeParams.x < 0.5 && landscapeHole(localXZ, a_tileInst, true)) height = uintBitsToFloat(0x7fc00000u);
+      #endif
+    #endif
     // Sample base terrain at the final morphed coordinate.
     return vec3(localXZ.x, height, localXZ.y);
   }
@@ -302,6 +351,7 @@ CCProgram landscape-vertex %{
 }%
 
 CCProgram landscape-surface %{
+  #include <landscape-hole-fragment>
   #if LANDSCAPE_WIREFRAME
     in vec3 v_wireBarycentric;
   #endif
@@ -356,6 +406,7 @@ CCProgram landscape-surface %{
       // Flat collar pixels already exist on the terrain: avoid coplanar overlap.
       if (v_decalLift <= 0.001) discard;
     #endif
+    discardLandscapeHole();
     vec3 albedo = vec3(0.0);
   #if !LANDSCAPE_DEBUG_UNLIT
     vec3 detailNormal = vec3(0.0, 0.0, 1.0);
@@ -499,6 +550,7 @@ CCProgram landscape-shadow-fs %{
   #include <surfaces/includes/common-fs>
   #include <landscape-uniforms>
 
+  #include <landscape-hole-fragment>
   in highp vec2 v_clip_depth;
   #if __VERSION__ >= 300 && LANDSCAPE_DECAL_MESH
     in float v_decalLift;
@@ -526,10 +578,29 @@ CCProgram landscape-shadow-fs %{
       // Match the main pass: a flat decal collar is not an extra occluder.
       if (v_decalLift <= 0.001) discard;
     #endif
+    discardLandscapeHole();
     #if CC_SHADOWMAP_FORMAT == SHADOWMAP_FORMAT_RGBA8
       fragColorX = packDepthToRGBA(depth);
     #else
       fragColorX = vec4(depth, 1.0, 1.0, 1.0);
     #endif
   }
+}%
+
+CCProgram landscape-hole-probe-vs %{
+  precision highp float;
+  precision highp int;
+  in vec2 a_position;
+  uniform Probe { vec4 probeParams; };
+  vec4 vert() {
+    vec4 p = vec4(a_position * 2.0 - 1.0, 0.5, 1.0);
+    #if __VERSION__ >= 300
+      if (probeParams.x > 0.5 && a_position.x > 0.5 && a_position.y < 0.5) p = vec4(uintBitsToFloat(0x7fc00000u));
+    #endif
+    return p;
+  }
+}%
+CCProgram landscape-hole-probe-fs %{
+  precision highp float;
+  vec4 frag() { return vec4(1.0); }
 }%

@@ -33,7 +33,7 @@ LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
             const size_t i = z * 3 + x;
             t.height[i * 2] = h >> 8;
             t.height[i * 2 + 1] = h & 255;
-            const uint16_t s = 3U | (7U << 5U) | (21U << 10U);
+            const uint16_t s = 3U | (7U << 5U) | (10U << 10U);
             std::memcpy(t.splat.data() + i * 2, &s, 2);
             // Deliberately different from the height gradient: queries must use RGB.
             t.normal[i * 3] = 64;
@@ -84,7 +84,7 @@ void sampling() {
     close(hit.normal.x,-127.0F/length,"source normal X");
     close(hit.normal.y,185.0F/length,"source normal Y");
     close(hit.normal.z,65.0F/length,"source normal Z");
-    require(hit.surfaceType==3,"dominant material"); close(hit.surfaceWeight,2.0F/3.0F,"material weight");
+    require(hit.surfaceType==3,"dominant material"); close(hit.surfaceWeight,21.0F/31.0F,"material weight");
     close(q.sample({4,2}).position.y,1000,"inclusive far corner");
     close(q.sample({-4,-2}).position.y,0,"inclusive near corner");
     close(q.sample({-2,0}).position.y,300,"tile/sector boundary");
@@ -166,7 +166,22 @@ void triangleHeight() {
     close(q.sample({-3.2F,-1.3F}).position.y,6.4F,"second triangle");
 }
 
+void holes() {
+    Loading loading;
+    LandscapeQuery q(data(),loading.loader(),1);
+    q.setSource(1,{-3,-1},0); q.update();
+    auto t=tile(0,0);
+    uint16_t hole=0x8000U | 3U | (7U<<5U) | (10U<<10U);
+    std::memcpy(t.splat.data(), &hole, 2);
+    loading.jobs.front().complete(std::move(t),true); loading.jobs.pop_front(); q.update();
+    require(q.sourceStatus(1)==Status::HIT,"hole does not make residency unready");
+    require(q.sample({-3.75F,-1.75F}).status==Status::MISS,"hole cell misses");
+    require(q.sample({-3.01F,-1.01F}).status==Status::MISS,"both triangles in hole miss");
+    require(q.sample({-2.75F,-1.75F}).status==Status::HIT,"adjacent solid cell survives");
+    close(q.sample({-2.75F,-1.75F}).surfaceWeight,21.0F/31.0F,"hole bit is not material weight");
+}
+
 int main() {
-    sampling(); budgetAndSharing(); completionLifetime(); failureAndSplat(); triangleHeight();
+    sampling(); budgetAndSharing(); completionLifetime(); failureAndSplat(); triangleHeight(); holes();
     std::cout << "Landscape CPU query tests passed\n";
 }

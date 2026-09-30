@@ -20,7 +20,8 @@ test('RVT decal material and conforming near mesh on WebGL2', {
     assert.doesNotMatch(effect.shaders[0].glsl3.frag, /v_source.w < 0.0/, 'VT contains only normal terrain composition');
     const baseEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
     const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/builtin-landscape.effect'), 'utf8');
-    const vertexChunk = source.split('CCProgram landscape-vertex %{')[1].split('}%')[0];
+    const vertexChunk = source.split('CCProgram landscape-vertex %{')[1].split('}%')[0]
+        .replace('#include <landscape-hole-sampling>', source.split('CCProgram landscape-hole-sampling %{')[1].split('}%')[0]);
     const harness = fs.readFileSync(path.join(__dirname, 'decal-rendering.webgl.js'), 'utf8');
     new (require('node:vm').Script)(harness); // Report syntax errors before launching Chrome.
     const prefix = path.join(os.tmpdir(), 'landscape-decal-test-');

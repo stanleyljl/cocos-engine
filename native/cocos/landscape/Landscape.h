@@ -90,6 +90,7 @@ public:
     void onGlobalPipelineStateChanged();
 
     void setDebugData(const LandscapeDebugData &data);
+    void setHoleMode(uint32_t mode); // 0: fast vertex NaN, 1: fragment discard
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
     void setGlobalColorStrength(float strength);
@@ -137,6 +138,7 @@ private:
     ccstd::vector<QuadNode> _geometryNodes;
 
     LandscapeDebugData _debugData;
+    uint32_t _holeMode{0};
     bool _castShadow{true};
     bool _receiveShadow{true};
     float _lodQualityScale{1.0F};

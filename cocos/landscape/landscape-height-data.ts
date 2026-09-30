@@ -2,6 +2,8 @@
 import downloader from '../asset/asset-manager/downloader';
 import zlib from '../../external/compression/zlib.min';
 
+export const LANDSCAPE_TILE_RESOLUTION = 129;
+
 /** CPU-only description of the finest source grid. */
 export interface LandscapeHeightLayout {
     resolution: number;
@@ -78,12 +80,11 @@ export class LandscapeHeightGrid {
 }
 
 export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayout {
-    const { sectorCount, maxLevel, minTileLevel, nodeTileResolution, sectorSizeMeters, heightScale, heightBias, files } = manifest;
+    const { sectorCount, maxLevel, minTileLevel, sectorSizeMeters, heightScale, heightBias, files } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2
         || !sectorCount.every((v: number) => Number.isInteger(v) && v > 0)
         || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8
         || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
-        || !Number.isInteger(nodeTileResolution) || nodeTileResolution < 2 || nodeTileResolution > 1025
         || !Number.isFinite(sectorSizeMeters) || sectorSizeMeters <= 0
         || !Number.isFinite(heightScale) || heightScale <= 0 || !Number.isFinite(heightBias)
         || !files || typeof files !== 'object') {
@@ -94,7 +95,7 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
     if (tilesX * tilesZ > 1000000) {
         throw new Error('Landscape tile count exceeds limit');
     }
-    return { resolution: nodeTileResolution, tilesX, tilesZ, tileSize: sectorSizeMeters / side,
+    return { resolution: LANDSCAPE_TILE_RESOLUTION, tilesX, tilesZ, tileSize: sectorSizeMeters / side,
         heightScale, heightBias, level: minTileLevel, files };
 }
 
@@ -175,9 +176,23 @@ export class LandscapeHeightLoader {
     }
 
     public async loadTile (url: string, layout: LandscapeHeightLayout, x: number, z: number): Promise<Uint16Array> {
-        const suffix = layout.files[`nodes/L${layout.level}/h_${x}_${z}.png`];
+        return this._loadSamples(url, layout, x, z, 'h');
+    }
+
+    public async loadHoles (url: string, layout: LandscapeHeightLayout, x: number, z: number): Promise<Uint8Array> {
+        const splat = await this._loadSamples(url, layout, x, z, 's');
+        const edge = layout.resolution - 1;
+        const holes = new Uint8Array(edge * edge);
+        for (let z = 0; z < edge; ++z) for (let x = 0; x < edge; ++x) {
+            holes[z * edge + x] = splat[z * layout.resolution + x] >>> 15;
+        }
+        return holes;
+    }
+
+    private async _loadSamples (url: string, layout: LandscapeHeightLayout, x: number, z: number, kind: 'h' | 's'): Promise<Uint16Array> {
+        const suffix = layout.files[`nodes/L${layout.level}/${kind}_${x}_${z}.png`];
         if (!/^\.lsraw\d+$/.test(suffix)) {
-            throw new Error(`Missing Landscape height tile ${x},${z}`);
+            throw new Error(`Missing Landscape ${kind} tile ${x},${z}`);
         }
         const [path, query] = url.split('?');
         if (!path.endsWith('.lsmanifest')) {

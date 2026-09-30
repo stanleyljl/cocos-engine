@@ -30,15 +30,6 @@
 namespace cc {
 namespace landscape {
 
-float cliffDensityScale(float heightRange, float width, float childScale) {
-    const float slope = std::max(heightRange, 0.0F) / std::max(width, 0.001F);
-    // At most two extra VT levels. This is a conservative range-based estimate,
-    // not a substitute for screen-space feedback; residency still bounds memory.
-    // Retain narrow steep features when a coarse node encloses mostly flat
-    // terrain. Averaging its high/low range over the coarse width loses them.
-    return std::min(4.0F, std::max(childScale, std::sqrt(1.0F + slope * slope)));
-}
-
 bool LandscapeData::valid() const {
     return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
            minTileLevel <= maxLevel && tileResolution > 1U && sectorSize > 0.0F &&

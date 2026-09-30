@@ -290,7 +290,7 @@ CCProgram vt-compose-fs %{
       sampleIndices[i] = ids[i] == minId ? 0 : (ids[i] == maxId ? 2 : 1);
     }
     for (int i = 0; i < 3; ++i) {
-      float blend = float(splatSamples[i] >> 10u) / 63.0;
+      float blend = float((splatSamples[i] >> 10u) & 31u) / 31.0;
       weights[sampleIndices[i*2]] += spatialWeights[i] * (1.0-blend);
       weights[sampleIndices[i*2+1]] += spatialWeights[i] * blend;
     }
@@ -377,7 +377,7 @@ CCProgram vt-compose-fs %{
       for (int i = 0; i < 3; ++i) {
         int bottom = sampleIndices[i*2];
         int top = sampleIndices[i*2+1];
-        float blend = float(splatSamples[i] >> 10u) / 63.0;
+        float blend = float((splatSamples[i] >> 10u) & 31u) / 31.0;
         if (bottom != top && spatialWeights[i] > 0.0) {
           blend = heightBlend(blend, albedoHeights[bottom].a, albedoHeights[top].a);
         }

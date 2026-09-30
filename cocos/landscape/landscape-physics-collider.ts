@@ -3,6 +3,8 @@ import { ccclass } from 'cc.decorator';
 import { JSB } from 'internal:constants';
 import { cclegacy, IVec3Like, Quat, Vec3 } from '../core';
 import { TerrainCollider } from '../physics/framework/components/colliders/terrain-collider';
+import { MeshCollider } from '../physics/framework/components/colliders/mesh-collider';
+import { Mesh } from '../3d/assets/mesh';
 import { selector } from '../physics/framework/physics-selector';
 import { ITerrainAsset } from '../physics/spec/i-external';
 import { ITerrainShape } from '../physics/spec/i-physics-shape';
@@ -109,7 +111,7 @@ function createLandscapeShape (): ITerrainShape {
                     Vec3.copy(this._offset, v);
                 }
             } as unknown as Constructor<ITerrainShape>;
-        } else if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && jsb.physics) {
+        } else if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && globalThis['jsb.physics']) {
             if (!jsb.LandscapeHeightfield) {
                 throw new Error('Landscape native physics binding is missing; rebuild native code');
             }
@@ -177,5 +179,59 @@ export class LandscapePhysicsCollider extends TerrainCollider {
         this._shape = createLandscapeShape();
         this._shape.initialize(this);
         this._shape.onLoad!();
+    }
+}
+
+/** Streamed hole meshes own their cooked PhysX data; ordinary MeshCollider caches stay unchanged. */
+@ccclass('cc.LandscapePhysicsMeshCollider')
+export class LandscapePhysicsMeshCollider extends MeshCollider {
+    protected onLoad (): void {
+        if (!selector.runInEditor) return;
+        this.sharedMaterial = this._material;
+        const Base = selector.wrapper.TrimeshShape as any;
+        if (!Base) throw new Error(`Landscape hole collision unavailable: ${selector.id}`);
+        let Type = Base;
+        if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && globalThis['jsb.physics']) {
+            Type = class extends Base {
+                private _resource: any;
+                private _nativeInitialized = false;
+                setMesh (mesh: Mesh): void {
+                    if (this._resource) return;
+                    super.setMesh(mesh);
+                    this._resource = new jsb.LandscapeHeightfield();
+                    const cache = globalThis['jsb.physics'].CACHE.trimesh;
+                    if (!this._resource.adoptTriangleMesh(cache[mesh._uuid], this._impl.getObjectID())) {
+                        throw new Error('Failed to own Landscape native hole mesh');
+                    }
+                    delete cache[mesh._uuid];
+                }
+                initialize (collider: MeshCollider): void {
+                    super.initialize(collider); this._nativeInitialized = true;
+                    if (!this._resource.adoptShape()) throw new Error('Failed to attach Landscape native hole mesh');
+                }
+                onDestroy (): void {
+                    if (this._nativeInitialized) super.onDestroy();
+                    this._resource?.destroy(); this._resource = null;
+                }
+            };
+        } else if (selector.id === 'physx') {
+            Type = class extends Base {
+                private _ownedMesh: any;
+                setMesh (mesh: Mesh): void {
+                    if (this._ownedMesh) return;
+                    super.setMesh(mesh);
+                    const cache = (cclegacy._global.PhysX as any).MESH_STATIC;
+                    this._ownedMesh = cache[mesh._uuid]; delete cache[mesh._uuid];
+                }
+                onDestroy (): void {
+                    const flags = this._flags;
+                    super.onDestroy();
+                    this.geometry?.delete(); flags?.delete();
+                    this._ownedMesh?.release(); this._ownedMesh = null;
+                }
+            };
+        }
+        this._shape = new Type();
+        this._shape!.initialize(this); this._shape!.onLoad!();
     }
 }

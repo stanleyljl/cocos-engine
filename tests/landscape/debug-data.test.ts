@@ -1,9 +1,19 @@
 import { CCClass } from '../../cocos/core';
-import { Landscape, LandscapeDebugData } from '../../cocos/landscape';
+import { Landscape, LandscapeDebugData, LandscapeHoleMode } from '../../cocos/landscape';
 import { deserialize } from '../../cocos/serialization/deserialize';
 import { Texture2D } from '../../cocos/asset/assets';
 
 describe('Landscape debug data', () => {
+    test('hole mode defaults to Fast, serializes and immediately updates native', () => {
+        const terrain = new Landscape();
+        expect(terrain.holeMode).toBe(LandscapeHoleMode.Fast);
+        const native = { setHoleMode: jest.fn() };
+        (terrain as any)._native = native;
+        terrain.holeMode = LandscapeHoleMode.HighQuality;
+        expect(native.setHoleMode).toHaveBeenLastCalledWith(1);
+        const loaded = deserialize({ __type__: 'cc.Landscape', _holeMode: 1 }) as Landscape;
+        expect(loaded.holeMode).toBe(LandscapeHoleMode.HighQuality);
+    });
     test('nested scene data preserves all switches and component properties', () => {
         const data = new LandscapeDebugData();
         for (const key of Object.keys(data) as (keyof LandscapeDebugData)[]) data[key] = !data[key];
@@ -46,7 +56,7 @@ describe('Landscape debug data', () => {
         const native = {
             setDebugData: jest.fn(data => submitted.push({ ...data })),
             setAssetPath: jest.fn(), setGlobalColorStrength: jest.fn(), setGlobalColorMap: jest.fn(),
-            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setQueryCacheCapacity: jest.fn(),
+            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setQueryCacheCapacity: jest.fn(), setHoleMode: jest.fn(),
             onEnable: jest.fn(), onDisable: jest.fn(),
             isInitialized: jest.fn(() => true), update: jest.fn(),
             drawDebugBounds: jest.fn(),

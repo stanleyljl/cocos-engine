@@ -1,5 +1,10 @@
 # Landscape Asset Tools
 
+Source height, splat and normal tiles always use 129×129 samples. Paths and
+formats are fixed in code; the manifest contains dataset dimensions, height ranges,
+materials and decals. `decalLibrary.nearDistance` and `farDistance` apply to all
+displaced decals in one Landscape; placements contain only `x`, `z`, `size`, `layer`.
+
 ## Splat tile format
 
 Material distribution is authored by the application or its asset tools.
@@ -11,11 +16,22 @@ Splat PNGs are **16-bit grayscale**, decoded/uploaded as **R16UI**:
 | --- | --- |
 | 0..4 | First material layer ID |
 | 5..9 | Second (upper) material layer ID |
-| 10..15 | Second layer weight, divided by 63 |
+| 10..14 | Second layer weight, divided by 31 |
+| 15 | Terrain hole (1 = hole) |
 
 The first layer has weight `1 - secondWeight`. IDs refer to `materialLibrary.layers`.
 The encoding allows any pair of IDs from 0 through 31. Coarser splat levels
-must preserve valid material IDs; never average packed uint16 values.
+must preserve valid material IDs and subsample the aligned hole bit; never average packed uint16 values. Import material repair preserves bit 15.
+
+`Landscape.holeMode` defaults to `LandscapeHoleMode.Fast` (vertex NaN triangle removal,
+with a startup GPU probe and fragment fallback). `HighQuality` discards fragments
+inside hole cells. Both sample the currently committed source LOD. CPU surface
+queries and collision always read the finest source cells: holes return `Miss`
+and omit collision triangles. Hole meshes release their cooked resources on unload.
+No separate hole texture or manifest setting is required.
+
+Cloudveil contains two 16 m square holes, at terrain-local XZ `(-80,112)` (flat)
+and `(16,-208)` (steep). Holes remove the surface; they do not generate cave walls.
 
 The runtime samples the three splat texels of the containing triangle. Import
 must constrain each triangle to at most three unique materials. The compose
@@ -65,13 +81,13 @@ Numbered archives must be contiguous from `00.zip`; their material names are che
 matching manifest layer IDs, preserving the chosen terrain order.
 Material IDs and their use in terrain painting are defined by each asset.
 The manifest's
-`materialLibrary` records `dir: "textures"`, `resolution`, `format: "RGBA8"`
-and each layer's `id`, `name`, `albedoHeight`, `normalRoughnessAO`,
-`detailHeightScale` and `detailHeightBias`. Detail height scale defaults
+`materialLibrary` records `dir`, `resolution` and `layers`. Each layer records
+`name`, `albedoHeight`, `normalRoughnessAO`, `pixelsPerMeter`,
+`detailHeightScale` and `detailHeightBias`. Layer IDs are array indices; the two
+material PNGs always use RGBA8. Detail height scale defaults
 to 1.0 and bias to 0.0; repacking preserves existing parameters by material name. Re-running
 the height tile generator with `--force` preserves this explicit material
-library from the existing manifest instead of rescanning the old `materials/`
-directory. It validates referenced PNG paths before replacing height tiles.
+library from the existing manifest. It validates referenced PNG paths before replacing height tiles.
 
 Height is read at its source precision before rounding to 8-bit. Normal vectors
 are normalized before encoding XY; negative Z is reflected into the positive
@@ -253,27 +269,11 @@ Without a material override, disabling projection allows references to be evicte
 reenabling it waits for
 a complete reference again. Stationary frames retain the sync-cache fast path.
 
-Patch height ranges conservatively estimate surface stretch and request up to
-two finer VT levels (4x linear density). At asset load, the maximum local stretch
-is propagated from fine height-range nodes to their ancestors; a distant region
-must not average away a narrow cliff by dividing its height range by a much
-larger width. This uses one additional float per range node (about 341 KiB for
-a 2x2-sector, L0-L7 dataset), with no extra texture or asset reimport.
-Required VT pages inherit their visible patch's surface-footprint priority;
-each fallback ancestor halves that priority instead of inflating it using the
-ancestor's larger world size. When requests exceed the physical cache, a bounded
-coverage set is reserved before optional detail pages: visible requests are
-coarsened until their unique fallback pages fit half of the dynamic capacity.
-These coverage pages are also composed first. This avoids dropping every
-intermediate ancestor of a visible patch and exposing a whole-sector root as
-an apparently solid-colored near-ground block. Permanent roots remain available
-during loading. The coverage set adapts to demand; it is not a guarantee of a
-fixed maximum LOD gap for arbitrarily large views.
-Atlas capacity and per-frame update
-budget stay fixed. This may increase patch/model count and cache pressure, and
-does not guarantee every requested page fits. Geometry-cell containment, cache
-fallback, fixed reference resolution and the top-down atlas still limit extreme
-close-up cliffs. Neither overhang geometry nor a separate cliff mesh is added.
+VT detail is selected from camera distance and the material LOD bias. Required
+pages inherit their visible patch's priority from horizontal size divided by
+distance. Atlas capacity and the per-frame composition budget bound resource
+use. The top-down atlas still limits extreme close-up cliffs; projection does
+not add overhang geometry or a separate cliff mesh.
 
 Costs concentrate in VT generation and camera movement: each active projection
 can sample up to three albedo/height and three normal/roughness/AO textures.

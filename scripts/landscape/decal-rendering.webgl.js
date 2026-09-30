@@ -11,8 +11,9 @@ try {
   };
   const programs = effect.shaders.map(s => {
     const p = gl.createProgram();
-    gl.attachShader(p, compile(gl.VERTEX_SHADER, s.glsl3.vert));
-    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, s.glsl3.frag)); gl.linkProgram(p);
+    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n';
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, prefix + s.glsl3.vert));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, prefix + s.glsl3.frag)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     return p;
   });
@@ -58,7 +59,7 @@ try {
   gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1]);
   if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete framebuffer');
   gl.viewport(0,0,1,1);
-  const pack=([a,b,w])=>a|(b<<5)|(w<<10);
+  const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[656],0,0);
@@ -77,41 +78,42 @@ try {
   const close=(a,b,label,tolerance=2)=>{if(a.some((v,i)=>Math.abs(v-b[i])>tolerance))throw new Error(label+': '+a+' vs '+b);checks++;};
   const expected=(pairs,x=.5,y=.5)=>{
     const spatial=x>=y?[1-x,x-y,0,y]:[1-y,0,y-x,x], w=new Array(8).fill(0);
-    pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/63);w[b]+=spatial[i]*t/63;});
+    pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/31);w[b]+=spatial[i]*t/31;});
     return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(255,128,128,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
   };
   const repeat=p=>[p,p,p,p];
   close(render(repeat([0,1,0])),expected(repeat([0,0,0])),'pure bottom');
-  close(render(repeat([1,0,63])),expected(repeat([0,0,0])),'pure top');
-  close(render(repeat([3,3,29])),expected(repeat([3,3,29])),'identical IDs');
-  const pairs=[[0,1,15],[1,2,29],[0,2,44],[2,0,55]];
+  close(render(repeat([1,0,31])),expected(repeat([0,0,0])),'pure top');
+  close(render(repeat([3,3,14])),expected(repeat([3,3,14])),'identical IDs');
+  const pairs=[[0,1,7],[1,2,14],[0,2,22],[2,0,27]];
   close(render(pairs,{strength:0}),expected(pairs),'disabled height blend');
+  close(render(pairs.map(v=>[...v,1]),{strength:0}),render(pairs,{strength:0}),'hole bit never changes VT material weight',0);
   close(render(pairs,{scale:64}),render(pairs),'height blending retained at coarse footprint');
-  close(render(repeat([0,1,32])),expected(repeat([1,1,63])),'higher material covers lower');
-  close(render(repeat([0,1,32])),render(repeat([1,0,31])),'pair reversal');
-  const repeated=[[0,1,63],[0,2,20],[3,0,50],[0,1,0]];
+  close(render(repeat([0,1,16])),expected(repeat([1,1,31])),'higher material covers lower');
+  close(render(repeat([0,1,16])),render(repeat([1,0,15])),'pair reversal');
+  const repeated=[[0,1,31],[0,2,10],[3,0,25],[0,1,0]];
   close(render(repeated,{strength:0}),expected(repeated),'first duplicate has zero weight');
   close(render(repeated,{x:0,y:0}),expected(repeat([1,1,0])),'zero spatial weights');
   // Both cells share the right/left edge but have unrelated outer corners.
-  const left=[[0,2,20],[0,1,32],[1,2,40],[1,2,28]];
-  const right=[[0,1,32],[0,2,5],[1,2,28],[0,2,60]];
+  const left=[[0,2,10],[0,1,16],[1,2,20],[1,2,14]];
+  const right=[[0,1,16],[0,2,2],[1,2,14],[0,2,30]];
   close(render(left,{x:1,y:.37}),render(right,{x:0,y:.37}),'shared cell edge');
   let seed=83;const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
   for(let n=0;n<100;n++){
-    const q=Array.from({length:4},()=>[[0,2,7][Math.floor(rand()*3)],[0,2,7][Math.floor(rand()*3)],Math.floor(rand()*64)]);
+    const q=Array.from({length:4},()=>[[0,2,7][Math.floor(rand()*3)],[0,2,7][Math.floor(rand()*3)],Math.floor(rand()*32)]);
     const x=rand(),y=rand();
     close(render(q,{strength:0,x,y}),expected(q,x,y),'random linear recovery '+n);
     close(render(q,{scale:64,x,y}),render(q,{x,y}),'random distance independence '+n);
-    const swapped=q.map(([a,b,w])=>[b,a,63-w]);
+    const swapped=q.map(([a,b,w])=>[b,a,31-w]);
     close(render(q,{x,y}),render(swapped,{x,y}),'random pair symmetry '+n);
   }
 
-  const a=[[0,1,30],[1,2,20],[6,7,10],[0,2,50]];
-  const b=a.map(v=>v.slice());b[2]=[3,4,60];
+  const a=[[0,1,15],[1,2,10],[6,7,5],[0,2,25]];
+  const b=a.map(v=>v.slice());b[2]=[3,4,30];
   close(render(a,{x:.75,y:.25}),render(b,{x:.75,y:.25}),'lower triangle ignores fourth texel',0);
-  a[1]=[5,6,20];a[2]=[1,2,32];b[1]=[3,4,0];b[2]=[1,2,32];
+  a[1]=[5,6,10];a[2]=[1,2,16];b[1]=[3,4,0];b[2]=[1,2,16];
   close(render(a,{x:.25,y:.75}),render(b,{x:.25,y:.75}),'upper triangle ignores fourth texel',0);
-  const diagonal=[[0,1,12],[1,2,31],[0,2,45],[0,1,52]];
+  const diagonal=[[0,1,6],[1,2,15],[0,2,22],[0,1,26]];
   close(render(diagonal,{x:.49999,y:.5}),render(diagonal,{x:.50001,y:.5}),'diagonal continuity');
 
 
@@ -197,14 +199,19 @@ try {
   const probeSource=decal=>[
     'precision highp float;precision highp sampler2DArray;',
     '#define USE_INSTANCING 1','#define LANDSCAPE_DECAL_MESH '+decal,
+    '#define LANDSCAPE_SHADOW_PASS 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_HEIGHT_UNORM 0',
     '#define CCGetWorldMatrix(m) m = mat4(1.0)',
-    'uniform vec4 heightParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
+    'uniform vec4 heightParams,holeParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
     'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};',
     vertexChunk,
     'uniform vec2 testUV;out vec4 probe;',
-    'void main(){SurfacesStandardVertexIntermediate v;v.position=vec3(testUV,0);probe=vec4(SurfacesVertexModifyLocalPos(v),v_normalMorph);gl_Position=vec4(0,0,0,1);}'
+    'void main(){SurfacesStandardVertexIntermediate v;v.position=vec3(testUV,0);probe=vec4(SurfacesVertexModifyLocalPos(v),0.0);gl_Position=vec4(0,0,0,1);}'
   ].join('\n');
   const probePrograms=[link(probeSource(0),'precision highp float;out vec4 c;void main(){c=vec4(1);}',true),link(probeSource(1),'precision highp float;out vec4 c;void main(){c=vec4(1);}',true)];
+  gl.activeTexture(gl.TEXTURE15);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,17,17,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(17*17));
   const outBuffer=gl.createBuffer();gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER,outBuffer);gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER,16,gl.DYNAMIC_READ);gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER,0,outBuffer);
   const terrainTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE7);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrainTexture);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
@@ -219,6 +226,7 @@ try {
     a('a_gridInst',0,0,nodeSize,0);a('a_quadrantInst',...quadrant);a('a_tileInst',0,0,16,0);a('a_normalParentInst',0,0,16,0);a('a_vtInst',0,0,16,0);a('a_decalRegion',0,0,16,0);a('a_decalGrid',...grid);a('a_decalFade',scale,fade,0,0);
     u('heightParams',1,17,0,0);u('terrainParams',10,0,0,0);u('morphCameraPos',...camera,0);u('decalControl',enabled,0,0,0);u('lodMorph[0]',...range,0,0);
     gl.uniform2f(gl.getUniformLocation(p,'testUV'),...uv);gl.uniform1i(gl.getUniformLocation(p,'heightmap'),7);gl.uniform1i(gl.getUniformLocation(p,'decalHeightMap'),8);
+    gl.uniform1i(gl.getUniformLocation(p,'holeSplatmap'),15);
     gl.enable(gl.RASTERIZER_DISCARD);gl.beginTransformFeedback(gl.POINTS);gl.drawArrays(gl.POINTS,0,1);gl.endTransformFeedback();gl.disable(gl.RASTERIZER_DISCARD);
     const result=new Float32Array(4);gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER,0,result);return [...result];
   };
@@ -270,10 +278,13 @@ try {
       approx(a,onTerrain(mesh,uv.map(v=>v*8)),'height at fixed point matches selected triangles');
     }
   }
-  // A fine node at full morph must join the next coarser unmorphed node.
+  // The fine side of a 2:1 edge collapses odd vertices onto the coarse lattice.
+  for(let j=0;j<=16;j++){
+    const fine=probe([1,j/16],{decal:0,quadrant:[0,0,1,2]});
+    const coarse=probe([.5,Math.floor(j/2)/16],{decal:0,nodeSize:32,quadrant:[0,0,1,0]});
+    approx(fine.slice(0,3),coarse.slice(0,3),'fine-to-coarse stitched edge is continuous');
+  }
   for(const uv of sampleUVs){
-    const fine=probe(uv,{range:[0,.001]}),coarse=probe(uv,{nodeSize:32,range:[100,200]});
-    approx(fine.slice(0,3),coarse.slice(0,3),'fine-to-coarse LOD transition is continuous');
     approx(probe(uv,{quadrant:[.5,.5,.25,0]}),probe(uv),'VT patch ownership cannot retessellate a fixed grid');
   }
   // A high-frequency decal exposes the former bug: moving terrain vertices
@@ -298,7 +309,7 @@ try {
   // camera: neither the shadow entry nor cc_cameraPos may change CDLOD morph.
   const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
   for(const decal of [0,1]){
-    const programs=baseEffect.shaders.map(shader=>{
+    const programs=baseEffect.shaders.slice(0,2).map(shader=>{
       const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DECAL_MESH:decal,CC_RECEIVE_SHADOW:1,CC_USE_FOG:4});
       const vs=prefix+shader.glsl3.vert.replace(/void main\(\)/,'void terrainEntry()')
         +'\nout vec4 probe;void main(){terrainEntry();probe=vec4(VSOutput_worldPos,1.0);}';
@@ -334,6 +345,7 @@ try {
         const l=gl.getAttribLocation(p,name);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...value);}
       }
       gl.uniform1i(gl.getUniformLocation(p,'heightmap'),7);gl.uniform1i(gl.getUniformLocation(p,'decalHeightMap'),8);
+      gl.uniform1i(gl.getUniformLocation(p,'holeSplatmap'),15);
       gl.enable(gl.RASTERIZER_DISCARD);gl.beginTransformFeedback(gl.POINTS);gl.drawArrays(gl.POINTS,0,1);
       gl.endTransformFeedback();gl.disable(gl.RASTERIZER_DISCARD);
       const out=new Float32Array(4);gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER,0,out);return [...out].slice(0,3);

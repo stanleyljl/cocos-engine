@@ -32,6 +32,13 @@ import { Enum, isValid, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
 import { LandscapePhysics } from './landscape-physics';
 
+/** Terrain holes share streamed splat data in both modes. */
+export enum LandscapeHoleMode {
+    Fast = 0,
+    HighQuality = 1,
+}
+Enum(LandscapeHoleMode);
+
 /** Synchronous CPU query status. Only Hit makes the output valid. */
 export enum LandscapeQueryStatus {
     Hit = 0,
@@ -177,6 +184,18 @@ const DEBUG_PROPERTIES = [
 @executeInEditMode
 @disallowMultiple
 export class Landscape extends Component {
+    @serializable
+    private _holeMode = LandscapeHoleMode.Fast;
+
+    @type(LandscapeHoleMode)
+    @displayName('Hole Mode')
+    @tooltip('Fast removes triangles at vertices; HighQuality clips fragments. Both follow source LOD. Unsupported vertex culling uses HighQuality.')
+    get holeMode (): LandscapeHoleMode { return this._holeMode; }
+    set holeMode (value: LandscapeHoleMode) {
+        this._holeMode = value === LandscapeHoleMode.Fast ? LandscapeHoleMode.Fast : LandscapeHoleMode.HighQuality;
+        this._native?.setHoleMode(this._holeMode);
+    }
+
     public static ShadowCastingMode = ShadowCastingMode;
     public static ShadowReceivingMode = ShadowReceivingMode;
 
@@ -513,6 +532,7 @@ export class Landscape extends Component {
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
             this._native.setQueryCacheCapacity(this._queryCacheCapacity);
+            this._native.setHoleMode(this._holeMode);
             this._syncDebugData(true);
             this._native.setGlobalColorMap(this._globalColorMap);
             this._native.setGlobalColorStrength(this._globalColorStrength);

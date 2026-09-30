@@ -62,6 +62,8 @@ function parseArgs (argv) {
             fail(`Unexpected argument: ${arg}`);
         }
         const key = arg.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+        if (!['input', 'out', 'name', 'force', 'procedural', 'sectorsX', 'sectorsY', 'sectorSize',
+            'maxLevel', 'minTileLevel', 'heightScale', 'heightBias'].includes(key)) fail(`Unknown option: ${arg}`);
         const next = argv[i + 1];
         if (next === undefined || next.startsWith('--')) {
             result[key] = true;
@@ -112,34 +114,20 @@ function clamp01 (value) {
     return Math.max(0, Math.min(1, value));
 }
 
-// Discover the material-library albedo layers: PNGs directly under
-// <assetDir>/materials (sorted; the raw/ archive subdir is ignored). Layer id =
-// array index, capped at 32 (splat ids are 5-bit).
-function scanMaterialLayers (assetDir) {
-    const dir = path.join(assetDir, 'materials');
-    if (!fs.existsSync(dir)) {
-        return [];
-    }
-    return fs.readdirSync(dir)
-        .filter((f) => /\.png$/i.test(f) && fs.statSync(path.join(dir, f)).isFile())
-        .sort()
-        .slice(0, 32);
-}
-
 function scanMaterialLibrary (assetDir, manifestPath) {
-    // Packed materials have two images per layer. Preserve explicit ids and
+    // Packed materials have two images per layer. Preserve array order and
     // per-layer parameters rather than treating each PNG as another material.
     const library = fs.existsSync(manifestPath)
         ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')).materialLibrary : null;
-    if (library && library.dir === 'textures') {
-        if (library.dir !== 'textures' || library.format !== 'RGBA8'
+    if (library) {
+        if (typeof library.dir !== 'string'
             || !Number.isInteger(library.resolution) || library.resolution <= 0
             || !Array.isArray(library.layers) || library.layers.length > 32
-            || library.count !== library.layers.length) {
+            || !library.layers.length) {
             fail(`Invalid packed material library: ${manifestPath}`);
         }
         for (const [index, layer] of library.layers.entries()) {
-            if (layer.id !== index || !Number.isFinite(layer.detailHeightScale)
+            if (!Number.isFinite(layer.pixelsPerMeter) || layer.pixelsPerMeter <= 0 || !Number.isFinite(layer.detailHeightScale)
                 || !Number.isFinite(layer.detailHeightBias)) {
                 fail(`Invalid packed material layer ${index}`);
             }
@@ -154,8 +142,7 @@ function scanMaterialLibrary (assetDir, manifestPath) {
         }
         return library;
     }
-    const files = scanMaterialLayers(assetDir);
-    return { count: files.length, dir: 'materials', layers: files.map((file, id) => ({ id, file })) };
+    return undefined;
 }
 
 function printHelp () {
@@ -178,12 +165,11 @@ Layout options:
   --max-level <n>     Quadtree levels L0..Ln (default: 5)
   --min-tile-level <n> Finest level with a generated tile (default: 0).
                       Levels finer than this (L0..n-1) get NO height tile
-                      and permanently sample the L<n> ancestor at runtime.
-  --tile-size <n>     Height tile resolution (default: 129)
+                      and share the finest available source grid at L<n>.
   --height-scale <m>  Physical height range represented by uint16 (default: 2000)
   --height-bias <m>   Physical height at encoded value 0 (default: 0)
 
-The output uses 16-bit grayscale PNG tiles (PNG color type 0, bit depth 16).
+The output uses 129x129 16-bit grayscale PNG tiles (PNG color type 0, bit depth 16).
 After decoding, each sample is an R16UI uint16 height value in [0, 65535].
 Node coordinates are global per level.
 `);
@@ -298,11 +284,9 @@ function removeExistingHeightTiles (assetDir) {
 
 function makeManifest (options) {
     const {
-        name,
         sectorsX,
         sectorsY,
         sectorSize,
-        tileSize,
         maxLevel,
         minTileLevel,
         heightScale,
@@ -313,7 +297,6 @@ function makeManifest (options) {
     const levels = [];
     for (let level = 0; level <= maxLevel; ++level) {
         levels.push({
-            level,
             // Per-node quantized height bounds, row-major iz*nx+ix (global coords).
             // Runtime builds a tight node AABB: y = heightBias + (v/65535)*heightScale.
             heightRange: {
@@ -324,13 +307,10 @@ function makeManifest (options) {
     }
 
     return {
-        version: 1,
-        name,
         sectorSizeMeters: sectorSize,
         sectorCount: [sectorsX, sectorsY],
         maxLevel,
         minTileLevel,
-        nodeTileResolution: tileSize,
         heightScale,
         heightBias,
         materialLibrary,
@@ -356,18 +336,15 @@ function generate (rawOptions) {
     const sectorsX = intOption(options, 'sectorsX', 1);
     const sectorsY = intOption(options, 'sectorsY', 1);
     const sectorSize = intOption(options, 'sectorSize', DEFAULT_SECTOR_SIZE);
-    const tileSize = intOption(options, 'tileSize', DEFAULT_TILE_SIZE);
+    const tileSize = DEFAULT_TILE_SIZE;
     const maxLevel = intOption(options, 'maxLevel', DEFAULT_MAX_LEVEL, 0);
-    if (maxLevel > 7) {
-        fail('--max-level must be <= 7');
+    if (maxLevel > 8) {
+        fail('--max-level must be <= 8');
     }
     const minTileLevel = intOption(options, 'minTileLevel', DEFAULT_MIN_TILE_LEVEL, 0);
     const heightScale = numberOption(options, 'heightScale', DEFAULT_HEIGHT_SCALE);
     const heightBias = numberOption(options, 'heightBias', DEFAULT_HEIGHT_BIAS);
 
-    if (tileSize < 2 || (tileSize - 1) % 2 !== 0) {
-        fail('--tile-size must be 2n+1 so adjacent LOD samples align');
-    }
     if (sectorSize % (1 << maxLevel) !== 0) {
         fail('--sector-size must be divisible by 2^max-level');
     }
@@ -411,8 +388,8 @@ function generate (rawOptions) {
         removeExistingHeightTiles(assetDir);
     }
 
-    if (materialLibrary.count > 0) {
-        console.log(`Material library: ${materialLibrary.count} layers (${materialLibrary.dir})`);
+    if (materialLibrary?.layers.length) {
+        console.log(`Material library: ${materialLibrary.layers.length} layers (${materialLibrary.dir})`);
     }
 
     let totalTiles = 0;
@@ -492,11 +469,9 @@ function generate (rawOptions) {
     }
 
     const manifest = makeManifest({
-        name,
         sectorsX,
         sectorsY,
         sectorSize,
-        tileSize,
         maxLevel,
         minTileLevel,
         heightScale,

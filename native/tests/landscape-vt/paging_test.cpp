@@ -736,22 +736,6 @@ int main() {
         require(count <= config::PAGE_POOL_LAYERS / 4U, "Cliff references exceeded cache budget");
         require(level >= reference.minTileLevel && level <= reference.maxLevel, "Invalid reference level");
     }
-    require(cliffDensityScale(0, 16) == 1, "Flat patches must retain baseline VT density");
-    require(cliffDensityScale(1000, 1) == 4, "Cliff refinement must be capped at two levels");
-    require(cliffDensityScale(16, 16) > 1 && cliffDensityScale(16, 16) < 2, "Slope density estimate must be continuous");
-
-    // A narrow 64 m wall in a 16 m cell must not disappear from the density
-    // estimate when CDLOD encloses it in a mostly flat 512 m distant node.
-    float inherited = cliffDensityScale(64, 16);
-    for (float width : {32.0F, 64.0F, 128.0F, 256.0F, 512.0F}) {
-        inherited = cliffDensityScale(64, width, inherited);
-        require(inherited == 4, "Coarse regions must preserve steep child density");
-    }
-    const auto oldCliffLevel = pageLayout.levelForDistance(1000 / cliffDensityScale(64, 512));
-    const auto newCliffLevel = pageLayout.levelForDistance(1000 / inherited);
-    require(oldCliffLevel == newCliffLevel + 2, "Distant narrow wall must retain two extra levels");
-    require(cliffDensityScale(0, 512, cliffDensityScale(0, 16)) == 1, "Flat hierarchy must not request extra pages");
-
     const auto fine = pageLayout.coveringPage(0, {{17, 29}, {18, 30}});
     require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
     const auto morph = pageLayout.coveringPage(0, {{16, 28}, {18, 30}});

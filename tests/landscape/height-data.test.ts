@@ -27,9 +27,8 @@ test('height grid keeps world rectangles, local origins and tile indices distinc
     }
 });
 
-function png (filter: number) {
+function png (filter: number, expected = [0, 1, 255, 256, 32767, 32768, 40000, 65534, 65535]) {
     const resolution = 3;
-    const expected = [0, 1, 255, 256, 32767, 32768, 40000, 65534, 65535];
     const pixels = Buffer.alloc(18); expected.forEach((v, i) => pixels.writeUInt16BE(v, i * 2));
     const scan = Buffer.alloc(21);
     for (let row = 0; row < 3; ++row) {
@@ -64,7 +63,7 @@ test.each([0, 1, 2, 3, 4])('16-bit PNG filter %i preserves low bits and signed-b
 });
 
 test('finest tile layout and imported URLs retain content hash and query', async () => {
-    const manifest = { sectorCount: [2, 2], maxLevel: 7, minTileLevel: 3, nodeTileResolution: 129,
+    const manifest = { sectorCount: [2, 2], maxLevel: 7, minTileLevel: 3,
         sectorSizeMeters: 2048, heightScale: 3000, heightBias: 0, files: { 'nodes/L3/h_0_0.png': '.lsraw000042' } };
     const layout = parseLandscapeHeightLayout(manifest);
     expect([layout.tilesX, layout.tilesZ, layout.tileSize, layout.resolution]).toEqual([32, 32, 128, 129]);
@@ -78,4 +77,18 @@ test('finest tile layout and imported URLs retain content hash and query', async
         expect(load.mock.calls[0][0]).toBe('/assets/aa/uuid.hash.lsraw000042?v=1');
     } finally { load.mockRestore(); }
     expect(() => parseLandscapeHeightLayout({ ...manifest, heightScale: 0 })).toThrow();
+});
+
+test('physics hole mask reads bit15 at cell minimum corners from the finest splat', async () => {
+    const fixture = png(4, [0xffff, 0x7fff, 0xffff, 0, 0x8000, 0xffff, 0xffff, 0xffff, 0xffff]);
+    const layout = { resolution: 3, tilesX: 1, tilesZ: 1, tileSize: 2, heightScale: 1, heightBias: 0,
+        level: 3, files: { 'nodes/L3/s_0_0.png': '.lsraw000007' } };
+    const load = jest.spyOn(downloader, '_downloadArrayBuffer').mockImplementation((url, options, done) => {
+        done(null, fixture.buffer); return null as any;
+    });
+    try {
+        const holes = await new LandscapeHeightLoader().loadHoles('/assets/id.hash.lsmanifest', layout, 0, 0);
+        expect([...holes]).toEqual([1, 0, 0, 1]); // Boundary vertices do not create extra cells.
+        expect(load.mock.calls[0][0]).toBe('/assets/id.hash.lsraw000007');
+    } finally { load.mockRestore(); }
 });

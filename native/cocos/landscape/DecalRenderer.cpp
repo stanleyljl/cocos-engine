@@ -200,7 +200,7 @@ void DecalRenderer::updateInstance(const Draw &draw) {
     setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalRegion", Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)});
     setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalGrid", draw.grid);
     const float distance = (_viewPosition - (_node->getWorldPosition() + _centers[draw.decal])).length();
-    const float t = std::clamp((distance - d.nearDistance) / (d.farDistance - d.nearDistance), 0.0F, 1.0F);
+    const float t = std::clamp((distance - _asset->decalNearDistance()) / (_asset->decalFarDistance() - _asset->decalNearDistance()), 0.0F, 1.0F);
     setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalFade", Vec4{layer.heightScale, 1.0F - t * t * (3.0F - 2.0F * t), 0, 0});
     auto boundsMax = patch.boundsMax;
     boundsMax.y += layer.heightScale;
@@ -242,7 +242,7 @@ bool DecalRenderer::beginSync(const Vec3 &viewPosition) {
             continue;
         }
         const float distance = (_viewPosition - (_node->getWorldPosition() + _centers[i])).length();
-        if (distance >= d.farDistance) {
+        if (distance >= _asset->decalFarDistance()) {
             continue;
         }
         _candidates[_candidateCount++] = i;
