@@ -28,7 +28,7 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
-#include "landscape/VTPaging.h"
+#include "landscape/VirtualTexture.h"
 namespace cc {
 namespace gfx {
 class Device;

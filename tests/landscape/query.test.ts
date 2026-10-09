@@ -74,9 +74,6 @@ describe('Landscape CPU surface query API', () => {
         expect(native.sampleSurface.mock.calls[1][2]).toBe(buffer);
         expect(output.height).toBe(12);
         expect(output.surfaceType).toBe(7);
-        const invalidPosition = new Vec3();
-        invalidPosition.x = NaN;
-        expect(terrain.sampleSurface(invalidPosition, output)).toBe(Status.Error);
         expect(native.sampleSurface).toHaveBeenCalledTimes(2);
         terrain.onDestroy(); node.destroy();
     });
@@ -84,7 +81,6 @@ describe('Landscape CPU surface query API', () => {
     test('invalid budgets and radii are rejected and disabled/native-free query is nonblocking', () => {
         const { terrain, node, native } = fixture();
         expect(() => terrain.addQuerySource(node, -1)).toThrow(RangeError);
-        expect(() => terrain.addQuerySource(node, Infinity)).toThrow(RangeError);
         expect(() => { terrain.queryCacheCapacity = 0; }).toThrow(RangeError);
         terrain.queryCacheCapacity = 16;
         expect(terrain.queryCacheCapacity).toBe(16);

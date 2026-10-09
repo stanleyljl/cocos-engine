@@ -121,7 +121,7 @@ private:
     IntrusivePtr<Material> _wire;
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<gfx::Texture> _pageIndices;
-    ccstd::vector<uint8_t> _pageIndexData;
+    ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
     ccstd::vector<Vec3> _centers;
     ccstd::vector<TerrainPatch> _patches;
     ccstd::vector<Draw> _draws;

@@ -65,8 +65,7 @@ bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
         return false;
     }
     _data = asset.data();
-    if (!std::isfinite(lodQualityScale) || lodQualityScale <= 0.0F ||
-        !std::isfinite(std::hypot(_data.worldWidth(), _data.worldDepth()) * lodQualityScale)) {
+    if (lodQualityScale <= 0.0F) {
         return false;
     }
     _selected.clear();

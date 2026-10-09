@@ -27,7 +27,9 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(704);
+  const constants = new Float32Array(2336);
+  const blockBytes = gl.getActiveUniformBlockParameter(p, gl.getUniformBlockIndex(p, 'Constants'), gl.UNIFORM_BLOCK_DATA_SIZE);
+  if (blockBytes !== constants.byteLength || blockBytes > 16384) throw new Error('Unexpected compose uniform block size: ' + blockBytes);
   constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
@@ -42,11 +44,11 @@ try {
   const ah=tex('albedoHeightMap',1,gl.TEXTURE_2D_ARRAY); gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(colors.flat()));
   const nra=tex('normalRoughnessAOMap',2,gl.TEXTURE_2D_ARRAY); gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(normals.flat()));
   tex('globalColorMap',3,gl.TEXTURE_2D); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
-  const decalColor=tex('decalAlbedoMap',4,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,128]));
-  tex('decalNormalMap',5,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([190,90,128,255]));
+  const decalColor=tex('decalAlbedoMap',4,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,32,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:32},()=>[50,25,10,128]).flat()));
+  tex('decalNormalMap',5,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,32,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:32},()=>[190,90,128,255]).flat()));
   const decalIndices=tex('decalIndexMap',9,gl.TEXTURE_2D);
-  const indexBytes=Uint8Array.from({length:128*4},(_,i)=>i%128);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,32,4,0,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
+  const indexBytes=Uint8Array.from({length:512*2*4},(_,i)=>i%2===0?(Math.floor(i/2)%512)&255:Math.floor((Math.floor(i/2)%512)/256));
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,256,4,0,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
   tex('terrainNormalMap',10,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([128,128]));
   tex('normalSourceMap',11,gl.TEXTURE_2D);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,4,0,gl.RGBA,gl.FLOAT,new Float32Array(Array.from({length:64},()=>[0,0,1,0]).flat()));
   const cliffSourceTable=tex('cliffSourceMap',12,gl.TEXTURE_2D);
@@ -62,7 +64,7 @@ try {
   const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[656],0,0);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2192],0,0);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
@@ -118,7 +120,7 @@ try {
 
 
   const plain=render(repeat([0,0,0]));
-  constants.set([0,0,1,0],144);constants[656]=1;
+  constants.set([0,0,1,0],144);constants[2192]=1;
   const overlay=render(repeat([0,0,0]));
   close(overlay.slice(0,3),plain.slice(0,3).map((v,i)=>v*(1-128/255)+[50,25,10][i]),'premultiplied decal color');
   close(overlay.slice(6),[plain[6]*(1-128/255)+128*128/255,plain[7]*(1-128/255)+255*128/255],'decal roughness/AO');
@@ -127,13 +129,13 @@ try {
   if(overlay[4]<=plain[4]||overlay[5]>=plain[5])throw Error('Decal normal direction lost');checks++;
 
   // Ground-color modulation must retain the underlying material's hue.
-  constants[660]=1;
+  constants[2196]=1;
   const modulated=render(repeat([0,0,0]));
   close(modulated.slice(0,3),plain.slice(0,3).map((v,i)=>v*(1-128/255+[50,25,10][i]/255)),'imprint preserves ground color');
-  constants[660]=0;
+  constants[2196]=0;
   // A constant one-texel coverage map must not limit repeated material detail.
   {
-  constants[661]=2;constants[662]=3; // material IDs 1 and 2, encoded +1
+  constants[2197]=2;constants[2198]=3; // material IDs 1 and 2, encoded +1
   const detail=render(repeat([0,0,0]));
   const weight=128/255,alpha=128/255;
   close(detail.slice(0,3),plain.slice(0,3).map((v,c)=>v*(1-alpha)+255*alpha*((colors[1][c]/255)**2*(1-weight)+(colors[2][c]/255)**2*weight)),'tiled decal color and alpha');
@@ -154,16 +156,32 @@ try {
   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D_ARRAY,ah);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(colors.flat()));
-  constants[661]=0;constants[662]=0;
+  constants[2197]=0;constants[2198]=0;
   }
-  // A page-local list can address the last global decal without drawing the
-  // intervening entries. This covers IDs beyond the previous 16-decal limit.
-  constants.set([0,0,1,0],144+127*4);constants.set([10,10,1,0],144);
-  indexBytes[0]=127;gl.activeTexture(gl.TEXTURE9);gl.bindTexture(gl.TEXTURE_2D,decalIndices);
-  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,32,4,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
-  close(render(repeat([0,0,0])),overlay,'page list reaches global decal 127');
-  constants[656]=0;close(render(repeat([0,0,0])),plain,'empty page skips all global decals');
-  constants[656]=1;indexBytes[0]=0;gl.activeTexture(gl.TEXTURE9);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,32,4,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
+  // Exercise both packed index pairs, the 8-bit boundary and the highest layer.
+  for(let i=0;i<512;i++)constants.set([10,10,1,0],144+i*4);
+  const uploadIndices=()=>{
+    gl.activeTexture(gl.TEXTURE9);gl.bindTexture(gl.TEXTURE_2D,decalIndices);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,256,4,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
+  };
+  for(const id of [255,256,511]){
+    constants.set([0,0,1,31],144+id*4);
+    indexBytes[0]=id&255;indexBytes[1]=id>>8;uploadIndices();
+    close(render(repeat([0,0,0])),overlay,'page list reaches global decal '+id+' and layer 31');
+    constants.set([10,10,1,0],144+id*4);
+  }
+  constants.set([0,0,1,31],144+511*4);
+  indexBytes[0]=0;indexBytes[1]=0;indexBytes[2]=255;indexBytes[3]=1;uploadIndices();
+  constants[2192]=2;
+  close(render(repeat([0,0,0])),overlay,'BA pair preserves the high index byte');
+  for(let i=0;i<512;i++){indexBytes[i*2]=i&255;indexBytes[i*2+1]=i>>8;}uploadIndices();
+  constants[2192]=512;
+  close(render(repeat([0,0,0])),overlay,'page list processes all 512 entries');
+  constants[2196+31*4]=1;
+  close(render(repeat([0,0,0])),modulated,'layer 31 reads its own parameters');
+  constants[2196+31*4]=0;
+  constants[2192]=0;close(render(repeat([0,0,0])),plain,'empty page skips all global decals');
+  constants[2192]=1;
   close(render(repeat([0,0,0])),plain,'page list excludes overlapping unlisted decals');
 
   const link=(vs,fs,feedback)=>{

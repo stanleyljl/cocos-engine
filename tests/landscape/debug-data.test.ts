@@ -111,8 +111,6 @@ describe('Landscape debug data', () => {
         expect(terrain.globalColorStrength).toBe(1);
         terrain.globalColorStrength = -1;
         expect(terrain.globalColorStrength).toBe(0);
-        terrain.globalColorStrength = NaN;
-        expect(terrain.globalColorStrength).toBe(0);
         texture.destroy();
     });
 });

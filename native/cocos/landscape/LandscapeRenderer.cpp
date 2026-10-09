@@ -1111,7 +1111,7 @@ void LandscapeRenderer::syncDecals(const ccstd::vector<Patch> &patches) {
         const auto region = patchRegion(patch);
         const float cell = _data.nodeSize(patch.node.level) / 16.0F;
         const uint32_t quadrant = patch.x / 8U + (patch.z / 8U) * 2U;
-        _decals->addPatch({makeNodeKey(patch.node), static_cast<uint8_t>(1U << quadrant), region,
+        _decals->addPatch({patch.node.address().key(), static_cast<uint8_t>(1U << quadrant), region,
                            Vec3{region.x - (patch.x & 1U) * cell, patch.node.minY, region.z - (patch.z & 1U) * cell},
                            Vec3{region.x + region.size, patch.node.maxY, region.z + region.size}, resolveSurface(patch)});
     }

@@ -10,6 +10,8 @@
 - Do not automatically commit or push code unless the user explicitly requests it.
 - When adding native `.cpp` or `.h` files, register them in the owning CMake target/source list and regenerate the Visual Studio project so they appear in the project and filters. Do not rely only on an include directive or edit generated project files as the lasting fix.
 - Keep small, closely related helpers in existing files when practical instead of introducing a separate file.
+- Whenever code changes, review the related comments and update or remove any outdated comments in the same change so they accurately describe the current implementation.
+- Landscape code assumes floating-point inputs and calculations are finite; do not add `isfinite` / `isFinite` guards. Retain the relevant type, range, and index checks.
 - During development, do not preserve compatibility with old data. Update affected code and data together, removing obsolete fields, migration paths, and compatibility fallbacks within the scope of the change. Only introduce backward compatibility when the user explicitly requests it.
 
 # Keyboard shortcuts and window title

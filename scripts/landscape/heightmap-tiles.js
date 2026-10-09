@@ -16,38 +16,22 @@ function fail (message) {
     throw new Error(message);
 }
 
-// Pretty-prints the manifest, but keeps each heightRange.{min,max} number array
-// on a single line (they are large and unreadable when expanded one-per-line).
+// Keep height-bound arrays and individual decal instances on one line.
+// The replacer leaves the caller's manifest unchanged.
 function stringifyManifest (manifest) {
-    const inlineArrays = [];
-    if (Array.isArray(manifest.levels)) {
-        for (const lv of manifest.levels) {
-            if (!lv || !lv.heightRange) continue;
-            for (const key of ['min', 'max']) {
-                if (Array.isArray(lv.heightRange[key])) {
-                    const token = `@@INLINE_${inlineArrays.length}@@`;
-                    inlineArrays.push(lv.heightRange[key]); // keep the real array
-                    lv.heightRange[key] = token;            // stringify a placeholder
-                }
-            }
+    const inlineValues = [];
+    return JSON.stringify(manifest, function (key, value) {
+        if (this === manifest.decals) {
+            const fields = Object.entries(value).map(([name, field]) => `${JSON.stringify(name)}: ${JSON.stringify(field)}`);
+            inlineValues.push(`{${fields.join(', ')}}`);
+            return `@@INLINE_${inlineValues.length - 1}@@`;
         }
-    }
-    let json = JSON.stringify(manifest, null, 2);
-    json = json.replace(/"@@INLINE_(\d+)@@"/g, (_, i) => JSON.stringify(inlineArrays[Number(i)]));
-    // Restore the object so the caller's manifest is left untouched.
-    let idx = 0;
-    if (Array.isArray(manifest.levels)) {
-        for (const lv of manifest.levels) {
-            if (!lv || !lv.heightRange) continue;
-            for (const key of ['min', 'max']) {
-                if (typeof lv.heightRange[key] === 'string' && lv.heightRange[key].startsWith('@@INLINE_')) {
-                    lv.heightRange[key] = inlineArrays[idx];
-                    ++idx;
-                }
-            }
+        if ((key === 'min' || key === 'max') && Array.isArray(value)) {
+            inlineValues.push(JSON.stringify(value));
+            return `@@INLINE_${inlineValues.length - 1}@@`;
         }
-    }
-    return `${json}\n`;
+        return value;
+    }, 2).replace(/"@@INLINE_(\d+)@@"/g, (_, i) => inlineValues[Number(i)]) + '\n';
 }
 
 function parseArgs (argv) {
@@ -78,7 +62,7 @@ function parseArgs (argv) {
 function intOption (options, name, defaultValue, minimum = 1) {
     const rawValue = options[name];
     const value = rawValue === undefined ? defaultValue : Number(rawValue);
-    if (typeof rawValue === 'boolean' || !Number.isFinite(value) || !Number.isSafeInteger(value) || value < minimum) {
+    if (typeof rawValue === 'boolean' || !Number.isSafeInteger(value) || value < minimum) {
         const description = minimum === 0 ? 'a non-negative safe integer' : 'a positive safe integer';
         fail(`--${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)} must be ${description}`);
     }
@@ -88,8 +72,8 @@ function intOption (options, name, defaultValue, minimum = 1) {
 function numberOption (options, name, defaultValue) {
     const rawValue = options[name];
     const value = rawValue === undefined ? defaultValue : Number(rawValue);
-    if (typeof rawValue === 'boolean' || !Number.isFinite(value) || (name === 'heightScale' && value <= 0)) {
-        fail(name === 'heightScale' ? '--heightScale must be a positive finite number' : `--${name} must be a finite number`);
+    if (typeof rawValue === 'boolean' || (name === 'heightScale' && value <= 0)) {
+        fail(name === 'heightScale' ? '--heightScale must be a positive number' : `--${name} must be a number`);
     }
     return value;
 }
@@ -127,8 +111,7 @@ function scanMaterialLibrary (assetDir, manifestPath) {
             fail(`Invalid packed material library: ${manifestPath}`);
         }
         for (const [index, layer] of library.layers.entries()) {
-            if (!Number.isFinite(layer.pixelsPerMeter) || layer.pixelsPerMeter <= 0 || !Number.isFinite(layer.detailHeightScale)
-                || !Number.isFinite(layer.detailHeightBias)) {
+            if (typeof layer.pixelsPerMeter !== 'number' || layer.pixelsPerMeter <= 0) {
                 fail(`Invalid packed material layer ${index}`);
             }
             for (const property of ['albedoHeight', 'normalRoughnessAO']) {

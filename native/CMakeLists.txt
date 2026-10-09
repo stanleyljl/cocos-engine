@@ -1625,7 +1625,8 @@ endif()
 ##### landscape
 cocos_source_files(
                  cocos/landscape/LandscapeConfig.h
-                 cocos/landscape/LandscapeConfig.cpp
+                 cocos/landscape/LandscapeData.h
+                 cocos/landscape/LandscapeData.cpp
                  cocos/landscape/LandscapeQuery.h
                  cocos/landscape/LandscapeQuery.cpp
                  cocos/landscape/LandscapeHeightfield.h
@@ -1638,7 +1639,6 @@ cocos_source_files(
                  cocos/landscape/MaterialLibrary.cpp
                  cocos/landscape/VirtualTexture.h
                  cocos/landscape/VirtualTexture.cpp
-                 cocos/landscape/VTPaging.h
                  cocos/landscape/VTRenderer.h
                  cocos/landscape/VTRenderer.cpp
                  cocos/landscape/DecalRenderer.h

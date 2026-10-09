@@ -47,8 +47,6 @@ def decode(data, suffix, scratch):
 
 
 def quantize(pixels, label, allow_clip=False):
-    if not np.all(np.isfinite(pixels)):
-        raise ValueError(f"{label}: non-finite samples")
     minimum, maximum = float(pixels.min()), float(pixels.max())
     if not allow_clip and (minimum < -0.001 or maximum > 1.001):
         raise ValueError(f"{label}: expected normalized [0,1] samples, got {minimum}..{maximum}")
@@ -119,8 +117,8 @@ def main():
     previous_by_id = dict(enumerate(previous_layers))
     previous_ids = {layer["name"]: index for index, layer in previous_by_id.items()}
     for layer in previous_layers:
-        if not isinstance(layer["pixelsPerMeter"], (int, float)) or not 0 < layer["pixelsPerMeter"] < float("inf"):
-            raise ValueError("Material pixelsPerMeter must be positive and finite")
+        if not isinstance(layer["pixelsPerMeter"], (int, float)) or layer["pixelsPerMeter"] <= 0:
+            raise ValueError("Material pixelsPerMeter must be positive")
     if args.append_archive and args.resolution != original["materialLibrary"]["resolution"]:
         raise ValueError("Appending must retain the material array resolution")
     if not args.append_archive and len(archives) < len(previous_by_id):
@@ -194,8 +192,8 @@ def main():
                     elif role == "normal":
                         normal = pixels[..., :3] * 2.0 - 1.0
                         lengths = np.linalg.norm(normal, axis=-1, keepdims=True)
-                        if not np.all(np.isfinite(lengths)) or np.any(lengths < 1e-8):
-                            raise ValueError(f"{entry}: non-finite or zero-length normal")
+                        if np.any(lengths < 1e-8):
+                            raise ValueError(f"{entry}: zero-length normal")
                         stats["normalSource"] = {
                             "minLength": float(lengths.min()), "maxLength": float(lengths.max()),
                             "negativeZPixels": int(np.count_nonzero(normal[..., 2] < 0)),
@@ -217,9 +215,7 @@ def main():
             old = previous.get(name, {})
             packed_layers[index] = {"name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
-                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER),
-                                      "detailHeightScale": old.get("detailHeightScale", 1.0),
-                                      "detailHeightBias": old.get("detailHeightBias", 0.0)}
+                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER)}
             report.append({"id": index, "name": name, "sourceArchive": archive.name,
                            "sources": source_names, "statistics": stats, "sha256": hashes})
             print(f"{index:02d} {name}: {ah_name}, {nra_name}", flush=True)

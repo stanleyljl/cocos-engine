@@ -268,8 +268,7 @@ export class LandscapePhysics {
         const node = this._landscape.node;
         const m = node.worldMatrix;
         this._transformValid = [m.m00 - 1, m.m01, m.m02, m.m04, m.m05 - 1, m.m06, m.m08, m.m09, m.m10 - 1]
-            .every(v => Number.isFinite(v) && Math.abs(v) < 1e-5)
-            && [m.m12, m.m13, m.m14].every(Number.isFinite);
+            .every(v => Math.abs(v) < 1e-5);
         if (!this._transformValid) {
             this._clearTiles();
             return;
@@ -329,8 +328,8 @@ export class LandscapePhysics {
     public _destroy (): void { this._destroyed = true; this._regions.clear(); this._setEnabled(false); }
 
     private _validateBounds (b: Readonly<LandscapePhysicsBounds>): void {
-        if (![b.minX, b.minZ, b.maxX, b.maxZ].every(Number.isFinite) || b.minX >= b.maxX || b.minZ >= b.maxZ) {
-            throw new RangeError('Physics region must be a finite nonempty world XZ rectangle');
+        if (b.minX >= b.maxX || b.minZ >= b.maxZ) {
+            throw new RangeError('Physics region must be a nonempty world XZ rectangle');
         }
     }
 

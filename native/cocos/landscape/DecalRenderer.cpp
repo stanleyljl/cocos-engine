@@ -127,10 +127,11 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = gfx::Format::RGBA8;
-    info.width = config::DECAL_INSTANCE_MAX / 4;
+    // RG and BA each store a 16-bit instance index, low byte first.
+    info.width = config::DECAL_INSTANCE_MAX / 2;
     info.height = config::VT_PAGE_COUNT;
     _pageIndices = device->createTexture(info);
-    _pageIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX, 0);
+    _pageIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX * 2, 0);
     return _pageIndices != nullptr;
 }
 
@@ -180,14 +181,16 @@ uint32_t DecalRenderer::collectPageDecals(uint32_t slot, const Vec4 &region) {
             d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
             continue;
         }
-        _pageIndexData[slot * config::DECAL_INSTANCE_MAX + count++] = static_cast<uint8_t>(i);
+        const size_t offset = (slot * config::DECAL_INSTANCE_MAX + count++) * 2;
+        _pageIndexData[offset] = static_cast<uint8_t>(i & 0xFFU);
+        _pageIndexData[offset + 1] = static_cast<uint8_t>(i >> 8U);
     }
     return count;
 }
 
 void DecalRenderer::uploadPageDecals() {
     gfx::BufferTextureCopy copy;
-    copy.texExtent = {config::DECAL_INSTANCE_MAX / 4, config::VT_PAGE_COUNT, 1};
+    copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, config::VT_PAGE_COUNT, 1};
     const uint8_t *bytes[]{_pageIndexData.data()};
     Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndices, &copy, 1);
 }
@@ -317,7 +320,7 @@ void DecalRenderer::preparePasses(uint32_t stamp) {
 void DecalRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
                                       bool shadow, ccstd::vector<const scene::Model *> &models) const {
     for (const auto &node : selected) {
-        const auto it = _nodeDraws.find(makeNodeKey(node));
+        const auto it = _nodeDraws.find(node.address().key());
         if (it == _nodeDraws.end()) {
             continue;
         }

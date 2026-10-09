@@ -31,7 +31,7 @@
 
 #include "base/Ptr.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeData.h"
 #include "math/Vec3.h"
 
 namespace cc {
@@ -43,6 +43,17 @@ class Frustum;
 namespace landscape {
 
 class LandscapeAsset;
+
+struct QuadNode {
+    // Always global node coordinates, including Quadtree's selection output.
+    uint32_t level{0};
+    uint32_t ix{0};
+    uint32_t iz{0};
+    float minY{0.0F};
+    float maxY{0.0F};
+    uint8_t quadrantMask{config::ALL_QUADRANTS};
+    NodeAddress address() const { return {level, ix, iz}; }
+};
 
 class Quadtree {
 public:

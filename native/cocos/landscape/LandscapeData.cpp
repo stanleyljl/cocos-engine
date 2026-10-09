@@ -22,13 +22,20 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeData.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 
 namespace cc {
 namespace landscape {
+namespace {
+
+constexpr uint32_t NODE_KEY_COORD_BITS = 28U;
+constexpr uint64_t NODE_KEY_COORD_MASK = (1ULL << NODE_KEY_COORD_BITS) - 1ULL;
+constexpr uint32_t NODE_KEY_LEVEL_SHIFT = NODE_KEY_COORD_BITS * 2U;
+
+} // namespace
 
 bool LandscapeData::valid() const {
     return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
@@ -60,7 +67,6 @@ bool LandscapeData::containsGridPoint(LandscapeGridXZ grid) const {
 
 NodeAddress LandscapeData::nodeAtGridClamped(uint32_t level, LandscapeGridXZ grid) const {
     assert(nodesX(level) > 0 && nodesZ(level) > 0 && sectorSize > 0);
-    assert(std::isfinite(grid.x) && std::isfinite(grid.z));
     const double size = nodeSize(level);
     return {level,
         static_cast<uint32_t>(std::clamp(std::floor(grid.x / size), 0.0, double(nodesX(level) - 1U))),
@@ -137,46 +143,6 @@ NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
     assert(targetLevel >= level && targetLevel < config::MAX_LOD_LEVELS);
     const uint32_t shift = targetLevel - level;
     return {targetLevel, x >> shift, z >> shift};
-}
-
-uint64_t makeNodeKey(const QuadNode &node) {
-    return makeNodeKey(node.level, node.ix, node.iz);
-}
-
-void mergeNodeSelections(ccstd::vector<QuadNode> &nodes) {
-    std::sort(nodes.begin(), nodes.end(), [](const QuadNode &a, const QuadNode &b) {
-        return makeNodeKey(a) < makeNodeKey(b);
-    });
-    size_t count = 0;
-    for (const auto &node : nodes) {
-        if (count > 0 && makeNodeKey(nodes[count - 1]) == makeNodeKey(node)) {
-            auto &merged = nodes[count - 1];
-            merged.quadrantMask |= node.quadrantMask;
-            merged.minY = std::min(merged.minY, node.minY);
-            merged.maxY = std::max(merged.maxY, node.maxY);
-        } else {
-            nodes[count++] = node;
-        }
-    }
-    nodes.resize(count);
-}
-
-void collectShadowOnlyNodes(const ccstd::vector<QuadNode> &geometryNodes,
-                            const ccstd::vector<QuadNode> &surfaceNodes, ccstd::vector<QuadNode> &output) {
-    output.clear();
-    auto surface = surfaceNodes.begin();
-    for (auto node : geometryNodes) {
-        const auto key = makeNodeKey(node);
-        while (surface != surfaceNodes.end() && makeNodeKey(*surface) < key) {
-            ++surface;
-        }
-        if (surface != surfaceNodes.end() && makeNodeKey(*surface) == key) {
-            node.quadrantMask &= static_cast<uint8_t>(~surface->quadrantMask);
-        }
-        if (node.quadrantMask != 0) {
-            output.push_back(node);
-        }
-    }
 }
 
 } // namespace landscape

@@ -47,30 +47,27 @@ function safeProduct (a, b, name) {
     return value;
 }
 
-function finiteNumber (value, name) {
-    if (!Number.isFinite(value)) fail(`${name} must be a finite number`);
+function readNumber (value, name) {
+    if (typeof value !== 'number') fail(`${name} must be a number`);
     return value;
 }
 
-// Pretty-prints the manifest but keeps each heightRange.{min,max} number array
-// on a single line (they are large and unreadable when expanded one-per-line).
+// Keep height-bound arrays and individual decal instances on one line.
+// The replacer leaves the caller's manifest unchanged.
 function stringifyManifest (manifest) {
-    const inlineArrays = [];
-    if (Array.isArray(manifest.levels)) {
-        for (const lv of manifest.levels) {
-            if (!lv || !lv.heightRange) continue;
-            for (const key of ['min', 'max']) {
-                if (Array.isArray(lv.heightRange[key])) {
-                    const token = `@@INLINE_${inlineArrays.length}@@`;
-                    inlineArrays.push(lv.heightRange[key]);
-                    lv.heightRange[key] = token;
-                }
-            }
+    const inlineValues = [];
+    return JSON.stringify(manifest, function (key, value) {
+        if (this === manifest.decals) {
+            const fields = Object.entries(value).map(([name, field]) => `${JSON.stringify(name)}: ${JSON.stringify(field)}`);
+            inlineValues.push(`{${fields.join(', ')}}`);
+            return `@@INLINE_${inlineValues.length - 1}@@`;
         }
-    }
-    let json = JSON.stringify(manifest, null, 2);
-    json = json.replace(/"@@INLINE_(\d+)@@"/g, (_, i) => JSON.stringify(inlineArrays[Number(i)]));
-    return `${json}\n`;
+        if ((key === 'min' || key === 'max') && Array.isArray(value)) {
+            inlineValues.push(JSON.stringify(value));
+            return `@@INLINE_${inlineValues.length - 1}@@`;
+        }
+        return value;
+    }, 2).replace(/"@@INLINE_(\d+)@@"/g, (_, i) => inlineValues[Number(i)]) + '\n';
 }
 
 // Returns { minValue, maxValue } over a height tile's samples (channel 0).
@@ -126,8 +123,8 @@ function main () {
     const minTileLevel = safeInteger(manifest.minTileLevel, 'Manifest minTileLevel', 0, maxLevel);
     const scaleValue = manifest.heightScale;
     const biasValue = manifest.heightBias;
-    const scale = finiteNumber(scaleValue, 'Manifest heightScale');
-    const bias = finiteNumber(biasValue, 'Manifest heightBias');
+    const scale = readNumber(scaleValue, 'Manifest heightScale');
+    const bias = readNumber(biasValue, 'Manifest heightBias');
     if (scale <= 0) fail('Manifest heightScale must be positive');
     if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxLevel + 1) fail('Manifest requires maxLevel + 1 levels');
     const levelEntries = new Map();

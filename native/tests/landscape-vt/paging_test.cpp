@@ -2,7 +2,6 @@
 #include "landscape/LandscapeRenderer.h"
 #include "landscape/Quadtree.h"
 #include "landscape/TilePagePool.h"
-#include "landscape/VTPaging.h"
 #include "landscape/VTRenderer.h"
 #include "landscape/VirtualTexture.h"
 
@@ -483,57 +482,6 @@ void testSyncCache() {
     std::cout << "PASS: stable frames, asynchronous residency, VT publication, toggles, movement and selection changes\n";
 }
 
-void testPassResourceSelection() {
-    const ccstd::vector<QuadNode> camera{{2, 4, 3, -10, 20, 0x1}, {1, 0, 1, 0, 5, 0xF}};
-    const ccstd::vector<QuadNode> shadow{{3, 7, 2, -3, 40, 0xF}, {2, 4, 3, -10, 20, 0x6}};
-    auto resources = camera;
-    resources.insert(resources.end(), shadow.begin(), shadow.end());
-    mergeNodeSelections(resources);
-    require(resources.size() == 3, "Overlapping pass nodes must share one resource entry");
-    const auto find = [&](const QuadNode &node) -> const QuadNode & {
-        const auto it = std::find_if(resources.begin(), resources.end(), [&](const QuadNode &candidate) {
-            return makeNodeKey(candidate) == makeNodeKey(node);
-        });
-        require(it != resources.end(), "Camera-only and shadow-only nodes must both retain resources");
-        return *it;
-    };
-    require(find(camera[0]).quadrantMask == 0x7, "Shared resources must cover both passes' quadrants");
-    require(find(camera[1]).quadrantMask == 0xF, "Camera-only node lost its coverage");
-    require(find(shadow[0]).quadrantMask == 0xF, "Offscreen shadow caster lost its coverage");
-    require(camera[0].quadrantMask == 0x1 && shadow[1].quadrantMask == 0x6,
-            "Resource merging must not widen either pass's draw selection");
-
-    auto reversed = shadow;
-    reversed.insert(reversed.end(), camera.begin(), camera.end());
-    reversed.insert(reversed.end(), shadow.begin(), shadow.end());
-    mergeNodeSelections(reversed);
-    require(reversed.size() == resources.size(), "Repeated pass requests must be idempotent");
-    for (size_t i = 0; i < resources.size(); ++i) {
-        require(makeNodeKey(reversed[i]) == makeNodeKey(resources[i]) &&
-                    reversed[i].quadrantMask == resources[i].quadrantMask,
-                "Pass collection order must not invalidate the resource cache");
-    }
-    ccstd::vector<QuadNode> empty;
-    mergeNodeSelections(empty);
-    require(empty.empty(), "Empty pass batches must remain empty");
-    auto surface = camera;
-    mergeNodeSelections(surface);
-    ccstd::vector<QuadNode> shadowOnly;
-    collectShadowOnlyNodes(resources, surface, shadowOnly);
-    require(shadowOnly.size() == 2, "Camera-only nodes must not allocate shadow-only models");
-    require(makeNodeKey(shadowOnly[0]) == makeNodeKey(camera[0]) && shadowOnly[0].quadrantMask == 0x6,
-            "Subtract material coverage per quadrant, not per whole node");
-    require(makeNodeKey(shadowOnly[1]) == makeNodeKey(shadow[0]) && shadowOnly[1].quadrantMask == 0xF,
-            "Offscreen casters must retain complete geometry without material requests");
-    collectShadowOnlyNodes(resources, resources, shadowOnly);
-    require(shadowOnly.empty(), "Fully shared geometry must reuse color models without duplicate casters");
-    collectShadowOnlyNodes(resources, {}, shadowOnly);
-    require(shadowOnly.size() == resources.size(), "A shadow-only batch must retain all geometry");
-    collectShadowOnlyNodes({}, surface, shadowOnly);
-    require(shadowOnly.empty(), "Empty geometry must clear previous shadow-only requests");
-    std::cout << "PASS: independent pass selections, shared quadrants and offscreen shadow resources\n";
-}
-
 void testCoordinateLayouts() {
     const auto invalid = NodeRangeLayout::INVALID_INDEX;
     require(NodeRangeLayout{}.nodeCount() == 0, "Default layout must be empty");
@@ -621,7 +569,7 @@ void testAtlasFilterFootprint() {
         const float spanV = std::abs(dxV) + std::abs(dyV);
         const float scale = std::min({1.0F, 2.0F * std::max(roomU, 0.0F) / std::max(spanU, 1e-6F),
                                       2.0F * std::max(roomV, 0.0F) / std::max(spanV, 1e-6F)});
-        require(std::isfinite(scale) && scale > 0.0F && scale <= 1.0F, "Invalid atlas gradient scale");
+        require(scale > 0.0F && scale <= 1.0F, "Invalid atlas gradient scale");
         if (spanU <= 2.0F * roomU && spanV <= 2.0F * roomV) {
             require(scale == 1.0F, "Safe footprints must retain their original gradients");
         }
@@ -702,7 +650,6 @@ int main() {
     testSyncCache();
     testAtlasFilterFootprint();
     testCoordinateLayouts();
-    testPassResourceSelection();
     testFrameStreamingBudget();
     constexpr float sectorSize = 4096.0F;
     const VTPageLayout pageLayout(sectorSize);

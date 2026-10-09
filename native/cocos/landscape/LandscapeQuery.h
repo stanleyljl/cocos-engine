@@ -7,7 +7,7 @@
 #include <mutex>
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeData.h"
 #include "math/Vec3.h"
 
 namespace cc {

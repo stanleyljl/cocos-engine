@@ -24,7 +24,6 @@
 
 #include "landscape/LandscapeAsset.h"
 
-#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -54,7 +53,7 @@ bool readFloat(const rapidjson::Value &object, const char *name, float &value) {
         return false;
     }
     value = object[name].GetFloat();
-    return std::isfinite(value);
+    return true;
 }
 
 } // namespace
@@ -235,8 +234,6 @@ bool LandscapeAsset::Manifest::readMaterials() {
                 !value.HasMember("name") || !value["name"].IsString() ||
                 !value.HasMember("albedoHeight") || !value["albedoHeight"].IsString() ||
                 !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
-                !readFloat(value, "detailHeightScale", layer.detailHeightScale) ||
-                !readFloat(value, "detailHeightBias", layer.detailHeightBias) ||
                 !readFloat(value, "pixelsPerMeter", layer.pixelsPerMeter) || layer.pixelsPerMeter <= 0.0F) {
                 CC_LOG_WARNING("[Landscape] invalid material layer %u in '%s'", i, manifestPath.c_str());
                 return false;
@@ -283,13 +280,13 @@ bool LandscapeAsset::Manifest::readDecalLayers() {
         }
         for (const auto &value : library["layers"].GetArray()) {
             DecalLayer layer;
-            if (!value.IsObject() || !value.HasMember("albedoMask") || !value["albedoMask"].IsString() ||
+            if (!value.IsObject() || !value.HasMember("albedoAlpha") || !value["albedoAlpha"].IsString() ||
                 !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
                 !value.HasMember("height") || !value["height"].IsString() ||
                 !readFloat(value, "heightScale", layer.heightScale) || layer.heightScale < 0 || layer.heightScale > 10) {
                 return false;
             }
-            layer.albedoMask = resolve(value["albedoMask"].GetString());
+            layer.albedoAlpha = resolve(value["albedoAlpha"].GetString());
             layer.normalRoughnessAO = resolve(value["normalRoughnessAO"].GetString());
             layer.height = resolve(value["height"].GetString());
             if (value.HasMember("modulateColor")) {
@@ -308,7 +305,7 @@ bool LandscapeAsset::Manifest::readDecalLayers() {
                 layer.detailMaterial0 = static_cast<int32_t>(ids[0].GetUint());
                 layer.detailMaterial1 = static_cast<int32_t>(ids[1].GetUint());
             }
-            if (layer.albedoMask.empty() || layer.normalRoughnessAO.empty() || layer.height.empty()) {
+            if (layer.albedoAlpha.empty() || layer.normalRoughnessAO.empty() || layer.height.empty()) {
                 return false;
             }
             decalLayers.emplace_back(std::move(layer));

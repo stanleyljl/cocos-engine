@@ -59,7 +59,7 @@ function generateNormalTiles(manifestPath, output) {
     const { sectorSizeMeters: sectorSize, sectorCount, maxLevel, minTileLevel, heightScale } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2 || sectorCount.some(v => !Number.isInteger(v) || v < 1)
         || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
-        || !Number.isFinite(sectorSize) || sectorSize <= 0 || !Number.isFinite(heightScale) || heightScale <= 0) {
+        || typeof sectorSize !== 'number' || sectorSize <= 0 || typeof heightScale !== 'number' || heightScale <= 0) {
         throw new Error('Unsupported height tile layout');
     }
     const resolution = 129;

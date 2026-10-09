@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(LandscapeVTPagingTests LANGUAGES CXX)
 enable_testing()
-add_executable(landscape_vt_paging_test paging_test.cpp ../../cocos/landscape/LandscapeConfig.cpp
+add_executable(landscape_vt_paging_test paging_test.cpp ../../cocos/landscape/LandscapeData.cpp
     ../../cocos/landscape/VirtualTexture.cpp
     ../../cocos/math/Vec4.cpp ../../cocos/math/MathUtil.cpp)
 target_compile_features(landscape_vt_paging_test PRIVATE cxx_std_17)
@@ -24,7 +24,7 @@ target_include_directories(landscape_vt_paging_test PRIVATE ../.. ../../cocos ..
 add_test(NAME landscape_vt_paging COMMAND landscape_vt_paging_test)
 
 add_executable(landscape_query_test query_test.cpp
-    ../../cocos/landscape/LandscapeQuery.cpp ../../cocos/landscape/LandscapeConfig.cpp
+    ../../cocos/landscape/LandscapeQuery.cpp ../../cocos/landscape/LandscapeData.cpp
     ../../cocos/math/Vec3.cpp ../../cocos/math/MathUtil.cpp)
 target_compile_features(landscape_query_test PRIVATE cxx_std_17)
 target_compile_definitions(landscape_query_test PRIVATE BOOST_ALL_NO_LIB BOOST_CONTAINER_NO_LIB CC_DEBUG=0 CC_STATIC)

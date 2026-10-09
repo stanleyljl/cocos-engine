@@ -339,9 +339,6 @@ export class Landscape extends Component {
      * Like terrain selection, supports translation-only landscape placement.
      */
     public sampleSurface (worldPosition: Readonly<Vec3>, output: LandscapeSurfaceResult): LandscapeQueryStatus {
-        if (!Number.isFinite(worldPosition.x) || !Number.isFinite(worldPosition.z)) {
-            return LandscapeQueryStatus.Error;
-        }
         if (!this._native || !this.enabledInHierarchy) {
             return LandscapeQueryStatus.NotReady;
         }
@@ -357,8 +354,8 @@ export class Landscape extends Component {
     }
 
     private _validateQueryRadius (radius: number): void {
-        if (!Number.isFinite(radius) || radius < 0) {
-            throw new RangeError('Query radius must be finite and nonnegative');
+        if (radius < 0) {
+            throw new RangeError('Query radius must be nonnegative');
         }
     }
 
@@ -449,17 +446,17 @@ export class Landscape extends Component {
         if (this._native?.isInitialized()) {
             return;
         }
-        if (!Number.isFinite(value) || value < 1.0) {
+        if (value < 1.0) {
             return;
         }
         this._lodQualityScale = value;
     }
 
-    /** Optional non-repeating color texture covering the whole landscape. */
+    /** Optional non-repeating tint texture covering the whole landscape; white leaves materials unchanged. */
     @editable
     @type(Texture2D)
     @displayOrder(1)
-    @tooltip('覆盖整个地形的全局颜色图；未指定时使用原图层颜色。')
+    @tooltip('覆盖整个地形的全局调色图，与材质底色相乘；白色保持原色，其他颜色用于压暗或染色。未指定时使用原图层颜色。')
     get globalColorMap (): Texture2D | null {
         return this._globalColorMap;
     }
@@ -473,19 +470,16 @@ export class Landscape extends Component {
         }
     }
 
-    /** Blend the global map's broad colors with the tiled materials. */
+    /** Strength of the global map's multiplicative tint on the tiled materials. */
     @editable
     @displayOrder(10)
     @range([0, 1, 0.01])
     @slide
-    @tooltip('全局颜色混合强度：0 使用原图层颜色，1 完全采用全局图的大范围颜色并保留材质细节。默认 0.1；未指定全局图时不生效。')
+    @tooltip('全局调色强度：0 使用原图层颜色，1 将材质底色完全乘以全局图颜色。默认 0.1；未指定全局图时不生效。')
     get globalColorStrength (): number {
         return this._globalColorStrength;
     }
     set globalColorStrength (value: number) {
-        if (!Number.isFinite(value)) {
-            return;
-        }
         const strength = Math.min(1, Math.max(0, value));
         if (this._globalColorStrength === strength) {
             return;

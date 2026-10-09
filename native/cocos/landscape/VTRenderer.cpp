@@ -24,7 +24,6 @@
 #include "landscape/VTRenderer.h"
 
 #include <algorithm>
-#include <cmath>
 
 #include "base/Log.h"
 #include "base/Macros.h"
@@ -38,7 +37,7 @@
 #include "landscape/LandscapeConfig.h"
 #include "landscape/MaterialLibrary.h"
 #include "landscape/TilePagePool.h"
-#include "landscape/VTPaging.h"
+#include "landscape/VirtualTexture.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -384,7 +383,7 @@ void VTRenderer::setGlobalColorMap(Texture2D *texture) {
 }
 
 void VTRenderer::setGlobalColorStrength(float strength) {
-    if (!_material || !std::isfinite(strength)) {
+    if (!_material) {
         return;
     }
     _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);

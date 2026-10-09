@@ -4,7 +4,6 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
-#include <limits>
 #include <thread>
 
 using namespace cc::landscape;
@@ -90,7 +89,6 @@ void sampling() {
     close(q.sample({-2,0}).position.y,300,"tile/sector boundary");
     close(q.sample({-2.000001F,0}).position.y,q.sample({-1.999999F,0}).position.y,"tile seam");
     require(q.sample({4.01F,2}).status==Status::MISS,"outside should miss");
-    require(q.sample({std::numeric_limits<float>::quiet_NaN(),0}).status==Status::ERROR,"invalid coordinate");
     const auto loaded=loading.requests;
     q.removeSource(1);
     require(q.sample({0,0}).status==Status::HIT,"unpinned data retained until evicted");

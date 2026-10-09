@@ -37,7 +37,7 @@
 #include "landscape/Landscape.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/TilePagePool.h"
-#include "landscape/VTPaging.h"
+#include "landscape/VirtualTexture.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
 #include "scene/Model.h"

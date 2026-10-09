@@ -67,8 +67,8 @@ instead of silently dropping generated layers.
 Use `--layers 13,14` to pack only newly added layers, preserving other manifest
 entries and their existing PNGs. Numbered ZIPs remain contiguous; new layer names
 are discovered from the archive's albedo filename, and existing names are
-validated against the manifest. New layers default to 128 source pixels per meter, detail height scale 1.0 and
-bias 0.0. Author `pixelsPerMeter` in the manifest to choose each material density. The staged manifest
+validated against the manifest. New layers default to 128 source pixels per meter.
+Author `pixelsPerMeter` in the manifest to choose each material density. The staged manifest
 includes both old and new layers; only selected PNGs are emitted.
 
 | PNG | RGB / RG | B | A |
@@ -82,10 +82,10 @@ matching manifest layer IDs, preserving the chosen terrain order.
 Material IDs and their use in terrain painting are defined by each asset.
 The manifest's
 `materialLibrary` records `dir`, `resolution` and `layers`. Each layer records
-`name`, `albedoHeight`, `normalRoughnessAO`, `pixelsPerMeter`,
-`detailHeightScale` and `detailHeightBias`. Layer IDs are array indices; the two
-material PNGs always use RGBA8. Detail height scale defaults
-to 1.0 and bias to 0.0; repacking preserves existing parameters by material name. Re-running
+`name`, `albedoHeight`, `normalRoughnessAO` and `pixelsPerMeter`.
+Layer IDs are array indices; the two material PNGs always use RGBA8.
+Material height blending uses the normalized AlbedoHeight alpha directly;
+repacking preserves pixel density by material name. Re-running
 the height tile generator with `--force` preserves this explicit material
 library from the existing manifest. It validates referenced PNG paths before replacing height tiles.
 

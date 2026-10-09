@@ -28,7 +28,7 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(704);
+  const constants = new Float32Array(2336);
   constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
@@ -134,7 +134,7 @@ try {
     constants.set([2,2,0,1],0);constants[5]=baked?1:0;
     gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,0,0,1,0);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),0,0,1,0);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,constants?.[656]||0,0,0);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,constants?.[2192]||0,0,0);
     gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D_ARRAY,nra);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:8},()=>[...detail,80,210]).flat()));
     gl.drawArrays(gl.TRIANGLES,0,6);
@@ -160,7 +160,7 @@ try {
   // An opaque decal must replace the material normal BEFORE the terrain frame
   // is applied. This also covers the normal consumed by raised decal meshes.
   const decalReference=compose(true,[204,128]);
-  constants.set([0,0,1,0],144);constants[656]=1;
+  constants.set([0,0,1,0],144);constants[2192]=1;
   gl.activeTexture(gl.TEXTURE6);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,255]));
   gl.activeTexture(gl.TEXTURE7);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([204,128,80,210]));
   const decalBaked=compose(true,[30,220]);
@@ -168,7 +168,7 @@ try {
     close(decalBaked[q].slice(3),decalReference[q].slice(3),'decal and geometry normal composition order');
     close(decalBaked[q].slice(0,3),[50,25,10],'decal color survives signed normal packing');
   }
-  constants[656]=0;
+  constants[2192]=0;
 
   // Render a page INCLUDING its gutters. Sixteen distinct source regions
   // expose accidental edge clamping or incorrect neighbor/row selection.
@@ -228,7 +228,7 @@ try {
     gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
     constants.set([1,1,0,1],0);
-    constants.set([1,1,0,0],692);constants.set([0,0,1,0],696);constants[5]=1;
+    constants.set([1,1,0,0],2324);constants.set([0,0,1,0],2328);constants[5]=1;
     const material=repeat([0,0,0]);
     const at={x:.27,y:.31,span:.01};
     for(const n of [[255,128],[0,128],[128,255],[128,0],[210,210]]){
@@ -251,32 +251,32 @@ try {
     // both projection states, without recoloring it through the global map.
     setNormal([255,128]);setHeight(.16);
     for (const state of [1,-1]) {
-      constants.set([.65,0,0,0],700);
-      constants[692]=state;constants[695]=7;
+      constants.set([.65,0,0,0],2332);
+      constants[2324]=state;constants[2327]=7;
       const override=render(material,at);
-      constants[695]=0;
+      constants[2327]=0;
       close(render(repeat([6,6,0]),at),override,'override layer identical in both projection states',0);
-      constants[695]=7;constants[138]=1;
+      constants[2327]=7;constants[138]=1;
       close(render(material,at),override,'configured override bypasses global tint',0);
       constants[138]=0;
     }
-    constants[692]=1;constants[695]=0;constants[138]=1;
+    constants[2324]=1;constants[2327]=0;constants[138]=1;
     const tintedLayer=render(repeat([6,6,0]),at);
-    constants[695]=7;constants[701]=1;
+    constants[2327]=7;constants[2333]=1;
     close(render(material,at),tintedLayer,'override can retain global color modulation',0);
-    constants[695]=0;constants[138]=0;
+    constants[2327]=0;constants[138]=0;
     const paintedSlope=render(material,at);
-    constants[695]=7;constants[700]=0;
+    constants[2327]=7;constants[2332]=0;
     close(render(material,at),paintedSlope,'asset slope threshold controls override coverage',0);
-    constants[700]=.65;constants[701]=0;
-    constants[692]=1;constants[695]=7;
+    constants[2332]=.65;constants[2333]=0;
+    constants[2324]=1;constants[2327]=7;
     setNormal([128,128]);
-    const untouchedFlat=render(material,at);constants[695]=0;
+    const untouchedFlat=render(material,at);constants[2327]=0;
     close(render(material,at),untouchedFlat,'override leaves flat material unchanged',0);
     setNormal([128,128]);setHeight(.16);
-    const flat=render(material,at);constants[692]=0;
+    const flat=render(material,at);constants[2324]=0;
     close(render(material,at),flat,'flat ground preserves planar rendering',0);
-    constants[692]=1;constants[5]=1;
+    constants[2324]=1;constants[5]=1;
     // Neighbor reference tiles agree at their shared endpoint, including when
     // the bake footprint crosses the boundary. The height field is continuous.
     setNormal([255,128]);constants[698]=.5;
@@ -292,12 +292,12 @@ try {
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,2,2,2,0,gl.RG,gl.UNSIGNED_BYTE,heights);
     close(render(material,{...at,x:.49999}),render(material,{...at,x:.50001}),'cliff reference tile seam',0);
     // Planar decals must remain above projected materials.
-    setNormal([255,128]);constants.set([0,0,1,0],144);constants[656]=1;
+    setNormal([255,128]);constants.set([0,0,1,0],144);constants[2192]=1;
     gl.activeTexture(gl.TEXTURE6);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,255]));
     // render() sets the per-page decal count; supply it explicitly after upload.
     render(material,at);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,1,0,0);gl.drawArrays(gl.TRIANGLES,0,6);
     close(readPixel(0,0).slice(0,3),[50,25,10],'decal stays on top of cliff projection',0);
-    constants[656]=0;constants[692]=0;
+    constants[2192]=0;constants[2324]=0;
     gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
   }

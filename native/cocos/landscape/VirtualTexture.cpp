@@ -2,9 +2,49 @@
 #include "landscape/VirtualTexture.h"
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <limits>
 #include "base/std/container/unordered_set.h"
 namespace cc::landscape {
+
+VTPageLayout::VTPageLayout(float sectorSize) : _sectorSize(sectorSize) {
+    assert(sectorSize > 0);
+    while (_rootLevel < 27U && sectorSize / static_cast<float>(1U << (_rootLevel + 1U)) >= 1.0F) {
+        ++_rootLevel;
+    }
+}
+
+uint32_t VTPageLayout::levelForDistance(float distance) const {
+    uint32_t level = 0;
+    while (level < _rootLevel && pageSize(level) < distance * 0.5F) {
+        ++level;
+    }
+    return level;
+}
+
+VTPageAddress VTPageLayout::coveringPatch(uint32_t desiredLevel, LandscapeGridXZ origin, float cellSize,
+                                        uint32_t x, uint32_t z, uint32_t cells) const {
+    return coveringPage(desiredLevel,
+                        {{origin.x + (x - (x & 1U)) * cellSize, origin.z + (z - (z & 1U)) * cellSize},
+                         {origin.x + (x + cells) * cellSize, origin.z + (z + cells) * cellSize}});
+}
+
+VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, const LandscapeGridBounds &bounds) const {
+    assert(desiredLevel <= _rootLevel);
+    for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
+        const double size = pageSize(level);
+        const VTPageAddress page{level,
+                                 static_cast<uint32_t>(std::floor(bounds.min.x / size + 1e-7)),
+                                 static_cast<uint32_t>(std::floor(bounds.min.z / size + 1e-7))};
+        if (bounds.max.x <= (page.x + 1.0) * size + size * 1e-7 &&
+            bounds.max.z <= (page.z + 1.0) * size + size * 1e-7) {
+            return page;
+        }
+    }
+    assert(false && "A VT patch must not cross sector boundaries");
+    return {};
+}
+
 bool VirtualTexture::init(const LandscapeData &data, uint32_t capacity) {
     if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
         return false;

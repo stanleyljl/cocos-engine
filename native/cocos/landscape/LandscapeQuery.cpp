@@ -42,7 +42,7 @@ LandscapeQueryStatus LandscapeQuery::setSource(uint32_t id, LandscapeLocalXZ cen
 
 LandscapeQueryStatus LandscapeQuery::collectSourceKeys(LandscapeLocalXZ center, float radius,
                                                        ccstd::vector<uint64_t> &keys) const {
-    if (!_data.valid() || !std::isfinite(center.x) || !std::isfinite(center.z) || !std::isfinite(radius) || radius < 0) {
+    if (!_data.valid() || radius < 0) {
         return LandscapeQueryStatus::ERROR;
     }
     const auto grid = _data.localToGrid(center);
@@ -189,7 +189,7 @@ void LandscapeQuery::update() {
 
 LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     LandscapeSurfaceResult result;
-    if (!_data.valid() || !std::isfinite(local.x) || !std::isfinite(local.z)) {
+    if (!_data.valid()) {
         result.status = LandscapeQueryStatus::ERROR;
         return result;
     }

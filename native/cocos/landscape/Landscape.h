@@ -32,7 +32,7 @@
 #include "base/std/container/string.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Quadtree.h"
 #include "math/Vec3.h"
 #include "core/TypedArray.h"
 
@@ -57,7 +57,6 @@ namespace landscape {
 
 class LandscapeAsset;
 class LandscapeRenderer;
-class Quadtree;
 class LandscapeQuery;
 
 struct LandscapeDebugData {

@@ -85,8 +85,8 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
         || !sectorCount.every((v: number) => Number.isInteger(v) && v > 0)
         || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8
         || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
-        || !Number.isFinite(sectorSizeMeters) || sectorSizeMeters <= 0
-        || !Number.isFinite(heightScale) || heightScale <= 0 || !Number.isFinite(heightBias)
+        || typeof sectorSizeMeters !== 'number' || sectorSizeMeters <= 0
+        || typeof heightScale !== 'number' || heightScale <= 0 || typeof heightBias !== 'number'
         || !files || typeof files !== 'object') {
         throw new Error('Invalid Landscape height manifest');
     }

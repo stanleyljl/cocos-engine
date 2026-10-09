@@ -36,7 +36,7 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/LandscapeData.h"
 #include "landscape/LandscapeQuery.h"
 
 namespace cc {
@@ -52,13 +52,11 @@ public:
         ccstd::string name;
         ccstd::string albedoHeight;
         ccstd::string normalRoughnessAO;
-        float detailHeightScale{1.0F};
-        float detailHeightBias{0.0F};
         float pixelsPerMeter{128.0F}; // source texture pixels per landscape-local meter
     };
 
     struct DecalLayer {
-        ccstd::string albedoMask;
+        ccstd::string albedoAlpha; // RGB: sRGB albedo; A: linear coverage
         ccstd::string normalRoughnessAO;
         ccstd::string height;
         float heightScale{0.0F};

@@ -53,6 +53,28 @@
 
 namespace cc {
 namespace landscape {
+namespace {
+
+// Merge pass resource requests while preserving every requested quadrant.
+void mergeNodeSelections(ccstd::vector<QuadNode> &nodes) {
+    std::sort(nodes.begin(), nodes.end(), [](const QuadNode &a, const QuadNode &b) {
+        return a.address().key() < b.address().key();
+    });
+    size_t count = 0;
+    for (const auto &node : nodes) {
+        if (count > 0 && nodes[count - 1].address().key() == node.address().key()) {
+            auto &merged = nodes[count - 1];
+            merged.quadrantMask |= node.quadrantMask;
+            merged.minY = std::min(merged.minY, node.minY);
+            merged.maxY = std::max(merged.maxY, node.maxY);
+        } else {
+            nodes[count++] = node;
+        }
+    }
+    nodes.resize(count);
+}
+
+} // namespace
 
 Landscape::Landscape() = default;
 
@@ -61,8 +83,7 @@ Landscape::~Landscape() {
 }
 
 void Landscape::onEnable(Node *node, float lodQualityScale) {
-    if (node == nullptr || _renderer != nullptr ||
-        !std::isfinite(lodQualityScale) || lodQualityScale <= 0.0F) {
+    if (node == nullptr || _renderer != nullptr || lodQualityScale <= 0.0F) {
         return;
     }
     _lodQualityScale = lodQualityScale;
@@ -141,9 +162,6 @@ void Landscape::setGlobalColorMap(Texture2D *texture) {
 }
 
 void Landscape::setGlobalColorStrength(float strength) {
-    if (!std::isfinite(strength)) {
-        return;
-    }
     _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
     if (_renderer) {
         _renderer->setGlobalColorStrength(_globalColorStrength);
@@ -206,11 +224,11 @@ bool Landscape::queryTransformValid() const {
     const auto &m = _node->getWorldMatrix();
     for (uint32_t i = 0; i < 12; ++i) {
         const float expected = (i == 0 || i == 5 || i == 10) ? 1.0F : 0.0F;
-        if (!std::isfinite(m.m[i]) || std::abs(m.m[i] - expected) > 1e-5F) {
+        if (std::abs(m.m[i] - expected) > 1e-5F) {
             return false;
         }
     }
-    return std::isfinite(m.m[12]) && std::isfinite(m.m[13]) && std::isfinite(m.m[14]);
+    return true;
 }
 
 void Landscape::setQueryCacheCapacity(uint32_t capacity) {
@@ -248,7 +266,7 @@ uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
 }
 
 uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array output) {
-    if (output.length() < 8 || !std::isfinite(worldX) || !std::isfinite(worldZ)) {
+    if (output.length() < 8) {
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
     }
     if (!_asset || !_node) {

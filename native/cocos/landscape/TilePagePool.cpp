@@ -23,7 +23,7 @@
 ****************************************************************************/
 
 #include "landscape/TilePagePool.h"
-#include "landscape/VTPaging.h"
+#include "landscape/VirtualTexture.h"
 
 #include <algorithm>
 #include <cmath>

@@ -134,12 +134,12 @@ CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
     vec4 sourceParams; // tile resolution, bake terrain normals, unused ZW
-    vec4 tilingParams[32]; // repeats/m, linear mean albedo RGB
+    vec4 tilingParams[32]; // repeats/m, unused YZW (uniform array alignment)
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
-    vec4 decalRegions[128]; // config::DECAL_INSTANCE_MAX
+    vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
     vec4 decalParams; // placed decal count
-    vec4 decalLayerParams[8]; // X: modulate the existing terrain color for imprints
+    vec4 decalLayerParams[32]; // config::DECAL_LIBRARY_MAX; X: modulate terrain color
     vec4 cliffParams; // reference state: 0 pending, +1 triplanar, -1 planar; height scale/bias; override layer + 1
     vec4 cliffLayout; // landscape minimum XZ, reference tile world size, reserved
     vec4 cliffMaterialParams; // override maximum normal Y, global color influence, reserved
@@ -338,7 +338,6 @@ CCProgram vt-compose-fs %{
     vec3 frameTangent = terrainTangent(shadingNormal);
     vec3 frameBitangent = cross(shadingNormal, frameTangent);
     vec3 albedo = vec3(0.0);
-    vec3 meanAlbedo = vec3(0.0);
     vec3 normal = vec3(0.0);
     float roughness = 0.0;
     float ao = 0.0;
@@ -392,7 +391,6 @@ CCProgram vt-compose-fs %{
           vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
           vec2 xy = nra.rg * 2.0 - 1.0;
           albedo += SRGBToLinear(ah.rgb) * (weights[i] * axisWeight);
-          meanAlbedo += tilingParams[layers[i]].yzw * (weights[i] * axisWeight);
           vec3 detail = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
           vec3 localNormal = tangent * detail.x + cross(shadingNormal, tangent) * detail.y + shadingNormal * detail.z;
           normal += localNormal * (weights[i] * axisWeight);
@@ -410,16 +408,16 @@ CCProgram vt-compose-fs %{
     if (globalColorStrength > 0.0) {
       vec2 globalUV = v_localXZ * globalColorParams.xy + vec2(0.5);
       vec3 globalColor = SRGBToLinear(texture(globalColorMap, globalUV).rgb);
-      vec3 detail = clamp(albedo / max(meanAlbedo, vec3(0.02)), vec3(0.25), vec3(4.0));
-      albedo = mix(albedo, globalColor * detail, globalColorStrength);
+      albedo *= mix(vec3(1.0), globalColor, globalColorStrength);
     }
     // Static planar decal composition is cached in RVT. Explicit gradients
     // remain valid at coverage boundaries and while a page is being refined.
     vec2 decalDx = dFdx(v_localXZ), decalDy = dFdy(v_localXZ);
-    for (int entry = 0; entry < 128; ++entry) {
+    for (int entry = 0; entry < 512; ++entry) {
       if (entry >= int(v_decalPage.y)) break;
-      vec4 indices = texelFetch(decalIndexMap, ivec2(entry / 4, int(v_decalPage.x)), 0);
-      int i = int(indices[entry % 4] * 255.0 + 0.5);
+      vec4 indices = texelFetch(decalIndexMap, ivec2(entry / 2, int(v_decalPage.x)), 0);
+      vec2 encoded = entry % 2 == 0 ? indices.rg : indices.ba;
+      int i = int(dot(floor(encoded * 255.0 + 0.5), vec2(1.0, 256.0)));
       vec4 region = decalRegions[i];
       vec2 decalUV = (v_localXZ - region.xy) / region.z;
       // Half-open footprints give adjoining decal regions one owner at seams.
