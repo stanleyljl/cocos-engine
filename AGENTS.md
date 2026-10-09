@@ -8,6 +8,7 @@
 
 - Only modify code and ensure it compiles.
 - Do not automatically commit or push code unless the user explicitly requests it.
+- Prefer SSH when connecting to remote Git repositories. For HTTPS-configured remotes, use a per-command SSH URL rewrite without changing the remote configuration.
 - When adding native `.cpp` or `.h` files, register them in the owning CMake target/source list and regenerate the Visual Studio project so they appear in the project and filters. Do not rely only on an include directive or edit generated project files as the lasting fix.
 - Keep small, closely related helpers in existing files when practical instead of introducing a separate file.
 - Whenever code changes, review the related comments and update or remove any outdated comments in the same change so they accurately describe the current implementation.
