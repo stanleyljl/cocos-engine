@@ -350,7 +350,15 @@ void LandscapeAsset::resetAsyncState() {
 
 bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     resetAsyncState();
-    const Data file = FileUtils::getInstance()->getDataFromFile(manifestPath);
+    // Resolve the package once. All tile/material paths are relative to this
+    // manifest, so streaming must not search the filesystem for each raw file.
+    auto *files = FileUtils::getInstance();
+    const auto absoluteManifestPath = files->fullPathForFilename(manifestPath);
+    if (absoluteManifestPath.empty() || !files->isAbsolutePath(absoluteManifestPath)) {
+        CC_LOG_WARNING("[Landscape] cannot resolve manifest '%s'", manifestPath.c_str());
+        return false;
+    }
+    const Data file = files->getDataFromFile(absoluteManifestPath);
     if (file.isNull()) {
         CC_LOG_WARNING("[Landscape] failed to load heightmap manifest from '%s'", manifestPath.c_str());
         return false;
@@ -363,7 +371,7 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
         return false;
     }
 
-    Manifest manifest{document, manifestPath};
+    Manifest manifest{document, absoluteManifestPath};
     if (!manifest.read()) {
         return false;
     }
@@ -385,8 +393,10 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
 }
 
 bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
-                                   uint32_t resolution, TileData &tile) {
-    const bool valid = loadTile(heightPath, gfx::Format::RG8, resolution, tile.height) &&
+                                   uint32_t resolution, gfx::Format heightFormat, TileData &tile) {
+    // R16_UNORM uploads consume the decoded host-order uint16 values directly.
+    // Only the RG8 fallback needs high/low-byte packing; queries request it separately.
+    const bool valid = loadTile(heightPath, heightFormat, resolution, tile.height) &&
                        loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat) &&
                        loadTile(normalPath, gfx::Format::RGB8, resolution, tile.normal);
     if (!valid) {
@@ -415,9 +425,10 @@ ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) cons
     return it == _files.end() ? ccstd::string{} : it->second;
 }
 
-bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const {
+bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat, TileData &tile) const {
     const uint32_t side = _data.nodesPerSectorSide(level);
-    if (!valid() || level < _data.minTileLevel || side == 0 ||
+    if (!valid() || (heightFormat != gfx::Format::RG8 && heightFormat != gfx::Format::R16UI) ||
+        level < _data.minTileLevel || side == 0 ||
         x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         return false;
     }
@@ -425,11 +436,12 @@ bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileDat
     const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
     return decodeTileSet(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
-                         resolveFile(directory + "n_" + suffix), _data.tileResolution, tile);
+                         resolveFile(directory + "n_" + suffix), _data.tileResolution, heightFormat, tile);
 }
 
-bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
-    if (loadingFailed() || level < _data.minTileLevel || level > _data.maxLevel) {
+bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat) {
+    if (loadingFailed() || (heightFormat != gfx::Format::RG8 && heightFormat != gfx::Format::R16UI) ||
+        level < _data.minTileLevel || level > _data.maxLevel) {
         return false;
     }
     if (_async == nullptr) {
@@ -441,13 +453,12 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     }
     const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    // Resolve search paths on the main thread: FileUtils' relative-path cache
-    // is not synchronized. Worker reads must take its absolute-path fast path,
-    // even for cache hits (another thread could insert/rehash the cache).
+    // load() anchors all files to the resolved manifest. Only build paths here;
+    // workers open them without touching FileUtils' unsynchronized path cache.
     auto *fileUtils = FileUtils::getInstance();
-    const ccstd::string heightPath = fileUtils->fullPathForFilename(resolveFile(directory + "h_" + suffix));
-    const ccstd::string splatPath = fileUtils->fullPathForFilename(resolveFile(directory + "s_" + suffix));
-    const ccstd::string normalPath = fileUtils->fullPathForFilename(resolveFile(directory + "n_" + suffix));
+    const ccstd::string heightPath = resolveFile(directory + "h_" + suffix);
+    const ccstd::string splatPath = resolveFile(directory + "s_" + suffix);
+    const ccstd::string normalPath = resolveFile(directory + "n_" + suffix);
     if (heightPath.empty() || splatPath.empty() || normalPath.empty() ||
         !fileUtils->isAbsolutePath(heightPath) || !fileUtils->isAbsolutePath(splatPath) || !fileUtils->isAbsolutePath(normalPath)) {
         CC_LOG_ERROR("[Landscape] cannot resolve absolute paths for tile L%u/%u/%u", level, x, z);
@@ -457,13 +468,13 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     const uint32_t resolution = _data.tileResolution;
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, heightPath, splatPath, normalPath, resolution](int /*threadId*/) {
+        [async, key, heightPath, splatPath, normalPath, resolution, heightFormat](int /*threadId*/) {
             if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
             }
             TileData tile;
             tile.key = key;
-            const bool valid = decodeTileSet(heightPath, splatPath, normalPath, resolution, tile);
+            const bool valid = decodeTileSet(heightPath, splatPath, normalPath, resolution, heightFormat, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
             if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
@@ -488,9 +499,10 @@ void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Co
     auto *files = FileUtils::getInstance();
     const ccstd::string directory = "nodes/L" + std::to_string(_data.minTileLevel) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    const auto height = files->fullPathForFilename(resolveFile(directory + "h_" + suffix));
-    const auto normal = files->fullPathForFilename(resolveFile(directory + "n_" + suffix));
-    const auto splat = files->fullPathForFilename(resolveFile(directory + "s_" + suffix));
+    // As with render tiles, defer file access and normalization to the worker.
+    const auto height = resolveFile(directory + "h_" + suffix);
+    const auto normal = resolveFile(directory + "n_" + suffix);
+    const auto splat = resolveFile(directory + "s_" + suffix);
     if (height.empty() || normal.empty() || splat.empty() || !files->isAbsolutePath(height) ||
         !files->isAbsolutePath(normal) || !files->isAbsolutePath(splat)) {
         completion({}, false);

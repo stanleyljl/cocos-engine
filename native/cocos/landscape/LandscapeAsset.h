@@ -80,7 +80,7 @@ public:
 
     struct TileData {
         uint64_t key{0};
-        ccstd::vector<uint8_t> height;
+        ccstd::vector<uint8_t> height; // requested RG8 high/low bytes or R16UI host-order values
         ccstd::vector<uint8_t> splat;
         ccstd::vector<uint8_t> normal; // linear RG8 terrain-local XZ; shader reconstructs +Y
     };
@@ -88,19 +88,21 @@ public:
     LandscapeAsset();
     ~LandscapeAsset() override;
 
+    // Main thread: resolve the manifest once and anchor its files to that package.
     bool load(const ccstd::string &manifestPath);
     // Main-thread synchronous decode for roots and the initial view warmup.
-    bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileData &tile) const;
-    // Call on the main thread: resolves absolute file paths before scheduling
-    // background I/O, bypassing FileUtils' unsynchronized relative-path cache.
+    // Height output is RG8 or R16UI, matching the page pool's upload representation.
+    bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat, TileData &tile) const;
+    // Call on the main thread: builds absolute paths from the resolved manifest;
+    // background I/O bypasses FileUtils' unsynchronized relative-path cache.
     // Only complete height/splat/normal sets are available through takeReadyTile().
-    bool requestTile(uint32_t level, uint32_t x, uint32_t z);
+    bool requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat);
     bool takeReadyTile(TileData &tile);
     // Generated tiles are valid. An unexpected I/O/decode error stops streaming
     // for this asset until load() creates a fresh asynchronous state.
     bool loadingFailed() const { return _async && _async->loadFailed.load(); }
-    // Independent CPU query decode. Paths are resolved on the calling/main
-    // thread; completion receives source RGB normals and never uploads to GPU.
+    // Call on the main thread; file access and CPU query decode run on a worker.
+    // Completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                         float &minY, float &maxY) const;
@@ -139,7 +141,7 @@ private:
 
     void resetAsyncState();
     static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
-                              uint32_t resolution, TileData &tile);
+                              uint32_t resolution, gfx::Format heightFormat, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 
     ccstd::string _dataDir;

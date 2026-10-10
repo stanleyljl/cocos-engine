@@ -91,7 +91,15 @@ downloader.register('.lsmanifest', (url, options, onComplete) => {
         onComplete(new Error('Landscape assets require a local native package'));
         return;
     }
-    onComplete(null, url.replace(/[?#].*$/, ''));
+    const path = url.replace(/[?#].*$/, '');
+    // Resolve the package once so physics can derive absolute raw-tile paths
+    // without searching the filesystem on every asynchronous read request.
+    const resolved = JSB ? jsb.fileUtils.fullPathForFilename(path) : path;
+    if (!resolved) {
+        onComplete(new Error(`Landscape manifest not found: ${path}`));
+        return;
+    }
+    onComplete(null, resolved);
 });
 
 /** Debug settings shared by Inspector, keyboard/touch controls and native rendering. */

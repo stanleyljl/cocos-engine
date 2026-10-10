@@ -79,9 +79,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _reservations.data = data;
     _reservations.capacity = layerCount;
     _heightUnorm = supportsHeightUnorm(device);
-    if (_heightUnorm) {
-        _heightUpload.resize(static_cast<size_t>(_tileRes) * _tileRes);
-    }
     if (!initTextures()) {
         destroy();
         return false;
@@ -132,18 +129,6 @@ void TilePagePool::initSamplers() {
     _splatSampler = _device->getSampler(si);
 }
 
-void TilePagePool::uploadHeight(uint32_t layer, const uint8_t *data) {
-    if (_heightUnorm) {
-        // Source PNG bytes remain high/low for CPU queries and physics. Only
-        // the GPU upload needs native uint16 values; no second GPU array exists.
-        for (size_t i = 0; i < _heightUpload.size(); ++i) {
-            _heightUpload[i] = static_cast<uint16_t>((static_cast<uint16_t>(data[2 * i]) << 8U) | data[2 * i + 1]);
-        }
-        data = reinterpret_cast<const uint8_t *>(_heightUpload.data());
-    }
-    uploadLayer(_heightArray, layer, data);
-}
-
 void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
     if (array == nullptr || data == nullptr) {
         return;
@@ -176,6 +161,9 @@ bool TilePagePool::loadReserved(bool synchronous) {
         return false;
     }
     constexpr size_t MAX_IN_FLIGHT = 8;
+    // Decode into the upload representation on the worker, avoiding a second
+    // per-texel conversion on the main thread for hardware-filtered heights.
+    const auto heightFormat = _heightUnorm ? gfx::Format::R16UI : gfx::Format::RG8;
     for (const auto source : _reservations.working) {
         auto &slot = _reservations.slots.at(source.key());
         if (slot.ready || _inFlight.count(source.key())) {
@@ -183,10 +171,10 @@ bool TilePagePool::loadReserved(bool synchronous) {
         }
         if (synchronous) {
             LandscapeAsset::TileData tile;
-            if (!_asset->loadTileSet(source.level, source.x, source.z, tile)) {
+            if (!_asset->loadTileSet(source.level, source.x, source.z, heightFormat, tile)) {
                 return false;
             }
-            uploadHeight(slot.layer, tile.height.data());
+            uploadLayer(_heightArray, slot.layer, tile.height.data());
             uploadLayer(_splatArray, slot.layer, tile.splat.data());
             uploadLayer(_normalArray, slot.layer, tile.normal.data());
             slot.ready = true;
@@ -195,7 +183,7 @@ bool TilePagePool::loadReserved(bool synchronous) {
             if (_inFlight.size() >= MAX_IN_FLIGHT) {
                 break;
             }
-            if (!_asset->requestTile(source.level, source.x, source.z)) {
+            if (!_asset->requestTile(source.level, source.x, source.z, heightFormat)) {
                 return false;
             }
             _inFlight.insert(source.key());
@@ -212,7 +200,7 @@ void TilePagePool::update(uint32_t budget) {
             continue;
         }
         auto &slot = it->second;
-        uploadHeight(slot.layer, tile.height.data());
+        uploadLayer(_heightArray, slot.layer, tile.height.data());
         uploadLayer(_splatArray, slot.layer, tile.splat.data());
         uploadLayer(_normalArray, slot.layer, tile.normal.data());
         slot.ready = true;
@@ -223,7 +211,6 @@ void TilePagePool::destroy() {
     _reservations.slots.clear();
     _reservations.working.clear();
     _inFlight.clear();
-    _heightUpload.clear();
     _asset = nullptr;
     _heightArray = nullptr;
     _splatArray = nullptr;

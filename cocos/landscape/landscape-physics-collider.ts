@@ -80,6 +80,55 @@ export function createNativeLandscapeShapeType (Base: any, Resource: any): Const
 // Subclass only the selected backend. Never replace its registered TerrainShape
 // or load the other physics SDKs just because Landscape is enabled.
 const shapeTypes = new WeakMap<Constructor<ITerrainShape>, Constructor<ITerrainShape>>();
+
+// Ray-test just the top triangles, without building/caching convex pillars.
+// Cannon's pillar ray path can miss exact patch edges after coordinate rotation.
+// A tolerance in barycentric coordinates handles those edges without extending
+// the geometry used by contact generation or changing ordinary terrain queries.
+function createCannonHeightfieldType (CANNON: any): any {
+    class Heightfield extends CANNON.Heightfield {}
+    const type = CANNON.Shape.types.HEIGHTFIELD;
+    const original = CANNON.Ray.prototype[type];
+    CANNON.Ray.prototype[type] = function (shape: any, rotation: any, position: any, body: any, reportedShape: any): void {
+        if (!(shape instanceof Heightfield)) {
+            original.call(this, shape, rotation, position, body, reportedShape);
+            return;
+        }
+        const from = new CANNON.Vec3(), to = new CANNON.Vec3();
+        CANNON.Transform.pointToLocalFrame(position, rotation, this.from, from);
+        CANNON.Transform.pointToLocalFrame(position, rotation, this.to, to);
+        const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+        const spacing = shape.elementSize, data = shape.data;
+        const tolerance = 1e-7;
+        const minX = Math.max(0, Math.floor(Math.min(from.x, to.x) / spacing - tolerance));
+        const minY = Math.max(0, Math.floor(Math.min(from.y, to.y) / spacing - tolerance));
+        const maxX = Math.min(data.length - 2, Math.floor(Math.max(from.x, to.x) / spacing + tolerance));
+        const maxY = Math.min(data[0].length - 2, Math.floor(Math.max(from.y, to.y) / spacing + tolerance));
+        const normal = new CANNON.Vec3(), point = new CANNON.Vec3();
+        for (let x = minX; x <= maxX; ++x) for (let y = minY; y <= maxY; ++y) {
+            const a = data[x][y], b = data[x + 1][y], c = data[x][y + 1], d = data[x + 1][y + 1];
+            for (let upper = 0; upper < 2; ++upper) {
+                const sx = (upper ? d - c : b - a) / spacing;
+                const sy = (upper ? d - b : c - a) / spacing;
+                const denominator = dz - sx * dx - sy * dy;
+                if (denominator === 0) continue;
+                const t = ((upper ? d : a) + sx * (from.x - (x + upper) * spacing)
+                    + sy * (from.y - (y + upper) * spacing) - from.z) / denominator;
+                if (t < 0 || t > 1) continue;
+                const u = (from.x + t * dx) / spacing - x, v = (from.y + t * dy) / spacing - y;
+                if (u < -tolerance || v < -tolerance || u > 1 + tolerance || v > 1 + tolerance
+                    || (upper ? u + v < 1 - tolerance : u + v > 1 + tolerance)) continue;
+                normal.set(-sx, -sy, 1); normal.normalize(); rotation.vmult(normal, normal);
+                point.set(this.from.x + t * (this.to.x - this.from.x), this.from.y + t * (this.to.y - this.from.y),
+                    this.from.z + t * (this.to.z - this.from.z));
+                this.reportIntersection(normal, point, reportedShape, body);
+                if (this.result._shouldStop) return;
+            }
+        }
+    };
+    return Heightfield;
+}
+
 function createLandscapeShape (): ITerrainShape {
     const Base = selector.wrapper.TerrainShape as any;
     if (!Base) {
@@ -91,6 +140,7 @@ function createLandscapeShape (): ITerrainShape {
             // Bullet already matches Landscape's triangles and owns its samples.
             Type = Base;
         } else if (selector.id === 'cannon.js') {
+            const Heightfield = createCannonHeightfieldType(cclegacy._global.CANNON);
             Type = class extends Base {
                 // Samples are immutable; TerrainShape.onLoad need not rebuild them.
                 setTerrain (): void {}
@@ -104,7 +154,7 @@ function createLandscapeShape (): ITerrainShape {
                         }
                     }
                     this.options.elementSize = terrain.tileSize;
-                    this._shape = new cclegacy._global.CANNON.Heightfield(this.data, this.options);
+                    this._shape = new Heightfield(this.data, this.options);
                 }
                 protected _setCenter (v: IVec3Like): void {
                     // Local XYZ -> world ZXY preserves B-C without rotating the

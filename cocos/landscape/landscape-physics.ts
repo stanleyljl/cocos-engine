@@ -31,8 +31,11 @@ export interface LandscapePhysicsOptions {
     maxTiles: number;
     /** Maximum outstanding height/splat tile pairs, including obsolete requests. Default 1. */
     maxConcurrentLoads: number;
-    /** Maximum new backend collision tiles per update. Default 1. */
+    /** Maximum new backend collision patches per update. Default 8. */
     maxCreationsPerStep: number;
+    /** Stop starting patches after this many milliseconds. Default 2.
+     * A backend call cannot be interrupted; each patch has at most 16x16 cells. */
+    maxBuildTimeMs: number;
     group: number;
     mask: number;
     material: PhysicsMaterial | null;
@@ -50,12 +53,16 @@ interface Tile {
     loading: boolean;
     samples?: Uint16Array;
     holes?: Uint8Array;
-    mesh?: Mesh;
-    node?: Node;
+    patches: CollisionPatch[];
+    ready: boolean;
     error?: string;
 }
+interface CollisionPatch {
+    node: Node;
+    mesh?: Mesh;
+}
 const DEFAULT_OPTIONS: LandscapePhysicsOptions = {
-    maxTiles: 64, maxConcurrentLoads: 1, maxCreationsPerStep: 1, group: 1, mask: -1, material: null,
+    maxTiles: 64, maxConcurrentLoads: 1, maxCreationsPerStep: 8, maxBuildTimeMs: 2, group: 1, mask: -1, material: null,
 };
 /** CPU-only, fixed-resolution collision residency owned by a Landscape.
  * Rectangles are in world XZ, clipped to terrain and rounded outward to whole
@@ -104,6 +111,9 @@ export class LandscapePhysics {
         }
         if (!Number.isInteger(next.group) || !Number.isInteger(next.mask)) {
             throw new RangeError('Invalid collision filter');
+        }
+        if (typeof next.maxBuildTimeMs !== 'number' || next.maxBuildTimeMs <= 0 || next.maxBuildTimeMs > 1000) {
+            throw new RangeError('Invalid Landscape physics maxBuildTimeMs');
         }
         this._options = next;
     }
@@ -159,7 +169,7 @@ export class LandscapePhysics {
                 return LandscapePhysicsStatus.Error;
             }
         }
-        return region.keys.every(key => !!this._tiles.get(key)?.node)
+        return region.keys.every(key => this._tiles.get(key)?.ready)
             ? LandscapePhysicsStatus.Ready : LandscapePhysicsStatus.NotReady;
     }
 
@@ -186,7 +196,7 @@ export class LandscapePhysics {
         for (let z = rect.beginZ; z < rect.endZ; ++z) {
             for (let x = rect.beginX; x < rect.endX; ++x) {
                 const tile = this._tiles.get(grid.tileKey(x, z));
-                if (!tile?.node || tile.error || !isValid(tile.node) || !tile.node.activeInHierarchy) {
+                if (!tile?.ready || tile.error || tile.patches.some(patch => !isValid(patch.node) || !patch.node.activeInHierarchy)) {
                     return false;
                 }
             }
@@ -227,13 +237,13 @@ export class LandscapePhysics {
     public getStats (): { residentTiles: number; sourceBytes: number; inFlight: number; queuedTiles: number } {
         let residentTiles = 0; let sourceBytes = 0; let queuedTiles = 0;
         for (const tile of this._tiles.values()) {
-            if (tile.node) {
+            if (tile.ready) {
                 ++residentTiles;
             }
             if (tile.samples) {
                 sourceBytes += tile.samples.byteLength + (tile.holes?.byteLength || 0);
             }
-            if (!tile.node && !tile.error) {
+            if (!tile.ready && !tile.error) {
                 ++queuedTiles;
             }
         }
@@ -245,8 +255,9 @@ export class LandscapePhysics {
      * Do not change regions or destroy nodes inside the visitor. */
     public forEachCollider (visitor: (collider: TerrainCollider | MeshCollider) => void): void {
         for (const tile of this._tiles.values()) {
-            if (tile.node && isValid(tile.node) && tile.node.activeInHierarchy) {
-                const collider = tile.node.getComponent(TerrainCollider) || tile.node.getComponent(MeshCollider);
+            for (const { node } of tile.patches) {
+                if (!isValid(node) || !node.activeInHierarchy) continue;
+                const collider = node.getComponent(TerrainCollider) || node.getComponent(MeshCollider);
                 if (collider) {
                     visitor(collider);
                 }
@@ -294,14 +305,22 @@ export class LandscapePhysics {
             this._reconcile();
         }
         let remaining = this._options.maxCreationsPerStep;
+        const deadline = performance.now() + this._options.maxBuildTimeMs;
         for (const tile of this._tiles.values()) {
-            if (tile.node || tile.error) {
+            if (tile.ready || tile.error) {
                 continue;
             }
-            if (tile.samples && remaining > 0) {
+            // Always admit one bounded patch so a very small budget still progresses.
+            while (tile.samples && !tile.ready && remaining > 0
+                && (remaining === this._options.maxCreationsPerStep || performance.now() < deadline)) {
                 --remaining;
-                try { tile.node = this._createTile(tile); } catch (error) { tile.error = String(error); }
-            } else if (!tile.samples && !tile.loading && this._inFlight < this._options.maxConcurrentLoads) {
+                try { this._createPatch(tile); } catch (error) {
+                    this._disposeTile(tile);
+                    tile.error = String(error);
+                    break;
+                }
+            }
+            if (!tile.samples && !tile.error && !tile.loading && this._inFlight < this._options.maxConcurrentLoads) {
                 this._loadTile(tile);
             }
         }
@@ -463,7 +482,7 @@ export class LandscapePhysics {
             return { key, distance };
         }).sort((a, b) => a.distance - b.distance);
         for (const { key } of pending) {
-            this._tiles.set(key, { ...grid.tileAtKey(key), loading: false });
+            this._tiles.set(key, { ...grid.tileAtKey(key), loading: false, patches: [], ready: false });
         }
         this._dirty = false;
     }
@@ -495,37 +514,60 @@ export class LandscapePhysics {
         }).then(() => { tile.loading = false; --this._inFlight; });
     }
 
-    private _createTile (tile: Tile): Node {
-        const layout = this._layout!;
-        const node = new Node(`LandscapeCollision(${tile.x},${tile.z})`);
+    private _createPatch (tile: Tile): void {
+        const source = this._layout!;
+        const edge = source.resolution - 1;
+        // Imported tiles have 128 cells. Uniform square patches also keep the
+        // native heightfield interface valid for smaller injected/test grids.
+        let cells = Math.min(16, edge);
+        while (edge % cells) --cells;
+        const side = edge / cells;
+        const index = tile.patches.length;
+        const x0 = (index % side) * cells, z0 = Math.floor(index / side) * cells;
+        const n = cells + 1;
+        const samples = new Uint16Array(n * n), holes = new Uint8Array(cells * cells);
+        for (let z = 0; z < n; ++z) {
+            const offset = (z0 + z) * source.resolution + x0;
+            samples.set(tile.samples!.subarray(offset, offset + n), z * n);
+        }
+        for (let z = 0; z < cells; ++z) {
+            const offset = (z0 + z) * edge + x0;
+            holes.set(tile.holes!.subarray(offset, offset + cells), z * cells);
+        }
+        const spacing = source.tileSize / edge;
+        const layout = { ...source, resolution: n, tileSize: cells * spacing };
+        const node = new Node(`LandscapeCollision(${tile.x},${tile.z}:${index})`);
+        const patch: CollisionPatch = { node };
         node.active = false;
         try {
             node.parent = this._landscape.node;
             const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
-            const heightfield = new LandscapePhysicsHeightfield(tile.samples!, layout, tile.holes!);
-            node.setPosition(local.x, heightfield.localOriginY, local.z);
+            const heightfield = new LandscapePhysicsHeightfield(samples, layout, holes);
+            node.setPosition(local.x + x0 * spacing, heightfield.localOriginY, local.z + z0 * spacing);
             let collider: TerrainCollider | MeshCollider;
             // Native PhysX supports hole materials directly. Its current Wasm
             // bindings do not expose the material-index setter, so retain meshes there.
             const nativeHeightfield = JSB && selector.id === 'physx' && !!globalThis['jsb.physics'];
-            if (tile.holes!.every(hole => hole !== 0)) { node.active = true; return node; }
-            if (!nativeHeightfield && tile.holes!.some(hole => hole !== 0)) {
-                const n = layout.resolution, edge = n - 1;
+            if (holes.every(hole => hole !== 0)) {
+                node.active = true;
+                tile.patches.push(patch);
+                tile.ready = tile.patches.length === side * side;
+                return;
+            }
+            if (!nativeHeightfield && holes.some(hole => hole !== 0)) {
                 const positions: number[] = [], indices: number[] = [];
                 for (let z = 0; z < n; ++z) for (let x = 0; x < n; ++x) {
                     positions.push(x * heightfield.tileSize, heightfield.getHeight(x, z), z * heightfield.tileSize);
                 }
-                for (let z = 0; z < edge; ++z) for (let x = 0; x < edge; ++x) {
-                    if (tile.holes![z * edge + x]) continue;
+                for (let z = 0; z < cells; ++z) for (let x = 0; x < cells; ++x) {
+                    if (holes[z * cells + x]) continue;
                     const a = z * n + x;
                     indices.push(a, a + n, a + 1, a + 1, a + n, a + n + 1);
                 }
-                // An entirely empty tile is ready and owns no backend shape.
-                if (!indices.length) { node.active = true; return node; }
-                tile.mesh = createMesh({ positions, indices }, undefined, { calculateBounds: true });
+                patch.mesh = createMesh({ positions, indices }, undefined, { calculateBounds: true });
                 collider = node.addComponent(LandscapePhysicsMeshCollider);
                 collider.convex = false;
-                collider.mesh = tile.mesh;
+                collider.mesh = patch.mesh;
             } else {
                 collider = node.addComponent(LandscapePhysicsCollider);
                 collider.terrain = heightfield;
@@ -536,19 +578,23 @@ export class LandscapePhysics {
                 throw new Error('Terrain collider creation failed');
             }
             collider.setGroup(this._options.group); collider.setMask(this._options.mask);
-            return node;
-        } catch (error) { node._destroyImmediate(); tile.mesh?.destroy(); tile.mesh = undefined; throw error; }
+            tile.patches.push(patch);
+            tile.ready = tile.patches.length === side * side;
+        } catch (error) { node._destroyImmediate(); patch.mesh?.destroy(); throw error; }
     }
 
     private _disposeTile (tile: Tile): void {
-        if (tile.node && isValid(tile.node)) {
-            tile.node.active = false;
-            // Safe-point destruction releases shape-owned buffers now, rather
-            // than retaining entire old regions until JS/native GC runs.
-            tile.node._destroyImmediate();
+        for (const patch of tile.patches) {
+            if (isValid(patch.node)) {
+                patch.node.active = false;
+                // Safe-point destruction releases shape-owned buffers now, rather
+                // than retaining entire old regions until JS/native GC runs.
+                patch.node._destroyImmediate();
+            }
+            patch.mesh?.destroy();
         }
-        tile.mesh?.destroy(); tile.mesh = undefined;
-        tile.node = undefined; tile.samples = undefined; tile.holes = undefined;
+        tile.patches.length = 0; tile.ready = false;
+        tile.samples = undefined; tile.holes = undefined;
     }
     private _clearTiles (): void {
         for (const tile of this._tiles.values()) {

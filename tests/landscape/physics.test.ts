@@ -57,6 +57,148 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
     });
     afterEach(() => { manager._destroy(); scene.active = false; scene._destroyImmediate(); });
 
+    (process.env.LANDSCAPE_PHYSICS_BENCHMARK ? test : test.skip).each([false, true])(
+        'profile source tile creation (holes=%s)', async withHoles => {
+            loader.layout = { ...layout, resolution: 129, tileSize: 128 };
+            const heights = new Uint16Array(129 * 129);
+            for (let z = 0; z < 129; ++z) for (let x = 0; x < 129; ++x) {
+                heights[z * 129 + x] = 32768 + Math.round(10 * Math.sin(x / 16) * Math.cos(z / 16));
+            }
+            const holes = new Uint8Array(128 * 128);
+            if (withHoles) holes[64 * 128 + 64] = 1;
+            jest.spyOn(loader, 'loadTile').mockResolvedValue(heights);
+            jest.spyOn(loader, 'loadHoles').mockResolvedValue(holes);
+            const id = manager.addRegion({ minX: 0, minZ: 0, maxX: 1, maxZ: 1 });
+            const updates: number[] = [];
+            for (let i = 0; i < 512 && !manager.isRegionReady(id); ++i) {
+                await Promise.resolve();
+                const start = performance.now();
+                manager.update();
+                updates.push(performance.now() - start);
+            }
+            expect(manager.getRegionError(id)).toBe('');
+            expect(manager.isRegionReady(id)).toBe(true);
+            const syncStart = performance.now();
+            PhysicsSystem.instance.syncSceneToPhysics();
+            PhysicsSystem.instance.step(1 / 60);
+            const syncMs = performance.now() - syncStart;
+            const unloadStart = performance.now();
+            manager.removeRegion(id); manager.update();
+            console.log(JSON.stringify({ backend, withHoles, updates: updates.length,
+                maxMs: Math.max(...updates), totalMs: updates.reduce((a, b) => a + b, 0),
+                syncMs, unloadMs: performance.now() - unloadStart }));
+        },
+    );
+
+    (process.env.LANDSCAPE_PHYSICS_BENCHMARK ? test : test.skip)(
+        'profile resident collision stepping', async () => {
+            loader.layout = { ...layout, resolution: 129, tileSize: 128, tilesX: 4, tilesZ: 4 };
+            jest.spyOn(loader, 'loadTile').mockResolvedValue(new Uint16Array(129 * 129).fill(32768));
+            const id = manager.addRegion({ minX: 0, minZ: 0, maxX: 500, maxZ: 500 });
+            for (let i = 0; i < 4096 && !manager.isRegionReady(id); ++i) {
+                await Promise.resolve(); manager.update();
+            }
+            expect(manager.isRegionReady(id)).toBe(true);
+            const start = performance.now();
+            for (let i = 0; i < 30; ++i) {
+                PhysicsSystem.instance.syncSceneToPhysics(); PhysicsSystem.instance.step(1 / 60);
+            }
+            console.log(JSON.stringify({ backend, residentStepMs: (performance.now() - start) / 30 }));
+        },
+    );
+
+    test('patches preserve samples, seams, holes and filters and publish readiness only when complete', async () => {
+        loader.layout = { ...layout, resolution: 33, tileSize: 32 };
+        const heights = new Uint16Array(33 * 33);
+        for (let z = 0; z < 33; ++z) for (let x = 0; x < 33; ++x) heights[z * 33 + x] = 32768 + x + 2 * z;
+        const holes = new Uint8Array(32 * 32); holes[16 * 32 + 16] = 1;
+        jest.spyOn(loader, 'loadTile').mockResolvedValue(heights);
+        jest.spyOn(loader, 'loadHoles').mockResolvedValue(holes);
+        manager.configure({ maxCreationsPerStep: 1, maxBuildTimeMs: 1000, group: 2, mask: 1 });
+        const bounds = { minX: -2, minZ: -1, maxX: 30, maxZ: 31 };
+        const id = manager.addRegion(bounds);
+        const colliders: (physics.TerrainCollider | physics.MeshCollider)[] = [];
+        for (let i = 0; i < 16 && !colliders.length; ++i) {
+            await Promise.resolve(); manager.update();
+            manager.forEachCollider(collider => colliders.push(collider));
+        }
+        expect(colliders).toHaveLength(1);
+        expect(manager.isRegionReady(id)).toBe(false);
+        expect(manager.isAreaReady(bounds)).toBe(false);
+        for (let i = 0; i < 3; ++i) manager.update();
+        expect(manager.isRegionReady(id)).toBe(true);
+        expect(manager.isAreaReady(bounds)).toBe(true);
+        expect(manager.getStats().residentTiles).toBe(1);
+        colliders.length = 0;
+        manager.forEachCollider(collider => colliders.push(collider));
+        expect(colliders).toHaveLength(4);
+        expect(colliders.filter(collider => collider instanceof physics.MeshCollider)).toHaveLength(1);
+        for (const collider of colliders) {
+            expect(collider.getGroup()).toBe(2); expect(collider.getMask()).toBe(1);
+            if (collider instanceof physics.TerrainCollider) expect(collider.terrain!.getVertexCountI()).toBe(17);
+        }
+        PhysicsSystem.instance.syncSceneToPhysics();
+        for (const x of [15.9, 16, 16.1, 31.5]) for (const z of [0.5, 15.9, 16, 17.5, 31.5]) {
+            if (x >= 16 && x < 17 && z >= 16 && z < 17) continue;
+            const height = hit(x - 2, z - 1);
+            if (height === undefined) throw new Error(`Missing patch surface at ${x},${z}`);
+            expect(height).toBeCloseTo(x + 2 * z, 2);
+        }
+        expect(hit(16.5 - 2, 16.5 - 1)).toBeUndefined();
+        manager.removeRegion(id); manager.update(); PhysicsSystem.instance.syncSceneToPhysics();
+        expect(hit(14, 14)).toBeUndefined();
+        for (const collider of colliders) expect(collider.isValid).toBe(false);
+    });
+
+    test('the elapsed-time budget stops submission and partial tiles can be cancelled', async () => {
+        loader.layout = { ...layout, resolution: 33, tileSize: 32 };
+        jest.spyOn(loader, 'loadTile').mockResolvedValue(new Uint16Array(33 * 33).fill(32768));
+        manager.configure({ maxCreationsPerStep: 64, maxBuildTimeMs: 2 });
+        const bounds = { minX: -2, minZ: -1, maxX: 30, maxZ: 31 };
+        const id = manager.addRegion(bounds);
+        // Resolve layout, then downloads, without admitting any collision work.
+        for (let i = 0; i < 16; ++i) await Promise.resolve();
+        manager.update();
+        for (let i = 0; i < 16; ++i) await Promise.resolve();
+        const now = jest.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(10);
+        try { manager.update(); } finally { now.mockRestore(); }
+        const colliders: physics.Collider[] = [];
+        manager.forEachCollider(collider => colliders.push(collider));
+        expect(colliders).toHaveLength(1);
+        expect(manager.isRegionReady(id)).toBe(false);
+        manager._setEnabled(false);
+        expect(manager.getStats()).toMatchObject({ residentTiles: 0, sourceBytes: 0, queuedTiles: 0 });
+        expect(colliders[0].isValid).toBe(false);
+        manager._setEnabled(true); await settle(manager);
+        expect(manager.isRegionReady(id)).toBe(true);
+        expect(manager.isAreaReady(bounds)).toBe(true);
+    });
+
+    test('patch ray queries retain oblique hits, normals and all-hit collider identity', async () => {
+        loader.layout = { ...layout, resolution: 33, tileSize: 32 };
+        const heights = new Uint16Array(33 * 33);
+        for (let z = 0; z < 33; ++z) for (let x = 0; x < 33; ++x) heights[z * 33 + x] = 32768 - x + 2 * z;
+        jest.spyOn(loader, 'loadTile').mockResolvedValue(heights);
+        manager.addRegion({ minX: -2, minZ: -1, maxX: 30, maxZ: 31 }); await settle(manager);
+        const target = new Vec3(14, 19, 16.5); // Local (16, 17.5), directly on a patch seam.
+        const direction = new Vec3(1, -4, 1).normalize();
+        const start = new Vec3(); Vec3.scaleAndAdd(start, target, direction, -20);
+        const ray = new geometry.Ray(start.x, start.y, start.z, direction.x, direction.y, direction.z);
+        const system = PhysicsSystem.instance;
+        expect(system.raycastClosest(ray, -1, 40)).toBe(true);
+        const result = system.raycastClosestResult;
+        expect(Vec3.distance(result.hitPoint, target)).toBeLessThan(0.01);
+        const normal = new Vec3(1, 1, -2).normalize();
+        expect(Vec3.distance(result.hitNormal, normal)).toBeLessThan(0.01);
+        expect(system.raycast(ray, -1, 40)).toBe(true);
+        const colliders: physics.Collider[] = [];
+        manager.forEachCollider(collider => colliders.push(collider));
+        for (const hit of system.raycastResults) {
+            expect(colliders).toContain(hit.collider);
+            expect(Vec3.distance(hit.hitPoint, target)).toBeLessThan(0.01);
+        }
+    });
+
     test('hole tiles omit both cell triangles, keep adjacent surface and unload', async () => {
         jest.spyOn(loader, 'loadHoles').mockResolvedValue(new Uint8Array([1, 0, 0, 0]));
         const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });

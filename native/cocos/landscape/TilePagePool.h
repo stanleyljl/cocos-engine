@@ -126,7 +126,6 @@ public:
 private:
     bool initTextures();
     void initSamplers();
-    void uploadHeight(uint32_t layer, const uint8_t *data);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     gfx::Device *_device{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
@@ -134,7 +133,6 @@ private:
     gfx::Sampler *_heightSampler{nullptr}, *_splatSampler{nullptr};
     uint32_t _tileRes{129}, _layerCount{0};
     bool _heightUnorm{false};
-    ccstd::vector<uint16_t> _heightUpload;
     Reservations _reservations;
     ccstd::unordered_set<uint64_t> _inFlight;
     uint64_t _updateRevision{0};
