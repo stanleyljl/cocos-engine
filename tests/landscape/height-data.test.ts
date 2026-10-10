@@ -5,7 +5,7 @@ import downloader from '../../cocos/asset/asset-manager/downloader';
 test('height grid keeps world rectangles, local origins and tile indices distinct', () => {
     const grid = new LandscapeHeightGrid({ resolution: 3, tilesX: 4, tilesZ: 2, tileSize: 2,
         heightScale: 100, heightBias: -20, level: 0, files: {} });
-    const origin = { x: -10, z: 30 };
+    const origin = { x: -14, z: 28 };
     // Translated, non-square terrain: world [-14,-6] x [28,32].
     const exact = grid.worldBoundsToTiles({ minX: -12, minZ: 28, maxX: -10, maxZ: 30 }, origin);
     expect(exact).toEqual({ beginX: 1, beginZ: 0, endX: 2, endZ: 1 });
@@ -23,7 +23,7 @@ test('height grid keeps world rectangles, local origins and tile indices distinc
     expect(grid.contains(beyond)).toBe(false);
     for (let z = 0; z < 2; ++z) for (let x = 0; x < 4; ++x) {
         expect(grid.tileAtKey(grid.tileKey(x, z))).toEqual({ x, z });
-        expect(grid.tileLocalOrigin(x, z)).toEqual({ x: -4 + x * 2, z: -2 + z * 2 });
+        expect(grid.tileLocalOrigin(x, z)).toEqual({ x: x * 2, z: z * 2 });
     }
 });
 

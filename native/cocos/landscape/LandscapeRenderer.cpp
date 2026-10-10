@@ -414,8 +414,7 @@ void LandscapeRenderer::updateMaterialProperties() {
     for (auto *material : surfaceMaterials()) {
         material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U && _vertexHoleCullingSupported ? 0.0F : 1.0F, 0, 0, 0});
         material->setPropertyVec4("terrainParams", terrainParams);
-        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize,
-                                                       _data.worldWidth() * 0.5F, _data.worldDepth() * 0.5F, 0.0F});
+        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, 0, 0, 0});
         material->setPropertyVec4("decalControl", Vec4{_debugData.decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("rvtNormalParams", Vec4{_vtRenderer && _vtRenderer->isBakeNormalEnabled() ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
@@ -459,8 +458,8 @@ LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const Patch &patch) {
     CC_ASSERTF(tile.layer >= 0,
                "[Landscape] unprepared exact height source: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
                node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
-    // a_tileInst.xy = source tile origin in landscape-local meters,
-    // z = source tile size in meters, w = shared height/splat array layer. For LODs finer than the
+    // a_tileInst.xy = source tile origin in landscape-local coordinates,
+    // z = source tile size, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     surface.tile = _sourceResolver->shaderParams(tile);
@@ -477,7 +476,7 @@ void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &pat
     }
 }
 
-LandscapeLocalRegion LandscapeRenderer::patchRegion(const Patch &patch) const {
+LandscapeRegion LandscapeRenderer::patchRegion(const Patch &patch) const {
     auto region = _data.nodeRegion(patch.node.address());
     const float cell = region.size / 16.0F;
     region.x += patch.x * cell;
@@ -506,9 +505,7 @@ void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t
     const float size = cells * cellSize;
     const float minX = node.ix * nodeSize + x * cellSize;
     const float minZ = node.iz * nodeSize + z * cellSize;
-    const auto local = _data.gridToLocal({minX, minZ});
-    const float localX = static_cast<float>(local.x), localZ = static_cast<float>(local.z);
-    const float distance = patchDistance(node, localX, localZ, size, false);
+    const float distance = patchDistance(node, minX, minZ, size, false);
     const uint32_t desired = std::min(_vtLayout.rootLevel(), _vtLayout.levelForDistance(distance) + _materialBias);
     if (meshIndex > 0 && _vtLayout.pageSize(desired) < size) {
         const uint32_t half = cells / 2U;
@@ -542,13 +539,10 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patc
 }
 
 void LandscapeRenderer::preparePasses(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
-    if (!valid() || _initializationFailed) {
+    if (!valid()) {
         return;
     }
     sync(geometryNodes, surfaceNodes);
-    if (_initializationFailed) {
-        return;
-    }
     if (!_ready) {
         return;
     }
@@ -927,8 +921,22 @@ void LandscapeRenderer::commitPending() {
     }
 }
 
+// Generated resources are expected to load successfully. Stop the entire
+// loading session on an unexpected error; keep drawing committed bindings.
+void LandscapeRenderer::stopLoading() {
+    _pendingDraws.clear();
+    _change = {};
+    _pending = _reserved = false;
+    _loadingFailed = true;
+    CC_LOG_ERROR("[Landscape] Tile loading stopped; re-enable the landscape to reload.");
+}
+
 void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) {
-    if (!valid()) {
+    if (!valid() || _loadingFailed) {
+        return;
+    }
+    if (_asset->loadingFailed()) {
+        stopLoading();
         return;
     }
     auto &pages = _vtRenderer->pages();
@@ -980,7 +988,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
             roots.added.push_back(NodeAddress::fromKey(key));
         }
         if (!stage(roots, false, true)) {
-            _initializationFailed = true;
+            _loadingFailed = true;
             CC_LOG_ERROR("[Landscape] Initial coverage exceeds resource capacity.");
             return;
         }
@@ -1003,7 +1011,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
                     _change = {};
                     _pending = _reserved = false;
                     if (!_ready) {
-                        _initializationFailed = true;
+                        _loadingFailed = true;
                     }
                     CC_LOG_ERROR("[Landscape] Resource preparation failed; retaining committed bindings.");
                     break;
@@ -1014,12 +1022,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
             const auto sourceRevision = _tilePages->updateRevision();
             const auto pageRevision = pages.revision();
             if (!_tilePages->loadReserved(!_ready)) {
-                _pendingDraws.clear();
-                _change = {};
-                _pending = _reserved = false;
-                if (!_ready) {
-                    _initializationFailed = true;
-                }
+                stopLoading();
                 break;
             }
             _vtRenderer->resolveSources(*_tilePages, *_sourceResolver);
@@ -1032,7 +1035,7 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
                     commitPending();
                 }
             } else if (!_ready && sourceRevision == _tilePages->updateRevision() && pageRevision == pages.revision()) {
-                _initializationFailed = true;
+                _loadingFailed = true;
                 CC_LOG_ERROR("[Landscape] Initial synchronous warmup made no progress.");
                 break;
             }
@@ -1260,7 +1263,7 @@ bool LandscapeRenderer::valid() const {
 
 void LandscapeRenderer::destroy() {
     _ready = false;
-    _initializationFailed = false;
+    _loadingFailed = false;
     _syncCache.invalidate();
     _targetCache.invalidate();
     _selectionCache.invalidate();

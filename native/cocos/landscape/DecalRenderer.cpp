@@ -118,7 +118,7 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
         const float x = d.x + d.size * 0.5F;
         const float z = d.z + d.size * 0.5F;
         float minY = data.minHeight(), maxY = data.maxHeight();
-        const auto address = data.nodeAtGridClamped(0, data.localToGrid({x, z}));
+        const auto address = data.nodeAtClamped(0, {x, z});
         asset->getHeightRange(address.level, address.x, address.z, minY, maxY);
         // Stable whole-decal fade, independent of geometry LOD and streamed heights.
         _centers.emplace_back(x, (minY + maxY) * 0.5F, z);
@@ -266,9 +266,6 @@ void DecalRenderer::addPatch(const TerrainPatch &patch) {
     // only the base height/material mapping, never the decal tessellation.
     const auto &data = _asset->data();
     const float step = data.nodeSize(0) / 16.0F;
-    const auto origin = data.gridToLocal({});
-    const float originX = static_cast<float>(origin.x);
-    const float originZ = static_cast<float>(origin.z);
     const auto &region = patch.region;
     const float x = region.x, z = region.z, size = region.size;
     for (size_t candidate = 0; candidate < _candidateCount; ++candidate) {
@@ -281,16 +278,16 @@ void DecalRenderer::addPatch(const TerrainPatch &patch) {
             _patches.push_back(patch);
             stored = true;
         }
-        const int firstX = static_cast<int>(std::floor((std::max(x, d.x) - originX) / step));
-        const int firstZ = static_cast<int>(std::floor((std::max(z, d.z) - originZ) / step));
-        const int endX = static_cast<int>(std::ceil((std::min(x + size, d.x + d.size) - originX) / step));
-        const int endZ = static_cast<int>(std::ceil((std::min(z + size, d.z + d.size) - originZ) / step));
+        const int firstX = static_cast<int>(std::floor((std::max(x, d.x)) / step));
+        const int firstZ = static_cast<int>(std::floor((std::max(z, d.z)) / step));
+        const int endX = static_cast<int>(std::ceil((std::min(x + size, d.x + d.size)) / step));
+        const int endZ = static_cast<int>(std::ceil((std::min(z + size, d.z + d.size)) / step));
         for (int iz = firstZ; iz < endZ; ++iz) {
             for (int ix = firstX; ix < endX; ++ix) {
-                const float left = std::max(originX + ix * step, d.x);
-                const float bottom = std::max(originZ + iz * step, d.z);
-                const float right = std::min(originX + (ix + 1) * step, d.x + d.size);
-                const float top = std::min(originZ + (iz + 1) * step, d.z + d.size);
+                const float left = std::max(ix * step, d.x);
+                const float bottom = std::max(iz * step, d.z);
+                const float right = std::min((ix + 1) * step, d.x + d.size);
+                const float top = std::min((iz + 1) * step, d.z + d.size);
                 appendDraw(patchIndex, i, Vec4{left, bottom, right - left, top - bottom});
             }
         }

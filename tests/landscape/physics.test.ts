@@ -1,5 +1,5 @@
 import { director, game, Game, DirectorEvent } from '../../cocos/game';
-import { geometry, Vec3 } from '../../cocos/core';
+import { cclegacy, geometry, Vec3 } from '../../cocos/core';
 import { Node, Scene } from '../../cocos/scene-graph';
 import { physics, PhysicsMaterial, PhysicsSystem } from '../../exports/physics-framework';
 import '../../exports/physics-physx';
@@ -50,7 +50,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
     beforeEach(() => {
         physics.selector.switchTo(backend);
         scene = new Scene('landscape physics test'); director.runSceneImmediate(scene);
-        node = new Node(); scene.addChild(node);
+        node = new Node(); scene.addChild(node); node.setPosition(-2, 0, -1);
         loader = new Loader();
         manager = new LandscapePhysics({ node, landscapeAsset: { manifestPath: 'test.lsmanifest' } } as Landscape, loader);
         manager._setEnabled(true);
@@ -60,7 +60,12 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
     test('hole tiles omit both cell triangles, keep adjacent surface and unload', async () => {
         jest.spyOn(loader, 'loadHoles').mockResolvedValue(new Uint8Array([1, 0, 0, 0]));
         const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });
-        await settle(manager);
+        const buildTree = backend === 'cannon.js'
+            ? jest.spyOn(cclegacy._global.CANNON.Trimesh.prototype, 'updateTree') : undefined;
+        try {
+            await settle(manager);
+            if (buildTree) expect(buildTree).toHaveBeenCalledTimes(1);
+        } finally { buildTree?.mockRestore(); }
         expect(manager.getRegionError(id)).toBe('');
         expect(manager.isRegionReady(id)).toBe(true);
         expect(hit(-1.8, -0.8)).toBeUndefined();
@@ -91,6 +96,42 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         expect(bodies[0].worldPosition.y).toBeLessThan(5);
         expect(bodies[1].worldPosition.y).toBeCloseTo(10.15, 1);
         for (const body of bodies) { body.active = false; body._destroyImmediate(); }
+    });
+
+    test('Cannon hole mesh query matches the original octree and prunes disjoint branches', async () => {
+        if (backend !== 'cannon.js') return;
+        const CANNON = cclegacy._global.CANNON;
+        loader.layout = { ...layout, resolution: 17, tileSize: 16 };
+        const heights = new Uint16Array(17 * 17);
+        for (let z = 0; z < 17; ++z) for (let x = 0; x < 17; ++x) heights[z * 17 + x] = 32768 + x + z;
+        const holes = new Uint8Array(16 * 16); holes[8 * 16 + 8] = 1;
+        jest.spyOn(loader, 'loadTile').mockResolvedValue(heights);
+        jest.spyOn(loader, 'loadHoles').mockResolvedValue(holes);
+        manager.addRegion({ minX: -2, minZ: -1, maxX: 14, maxZ: 15 });
+        await settle(manager);
+        let tree: any;
+        manager.forEachCollider(collider => { tree = collider.shape!.impl.tree; });
+        const originalQuery = CANNON.Octree.prototype.aabbQuery;
+        // Include points on edges, the hole, outside bounds and the complete mesh.
+        for (let i = -1; i <= 17; ++i) {
+            const bounds = new CANNON.AABB();
+            bounds.lowerBound.set(i, -1, i);
+            bounds.upperBound.set(i + 0.5, 40, i + 0.5);
+            expect(tree.aabbQuery(bounds, [])).toEqual(originalQuery.call(tree, bounds, []));
+        }
+        expect(tree.aabbQuery(tree.aabb, [])).toEqual(originalQuery.call(tree, tree.aabb, []));
+        const nodes = [tree], overlaps: jest.SpyInstance[] = [];
+        while (nodes.length) {
+            const node = nodes.pop(); overlaps.push(jest.spyOn(node.aabb, 'overlaps'));
+            nodes.push(...node.children);
+        }
+        try {
+            expect(overlaps.length).toBeGreaterThan(1);
+            const outside = new CANNON.AABB();
+            outside.lowerBound.set(100, 100, 100); outside.upperBound.set(101, 101, 101);
+            expect(tree.aabbQuery(outside, [])).toEqual([]);
+            expect(overlaps.reduce((sum, spy) => sum + spy.mock.calls.length, 0)).toBe(1);
+        } finally { for (const spy of overlaps) spy.mockRestore(); }
     });
 
     test('all-hole tile is ready without collision; missing holes never publish solid terrain', async () => {
@@ -252,7 +293,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
     });
 
     test('translated landscape covers world rectangles; unsupported transforms remove collision', async () => {
-        node.setPosition(10, 7, 20);
+        node.setPosition(8, 7, 19);
         const id = manager.addRegion({ minX: 8, minZ: 19, maxX: 10, maxZ: 21 });
         await settle(manager);
         expect(manager.isRegionReady(id)).toBe(true);
@@ -262,7 +303,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         expect(manager.getStats().residentTiles).toBe(0);
     });
 
-    test('3000m height range retains source quantization instead of overflowing signed16', async () => {
+    test('3000-unit height range retains source quantization instead of overflowing signed16', async () => {
         loader.layout = { ...layout, heightScale: 3000, heightBias: 0 };
         const id = manager.addRegion({ minX: -2, minZ: -1, maxX: 0, maxZ: 1 });
         await settle(manager);

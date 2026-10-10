@@ -64,7 +64,7 @@ struct LandscapeAsset::Manifest {
     const rapidjson::Document &document;
     const ccstd::string &manifestPath;
     LandscapeData parsed;
-    NodeRangeLayout nodeLayout;
+    NodeIndexLayout nodeIndexLayout;
     ccstd::vector<HeightRange> ranges;
     ccstd::string assetDir;
     bool imported{false};
@@ -133,8 +133,8 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
         return false;
     }
 
-    nodeLayout = NodeRangeLayout(parsed);
-    ranges.assign(nodeLayout.nodeCount(),
+    nodeIndexLayout = NodeIndexLayout(parsed);
+    ranges.assign(nodeIndexLayout.nodeCount(),
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
     for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
@@ -173,7 +173,7 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
                 CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
                 return false;
             }
-            const size_t dst = nodeLayout.globalNodeIndex(level, globalX, globalZ);
+            const size_t dst = nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
             ranges[dst] = HeightRange{parsed.heightBias + mins[index].GetFloat() * scale,
                                       parsed.heightBias + maxs[index].GetFloat() * scale};
         }
@@ -272,7 +272,7 @@ bool LandscapeAsset::Manifest::readDecalLayers() {
         const auto &library = document["decalLibrary"];
         if (!readFloat(library, "nearDistance", decalNearDistance) ||
             !readFloat(library, "farDistance", decalFarDistance) ||
-            decalNearDistance < 0.0F || decalFarDistance <= decalNearDistance || decalFarDistance > 200.0F ||
+            decalNearDistance < 0.0F || decalFarDistance <= decalNearDistance ||
             !readUnsigned(library, "resolution", decalResolution) || decalResolution < 2 || decalResolution > 2048 ||
             (decalResolution & (decalResolution - 1U)) != 0 || !library.HasMember("layers") ||
             !library["layers"].IsArray() || library["layers"].Empty() || library["layers"].Size() > config::DECAL_LIBRARY_MAX) {
@@ -324,8 +324,8 @@ bool LandscapeAsset::Manifest::readDecals() {
             Decal d;
             if (!readFloat(value, "x", d.x) || !readFloat(value, "z", d.z) || !readFloat(value, "size", d.size) ||
                 !readUnsigned(value, "layer", d.layer) || d.layer >= decalLayers.size() || d.size <= 0 || d.size > 64 ||
-                d.x < -parsed.worldWidth() * .5F || d.z < -parsed.worldDepth() * .5F ||
-                d.x + d.size > parsed.worldWidth() * .5F || d.z + d.size > parsed.worldDepth() * .5F) {
+                d.x < 0 || d.z < 0 ||
+                d.x + d.size > parsed.width() || d.z + d.size > parsed.depth()) {
                 return false;
             }
             decals.push_back(d);
@@ -379,7 +379,7 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _decalResolution = manifest.decalResolution;
     _decalNearDistance = manifest.decalNearDistance;
     _decalFarDistance = manifest.decalFarDistance;
-    _nodeLayout = manifest.nodeLayout;
+    _nodeIndexLayout = manifest.nodeIndexLayout;
     _heightRanges = std::move(manifest.ranges);
     return true;
 }
@@ -390,7 +390,7 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
                        loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat) &&
                        loadTile(normalPath, gfx::Format::RGB8, resolution, tile.normal);
     if (!valid) {
-        CC_LOG_WARNING("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
+        CC_LOG_ERROR("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
                        heightPath.c_str(), splatPath.c_str(), normalPath.c_str());
     } else {
         // Disk PNGs retain RGB XYZ. Compact to RG XZ during decoding,
@@ -429,7 +429,7 @@ bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, TileDat
 }
 
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
-    if (level < _data.minTileLevel || level > _data.maxLevel) {
+    if (loadingFailed() || level < _data.minTileLevel || level > _data.maxLevel) {
         return false;
     }
     if (_async == nullptr) {
@@ -450,31 +450,29 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z) {
     const ccstd::string normalPath = fileUtils->fullPathForFilename(resolveFile(directory + "n_" + suffix));
     if (heightPath.empty() || splatPath.empty() || normalPath.empty() ||
         !fileUtils->isAbsolutePath(heightPath) || !fileUtils->isAbsolutePath(splatPath) || !fileUtils->isAbsolutePath(normalPath)) {
-        CC_LOG_WARNING("[Landscape] cannot resolve absolute paths for tile L%u/%u/%u", level, x, z);
-        // Preserve the asynchronous failure contract so the page cache can
-        // release the pending request without scheduling an unsafe file read.
-        std::lock_guard<std::mutex> lock(_async->mutex);
-        _async->failed.push_back(key);
-        return true;
+        CC_LOG_ERROR("[Landscape] cannot resolve absolute paths for tile L%u/%u/%u", level, x, z);
+        _async->loadFailed.store(true);
+        return false;
     }
     const uint32_t resolution = _data.tileResolution;
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
         [async, key, heightPath, splatPath, normalPath, resolution](int /*threadId*/) {
-            if (async->cancelled.load()) {
+            if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
             }
             TileData tile;
             tile.key = key;
             const bool valid = decodeTileSet(heightPath, splatPath, normalPath, resolution, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
-            if (async->cancelled.load()) {
+            if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
             }
             if (valid) {
                 async->ready.push_back(std::move(tile));
             } else {
-                async->failed.push_back(key);
+                async->loadFailed.store(true);
+                async->ready.clear();
             }
         },
         LegacyThreadPool::TaskType::IO);
@@ -525,7 +523,7 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
         return false;
     }
     std::lock_guard<std::mutex> lock(_async->mutex);
-    if (_async->ready.empty()) {
+    if (_async->loadFailed.load() || _async->ready.empty()) {
         return false;
     }
     tile = std::move(_async->ready.front());
@@ -534,32 +532,32 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
     return true;
 }
 
-bool LandscapeAsset::takeFailedTile(uint64_t &key) {
-    if (_async == nullptr) {
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(_async->mutex);
-    if (_async->failed.empty()) {
-        return false;
-    }
-    key = _async->failed.front();
-    _async->failed.pop_front();
-    _pendingTiles.erase(key);
-    return true;
-}
-
 bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
                                     float &minY, float &maxY) const {
     if (!_data.valid() || level > _data.maxLevel) {
         return false;
     }
-    const size_t offset = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
+    const size_t offset = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
     if (offset >= _heightRanges.size()) {
         return false;
     }
     minY = _heightRanges[offset].minY;
     maxY = _heightRanges[offset].maxY;
     return true;
+}
+
+Uint16Array LandscapeAsset::decodeSamples(const Uint8Array &png, uint32_t resolution) {
+    IntrusivePtr<Image> image = ccnew Image();
+    if (!image->initWithImageData(png.buffer()->getData() + png.byteOffset(), png.byteLength()) ||
+        image->getRenderFormat() != gfx::Format::R16UI ||
+        static_cast<uint32_t>(image->getWidth()) != resolution ||
+        static_cast<uint32_t>(image->getHeight()) != resolution ||
+        image->getDataLen() != resolution * resolution * sizeof(uint16_t)) {
+        return Uint16Array();
+    }
+    Uint16Array samples(resolution * resolution);
+    std::memcpy(samples.buffer()->getData(), image->getData(), samples.byteLength());
+    return samples;
 }
 
 bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,

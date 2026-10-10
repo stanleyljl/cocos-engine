@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import downloader from '../asset/asset-manager/downloader';
 import zlib from '../../external/compression/zlib.min';
+import { JSB } from 'internal:constants';
+
+declare const jsb: any;
 
 export const LANDSCAPE_TILE_RESOLUTION = 129;
 
@@ -16,7 +19,7 @@ export interface LandscapeHeightLayout {
     files: Record<string, string>;
 }
 
-/** World-space XZ rectangle in meters. */
+/** World-space XZ rectangle. */
 export interface LandscapeWorldBounds {
     minX: number;
     minZ: number;
@@ -33,7 +36,7 @@ export interface LandscapeTileRect {
 }
 
 /** Coordinate mapping for the finest collision source grid. Tile origins are
- * landscape-local; world-space operations explicitly receive the node origin.
+ * relative to the minimum XZ corner; world operations receive its node origin.
  * Point sampling may include the terrain's far edge, but coverage rectangles
  * are half-open so a tile-aligned maximum never requests the following tile. */
 export class LandscapeHeightGrid {
@@ -46,19 +49,17 @@ export class LandscapeHeightGrid {
     }
 
     public tileLocalOrigin (x: number, z: number): { x: number; z: number } {
-        const { tilesX, tilesZ, tileSize } = this._layout;
-        return { x: (x - tilesX / 2) * tileSize, z: (z - tilesZ / 2) * tileSize };
+        const { tileSize } = this._layout;
+        return { x: x * tileSize, z: z * tileSize };
     }
 
     public worldBoundsToTiles (bounds: Readonly<LandscapeWorldBounds>, origin: Readonly<{ x: number; z: number }>): LandscapeTileRect {
-        const min = this.tileLocalOrigin(0, 0);
         const { tileSize } = this._layout;
-        const startX = origin.x + min.x, startZ = origin.z + min.z;
         return {
-            beginX: Math.floor((bounds.minX - startX) / tileSize),
-            beginZ: Math.floor((bounds.minZ - startZ) / tileSize),
-            endX: Math.ceil((bounds.maxX - startX) / tileSize),
-            endZ: Math.ceil((bounds.maxZ - startZ) / tileSize),
+            beginX: Math.floor((bounds.minX - origin.x) / tileSize),
+            beginZ: Math.floor((bounds.minZ - origin.z) / tileSize),
+            endX: Math.ceil((bounds.maxX - origin.x) / tileSize),
+            endZ: Math.ceil((bounds.maxZ - origin.z) / tileSize),
         };
     }
 
@@ -202,6 +203,13 @@ export class LandscapeHeightLoader {
         const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
             downloader._downloadArrayBuffer(tileURL, {}, (err, data) => err ? reject(err) : resolve(data));
         });
+        if (JSB) {
+            // File reading remains asynchronous. Use native PNG decoding instead
+            // of doing inflate and per-pixel filter reconstruction in JavaScript.
+            const samples = jsb.LandscapeAsset.decodeSamples(new Uint8Array(bytes), layout.resolution) as Uint16Array;
+            if (samples.length !== layout.resolution ** 2) throw new Error('Invalid Landscape physics PNG');
+            return samples;
+        }
         return decodeLandscapeHeight(bytes, layout.resolution);
     }
 }

@@ -101,7 +101,7 @@ private:
     float _preloadDistance{-1.0F};
     IntrusivePtr<geometry::AABB> _box;
     ccstd::vector<QuadNode> _selected;
-    NodeRangeLayout _nodeLayout;
+    NodeIndexLayout _nodeIndexLayout;
     ccstd::vector<HeightRange> _heightRanges;
     ccstd::vector<float> _lodRange;
     ccstd::vector<float> _lodMorphStart;

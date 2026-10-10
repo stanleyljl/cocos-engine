@@ -39,7 +39,7 @@ using namespace cc;
 %ignore cc::landscape::LandscapeAsset::getHeightRange;
 %ignore cc::landscape::LandscapeAsset::requestTile;
 %ignore cc::landscape::LandscapeAsset::takeReadyTile;
-%ignore cc::landscape::LandscapeAsset::takeFailedTile;
+%ignore cc::landscape::LandscapeAsset::loadingFailed;
 %ignore cc::landscape::LandscapeAsset::loadTile;
 %ignore cc::landscape::LandscapeAsset::loadTileSet;
 %ignore cc::landscape::LandscapeAsset::requestQueryTile;

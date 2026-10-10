@@ -69,7 +69,7 @@ public:
     struct TerrainPatch {
         uint64_t nodeKey{0};
         uint8_t quadrantMask{0};
-        LandscapeLocalRegion region;
+        LandscapeRegion region;
         Vec3 boundsMin;
         Vec3 boundsMax;
         LandscapeSurfaceInstance surface;

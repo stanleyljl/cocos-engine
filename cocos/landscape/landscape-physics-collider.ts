@@ -22,7 +22,8 @@ export class LandscapePhysicsHeightfield implements ITerrainAsset {
     public readonly tileSize: number;
     public readonly localOriginY: number;
     public readonly heightFieldScale: number;
-    constructor (public readonly samples: Uint16Array, private readonly _layout: LandscapeHeightLayout) {
+    constructor (public readonly samples: Uint16Array, private readonly _layout: LandscapeHeightLayout,
+        public readonly holes: Uint8Array) {
         this.tileSize = _layout.tileSize / (_layout.resolution - 1);
         this.heightFieldScale = _layout.heightScale / 65535;
         this.localOriginY = _layout.heightBias + 32768 * _layout.heightScale / 65535;
@@ -49,8 +50,9 @@ export function createNativeLandscapeShapeType (Base: any, Resource: any): Const
             }
             const resource = new Resource();
             this._resource = resource;
-            const id = resource.create(terrain.samples, terrain.getVertexCountI(), this._impl.getObjectID());
-            if (!id) {
+            const id = resource.create(terrain.samples, terrain.holes, terrain.getVertexCountI(), this._impl.getObjectID());
+            // PhysX resource ID 0 is valid; the Landscape owner returns UINT32_MAX on failure.
+            if (id === 0xFFFFFFFF) {
                 throw new Error('Failed to create Landscape native heightfield');
             }
             this._impl.setTerrain(id, terrain.tileSize, terrain.tileSize, terrain.heightFieldScale);
@@ -177,12 +179,20 @@ export class LandscapePhysicsCollider extends TerrainCollider {
         }
         this.sharedMaterial = this._material;
         this._shape = createLandscapeShape();
-        this._shape.initialize(this);
-        this._shape.onLoad!();
+        try {
+            this._shape.initialize(this);
+            this._shape.onLoad!();
+        } catch (error) {
+            const shape = this._shape;
+            // Node activation can continue after onLoad throws. Do not enable a failed shape.
+            this._shape = null;
+            shape.onDestroy!();
+            throw error;
+        }
     }
 }
 
-/** Streamed hole meshes own their cooked PhysX data; ordinary MeshCollider caches stay unchanged. */
+/** Immutable streamed hole meshes. Backend changes stay local to Landscape. */
 @ccclass('cc.LandscapePhysicsMeshCollider')
 export class LandscapePhysicsMeshCollider extends MeshCollider {
     protected onLoad (): void {
@@ -191,7 +201,29 @@ export class LandscapePhysicsMeshCollider extends MeshCollider {
         const Base = selector.wrapper.TrimeshShape as any;
         if (!Base) throw new Error(`Landscape hole collision unavailable: ${selector.id}`);
         let Type = Base;
-        if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && globalThis['jsb.physics']) {
+        if (selector.id === 'cannon.js') {
+            Type = class extends Base {
+                setMesh (mesh: Mesh): void {
+                    // initialize already builds normals, edges and the octree. The inherited
+                    // onLoad calls setMesh again, but this tile's mesh never changes.
+                    if (this._shape) return;
+                    super.setMesh(mesh);
+                    const tree = this._shape.tree;
+                    // Cannon's query visits children even when their parent misses the
+                    // query bounds. Prune those branches only for this Landscape mesh.
+                    tree.aabbQuery = (bounds: any, result: number[]): number[] => {
+                        const stack = [tree];
+                        while (stack.length) {
+                            const node = stack.pop()!;
+                            if (!node.aabb.overlaps(bounds)) continue;
+                            for (const triangle of node.data) result.push(triangle);
+                            for (const child of node.children) stack.push(child);
+                        }
+                        return result;
+                    };
+                }
+            };
+        } else if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && globalThis['jsb.physics']) {
             Type = class extends Base {
                 private _resource: any;
                 private _nativeInitialized = false;
@@ -200,10 +232,11 @@ export class LandscapePhysicsMeshCollider extends MeshCollider {
                     super.setMesh(mesh);
                     this._resource = new jsb.LandscapeHeightfield();
                     const cache = globalThis['jsb.physics'].CACHE.trimesh;
-                    if (!this._resource.adoptTriangleMesh(cache[mesh._uuid], this._impl.getObjectID())) {
+                    const adopted = this._resource.adoptTriangleMesh(cache[mesh._uuid], this._impl.getObjectID());
+                    delete cache[mesh._uuid];
+                    if (!adopted) {
                         throw new Error('Failed to own Landscape native hole mesh');
                     }
-                    delete cache[mesh._uuid];
                 }
                 initialize (collider: MeshCollider): void {
                     super.initialize(collider); this._nativeInitialized = true;
@@ -232,6 +265,14 @@ export class LandscapePhysicsMeshCollider extends MeshCollider {
             };
         }
         this._shape = new Type();
-        this._shape!.initialize(this); this._shape!.onLoad!();
+        try {
+            this._shape!.initialize(this);
+            this._shape!.onLoad!();
+        } catch (error) {
+            const shape = this._shape!;
+            this._shape = null;
+            shape.onDestroy!();
+            throw error;
+        }
     }
 }

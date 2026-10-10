@@ -34,25 +34,21 @@
 namespace cc {
 namespace landscape {
 
-// Meters relative to the landscape node's center (translation-only placement).
-struct LandscapeLocalXZ {
-    double x{0};
-    double z{0};
+// Local XZ position. The landscape node is at the minimum XZ corner;
+// world position = node world position + local position (translation only).
+struct LandscapePoint {
+    float x{0};
+    float z{0};
 };
 
-// Meters from the landscape's minimum XZ corner, before division into cells.
-// A separate type prevents accidentally using center-relative coordinates.
-struct LandscapeGridXZ {
-    double x{0};
-    double z{0};
+// Local square: minimum XZ corner and side length.
+struct LandscapeRegion {
+    float x{0};
+    float z{0};
+    float size{0};
 };
 
-struct LandscapeGridBounds {
-    LandscapeGridXZ min;
-    LandscapeGridXZ max;
-};
-
-// Global geometry/source-tile coordinates at a geometry LOD, NOT a VT level.
+// Integer node indices across all sectors at a geometry/source LOD.
 struct NodeAddress {
     uint32_t level{0};
     uint32_t x{0};
@@ -64,12 +60,8 @@ struct NodeAddress {
     NodeAddress ancestor(uint32_t targetLevel) const;
 };
 
-// Square in landscape-local meters. Convert to Vec4 only at the shader boundary.
-struct LandscapeLocalRegion {
-    float x{0};
-    float z{0};
-    float size{0};
-};
+// Shared key encoding for geometry nodes, source tiles and VT pages.
+uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
 
 struct LandscapeData {
     uint32_t sectorsX{0};
@@ -81,8 +73,8 @@ struct LandscapeData {
     float heightScale{0.0F};
     float heightBias{0.0F};
 
-    float worldWidth() const { return sectorSize * static_cast<float>(sectorsX); }
-    float worldDepth() const { return sectorSize * static_cast<float>(sectorsZ); }
+    float width() const { return sectorSize * static_cast<float>(sectorsX); }
+    float depth() const { return sectorSize * static_cast<float>(sectorsZ); }
     float minHeight() const { return heightBias; }
     float maxHeight() const { return heightBias + heightScale; }
     bool valid() const;
@@ -93,29 +85,27 @@ struct LandscapeData {
     uint32_t nodesX(uint32_t level) const { return sectorsX * nodesPerSectorSide(level); }
     uint32_t nodesZ(uint32_t level) const { return sectorsZ * nodesPerSectorSide(level); }
 
-    LandscapeGridXZ localToGrid(LandscapeLocalXZ local) const;
-    LandscapeLocalXZ gridToLocal(LandscapeGridXZ grid) const;
     // Sampling includes the outermost boundary. It belongs to the last cell.
-    bool containsGridPoint(LandscapeGridXZ grid) const;
+    bool contains(LandscapePoint position) const;
     // Requires valid dimensions and a valid level.
     // Explicitly clamps gutter probes and inclusive outer-edge samples.
-    NodeAddress nodeAtGridClamped(uint32_t level, LandscapeGridXZ grid) const;
-    LandscapeLocalRegion regionAtGrid(LandscapeGridXZ origin, float size) const;
-    LandscapeLocalRegion nodeRegion(NodeAddress address) const;
+    NodeAddress nodeAtClamped(uint32_t level, LandscapePoint position) const;
+    LandscapeRegion nodeRegion(NodeAddress address) const;
+    // Convert sector-relative node indices to indices across all sectors.
     NodeAddress nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
                              uint32_t localX, uint32_t localZ) const;
 };
 
-// Flat storage for node metadata: sectors in row-major (Z, X) order, then
+// Index layout for flat node metadata storage: sectors in row-major (Z, X) order, then
 // levels from L0 to the root, then nodes in row-major (Z, X) order per level.
 // Owns a snapshot of the dimensions and offsets; callers cannot mix layouts.
-class NodeRangeLayout {
+class NodeIndexLayout {
 public:
     static constexpr size_t INVALID_INDEX = std::numeric_limits<size_t>::max();
 
-    NodeRangeLayout() = default;
+    NodeIndexLayout() = default;
     // Zero sectors or an invalid maxLevel produce an empty layout.
-    explicit NodeRangeLayout(const LandscapeData &data);
+    explicit NodeIndexLayout(const LandscapeData &data);
 
     size_t nodeCount() const { return static_cast<size_t>(_sectorsX) * _sectorsZ * _nodesPerSector; }
 
@@ -137,9 +127,6 @@ private:
     uint32_t _sectorsZ{0};
     size_t _nodesPerSector{0};
 };
-
-// Shared key encoding for geometry nodes, source tiles and VT pages.
-uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
 
 } // namespace landscape
 } // namespace cc

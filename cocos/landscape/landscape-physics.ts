@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
+import { EDITOR_NOT_IN_PREVIEW, JSB } from 'internal:constants';
 import { isValid } from '../core';
 import { Node } from '../scene-graph/node';
 import { director, DirectorEvent } from '../game/director';
@@ -502,10 +502,14 @@ export class LandscapePhysics {
         try {
             node.parent = this._landscape.node;
             const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
-            const heightfield = new LandscapePhysicsHeightfield(tile.samples!, layout);
+            const heightfield = new LandscapePhysicsHeightfield(tile.samples!, layout, tile.holes!);
             node.setPosition(local.x, heightfield.localOriginY, local.z);
             let collider: TerrainCollider | MeshCollider;
-            if (tile.holes!.some(hole => hole !== 0)) {
+            // Native PhysX supports hole materials directly. Its current Wasm
+            // bindings do not expose the material-index setter, so retain meshes there.
+            const nativeHeightfield = JSB && selector.id === 'physx' && !!globalThis['jsb.physics'];
+            if (tile.holes!.every(hole => hole !== 0)) { node.active = true; return node; }
+            if (!nativeHeightfield && tile.holes!.some(hole => hole !== 0)) {
                 const n = layout.resolution, edge = n - 1;
                 const positions: number[] = [], indices: number[] = [];
                 for (let z = 0; z < n; ++z) for (let x = 0; x < n; ++x) {

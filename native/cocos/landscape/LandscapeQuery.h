@@ -45,11 +45,11 @@ public:
     LandscapeQuery(const LandscapeData &data, Loader loader, uint32_t capacity = 64);
     ~LandscapeQuery();
     // Inputs and returned positions are landscape-local; Landscape converts world space.
-    LandscapeQueryStatus setSource(uint32_t id, LandscapeLocalXZ center, float radius);
+    LandscapeQueryStatus setSource(uint32_t id, LandscapePoint center, float radius);
     void removeSource(uint32_t id);
     LandscapeQueryStatus sourceStatus(uint32_t id) const;
     void update();
-    LandscapeSurfaceResult sample(LandscapeLocalXZ local);
+    LandscapeSurfaceResult sample(LandscapePoint local);
 
 private:
     enum class State { WAITING, LOADING, READY, FAILED };
@@ -75,17 +75,17 @@ private:
         float fx{0};
         float fz{0};
     };
-    LandscapeQueryStatus collectSourceKeys(LandscapeLocalXZ center, float radius, ccstd::vector<uint64_t> &keys) const;
+    LandscapeQueryStatus collectSourceKeys(LandscapePoint center, float radius, ccstd::vector<uint64_t> &keys) const;
     bool sourceFits(const ccstd::vector<uint64_t> &keys, const ccstd::vector<uint64_t> *previous) const;
     void pinSourceTiles(const ccstd::vector<uint64_t> &keys);
-    SampleLocation locateSample(LandscapeGridXZ grid, NodeAddress tile) const;
+    SampleLocation locateSample(LandscapePoint local, NodeAddress tile) const;
     bool interpolateHeightNormal(const Entry &entry, const SampleLocation &location,
-                                 LandscapeLocalXZ local, LandscapeSurfaceResult &result) const;
+                                 LandscapePoint local, LandscapeSurfaceResult &result) const;
     void interpolateSurface(const Entry &entry, const SampleLocation &location, LandscapeSurfaceResult &result) const;
     LandscapeData _data;
     Loader _loader;
     uint32_t _capacity;
-    double _tileSize;
+    float _tileSize;
     uint64_t _clock{0};
     uint64_t _nextTicket{0};
     uint32_t _inFlight{0};

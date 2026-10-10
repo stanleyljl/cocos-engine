@@ -22,22 +22,22 @@ uint32_t VTPageLayout::levelForDistance(float distance) const {
     return level;
 }
 
-VTPageAddress VTPageLayout::coveringPatch(uint32_t desiredLevel, LandscapeGridXZ origin, float cellSize,
+VTPageAddress VTPageLayout::coveringPatch(uint32_t desiredLevel, LandscapePoint origin, float cellSize,
                                         uint32_t x, uint32_t z, uint32_t cells) const {
     return coveringPage(desiredLevel,
-                        {{origin.x + (x - (x & 1U)) * cellSize, origin.z + (z - (z & 1U)) * cellSize},
-                         {origin.x + (x + cells) * cellSize, origin.z + (z + cells) * cellSize}});
+                        {origin.x + (x - (x & 1U)) * cellSize, origin.z + (z - (z & 1U)) * cellSize},
+                         {origin.x + (x + cells) * cellSize, origin.z + (z + cells) * cellSize});
 }
 
-VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, const LandscapeGridBounds &bounds) const {
+VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
     assert(desiredLevel <= _rootLevel);
     for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
-        const double size = pageSize(level);
+        const float size = pageSize(level);
         const VTPageAddress page{level,
-                                 static_cast<uint32_t>(std::floor(bounds.min.x / size + 1e-7)),
-                                 static_cast<uint32_t>(std::floor(bounds.min.z / size + 1e-7))};
-        if (bounds.max.x <= (page.x + 1.0) * size + size * 1e-7 &&
-            bounds.max.z <= (page.z + 1.0) * size + size * 1e-7) {
+                                 static_cast<uint32_t>(std::floor(min.x / size + 1e-7F)),
+                                 static_cast<uint32_t>(std::floor(min.z / size + 1e-7F))};
+        if (max.x <= (page.x + 1.0F) * size + size * 1e-7F &&
+            max.z <= (page.z + 1.0F) * size + size * 1e-7F) {
             return page;
         }
     }

@@ -32,6 +32,7 @@
 #include <mutex>
 
 #include "base/RefCounted.h"
+#include "core/TypedArray.h"
 #include "base/std/container/string.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
@@ -52,7 +53,7 @@ public:
         ccstd::string name;
         ccstd::string albedoHeight;
         ccstd::string normalRoughnessAO;
-        float pixelsPerMeter{128.0F}; // source texture pixels per landscape-local meter
+        float pixelsPerMeter{128.0F}; // source texture pixels per logical unit
     };
 
     struct DecalLayer {
@@ -95,7 +96,9 @@ public:
     // Only complete height/splat/normal sets are available through takeReadyTile().
     bool requestTile(uint32_t level, uint32_t x, uint32_t z);
     bool takeReadyTile(TileData &tile);
-    bool takeFailedTile(uint64_t &key);
+    // Generated tiles are valid. An unexpected I/O/decode error stops streaming
+    // for this asset until load() creates a fresh asynchronous state.
+    bool loadingFailed() const { return _async && _async->loadFailed.load(); }
     // Independent CPU query decode. Paths are resolved on the calling/main
     // thread; completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
@@ -104,6 +107,9 @@ public:
     // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
                          ccstd::vector<uint8_t> &data);
+    // Native libpng decode for physics after its asynchronous file read.
+    // Avoid JS inflate/unfilter loops; returns source uint16 values in host order.
+    static Uint16Array decodeSamples(const Uint8Array &png, uint32_t resolution);
 
     const ccstd::vector<DecalLayer> &decalLayers() const { return _decalLayers; }
     const ccstd::vector<Decal> &decals() const { return _decals; }
@@ -122,7 +128,7 @@ private:
     struct AsyncState {
         std::mutex mutex;
         std::deque<TileData> ready;
-        std::deque<uint64_t> failed;
+        std::atomic<bool> loadFailed{false};
         std::atomic<bool> cancelled{false};
     };
 
@@ -147,7 +153,7 @@ private:
     uint32_t _decalResolution{1};
     float _decalNearDistance{12.0F};
     float _decalFarDistance{40.0F};
-    NodeRangeLayout _nodeLayout;
+    NodeIndexLayout _nodeIndexLayout;
     ccstd::vector<HeightRange> _heightRanges;
     ccstd::unordered_set<uint64_t> _pendingTiles;
     std::shared_ptr<AsyncState> _async;

@@ -58,7 +58,7 @@ static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 8
               "VT compose constants must fit a 16 KB uniform block");
 static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 texels");
 
-// 256 usable texels per meter at the finest page. Keep 16 x 16 physical slots.
+// 256 usable texels per logical unit at the finest page. Keep 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 16; // 2x2 interior sources plus a one-source gutter ring.
 constexpr uint32_t VT_PAGE_BORDER = 8;

@@ -277,8 +277,8 @@ uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array outpu
     }
     const auto &origin = _node->getWorldPosition();
     const auto &data = _asset->data();
-    const LandscapeLocalXZ local{worldX - origin.x, worldZ - origin.z};
-    if (!data.containsGridPoint(data.localToGrid(local))) {
+    const LandscapePoint local{worldX - origin.x, worldZ - origin.z};
+    if (!data.contains(local)) {
         return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
     }
     if (!_query) {

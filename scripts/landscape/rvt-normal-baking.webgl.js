@@ -84,6 +84,21 @@ try {
   };
   const repeat=p=>[p,p,p,p];
   close(render(repeat([0,1,0])),expected(repeat([0,0,0])),'pure bottom');
+  // Four colors expose any half-terrain offset in local-position -> global UV.
+  gl.activeTexture(gl.TEXTURE3);
+  const quadrants = [[255,0,0,255],[0,255,0,255],[0,0,255,255],[255,255,255,255]];
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(quadrants.flat()));
+  constants[136]=1/8;constants[137]=1/4;constants[138]=1;
+  const baseColor=expected(repeat([0,0,0])).slice(0,3);
+  for(let z=0;z<2;z++)for(let x=0;x<2;x++){
+    const tint=quadrants[z*2+x];
+    close(render(repeat([0,0,0]),{x:2+x*4,y:1+z*2,span:.01}).slice(0,3),
+      baseColor.map((v,c)=>v*tint[c]/255),'global color at local quadrant '+x+','+z,2);
+  }
+  gl.activeTexture(gl.TEXTURE3);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
+  constants.set([1,1,0,0],136);
+
   close(render(repeat([1,0,31])),expected(repeat([0,0,0])),'pure top');
   close(render(repeat([3,3,14])),expected(repeat([3,3,14])),'identical IDs');
   const pairs=[[0,1,7],[1,2,14],[0,2,22],[2,0,27]];
@@ -228,7 +243,7 @@ try {
     gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
     constants.set([1,1,0,1],0);
-    constants.set([1,1,0,0],2324);constants.set([0,0,1,0],2328);constants[5]=1;
+    constants.set([1,1,0,0],2324);constants.set([1,0,0,0],2328);constants[5]=1;
     const material=repeat([0,0,0]);
     const at={x:.27,y:.31,span:.01};
     for(const n of [[255,128],[0,128],[128,255],[128,0],[210,210]]){
@@ -279,7 +294,7 @@ try {
     constants[2324]=1;constants[5]=1;
     // Neighbor reference tiles agree at their shared endpoint, including when
     // the bake footprint crosses the boundary. The height field is continuous.
-    setNormal([255,128]);constants[698]=.5;
+    setNormal([255,128]);constants[2328]=.5;
     gl.activeTexture(gl.TEXTURE12);gl.bindTexture(gl.TEXTURE_2D,cliffSourceTable);
     gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,2,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,.5,0,.5,0,.5,1]));
     const heights=new Uint8Array(16);

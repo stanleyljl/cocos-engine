@@ -70,7 +70,7 @@ CCProgram landscape-uniforms %{
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
-    vec4 sectorParams; // sector size, half landscape width/depth, unused
+    vec4 sectorParams; // sector size, unused YZW
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
@@ -132,7 +132,7 @@ CCProgram landscape-vertex %{
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
     in vec4 a_quadrantInst; // UV offset XY, patch UV size Z, coarse-neighbor edge mask W
-    in vec4 a_tileInst; // source tile local XZ origin, size in meters, paired array layer
+    in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
     #if !LANDSCAPE_SHADOW_PASS
       in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
     #endif
@@ -482,7 +482,7 @@ CCProgram landscape-surface %{
       }
       // Use local terrain coordinates so seams follow the rendered surface,
       // including geomorph and node transforms. Differentiate before wrapping.
-      vec2 sectorUV = (vec2(FSInput_texcoord.x, -FSInput_texcoord.y) + sectorParams.yz) / max(sectorParams.x, 1e-6);
+      vec2 sectorUV = vec2(FSInput_texcoord.x, -FSInput_texcoord.y) / max(sectorParams.x, 1e-6);
       vec2 seamDistance = abs(fract(sectorUV + 0.5) - 0.5);
       vec2 seamWidth = max(fwidth(sectorUV) * 1.5, vec2(1e-6));
       if (any(lessThan(seamDistance, seamWidth))) {

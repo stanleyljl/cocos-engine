@@ -18,7 +18,7 @@ LandscapeQuery::LandscapeQuery(const LandscapeData &data, Loader loader, uint32_
 
 LandscapeQuery::~LandscapeQuery() = default;
 
-LandscapeQueryStatus LandscapeQuery::setSource(uint32_t id, LandscapeLocalXZ center, float radius) {
+LandscapeQueryStatus LandscapeQuery::setSource(uint32_t id, LandscapePoint center, float radius) {
     ccstd::vector<uint64_t> keys;
     const auto requested = collectSourceKeys(center, radius, keys);
     if (requested != LandscapeQueryStatus::HIT) {
@@ -40,17 +40,16 @@ LandscapeQueryStatus LandscapeQuery::setSource(uint32_t id, LandscapeLocalXZ cen
     return sourceStatus(id);
 }
 
-LandscapeQueryStatus LandscapeQuery::collectSourceKeys(LandscapeLocalXZ center, float radius,
+LandscapeQueryStatus LandscapeQuery::collectSourceKeys(LandscapePoint center, float radius,
                                                        ccstd::vector<uint64_t> &keys) const {
     if (!_data.valid() || radius < 0) {
         return LandscapeQueryStatus::ERROR;
     }
-    const auto grid = _data.localToGrid(center);
-    if (grid.x + radius < 0 || grid.z + radius < 0 || grid.x - radius > _data.worldWidth() || grid.z - radius > _data.worldDepth()) {
+    if (center.x + radius < 0 || center.z + radius < 0 || center.x - radius > _data.width() || center.z - radius > _data.depth()) {
         return LandscapeQueryStatus::MISS;
     }
-    const auto lo = _data.nodeAtGridClamped(_data.minTileLevel, {grid.x - radius, grid.z - radius});
-    const auto hi = _data.nodeAtGridClamped(_data.minTileLevel, {grid.x + radius, grid.z + radius});
+    const auto lo = _data.nodeAtClamped(_data.minTileLevel, {center.x - radius, center.z - radius});
+    const auto hi = _data.nodeAtClamped(_data.minTileLevel, {center.x + radius, center.z + radius});
     const auto x0 = lo.x, z0 = lo.z, x1 = hi.x, z1 = hi.z;
     // Reject an oversized request before creating an unbounded key list.
     if (uint64_t(x1 - x0 + 1U) * (z1 - z0 + 1U) > _capacity) {
@@ -187,18 +186,17 @@ void LandscapeQuery::update() {
     }
 }
 
-LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
+LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) {
     LandscapeSurfaceResult result;
     if (!_data.valid()) {
         result.status = LandscapeQueryStatus::ERROR;
         return result;
     }
-    const auto grid = _data.localToGrid(local);
-    if (!_data.containsGridPoint(grid)) {
+    if (!_data.contains(local)) {
         result.status = LandscapeQueryStatus::MISS;
         return result;
     }
-    const auto address = _data.nodeAtGridClamped(_data.minTileLevel, grid);
+    const auto address = _data.nodeAtClamped(_data.minTileLevel, local);
     const auto key = address.key();
     const auto it = _entries.find(key);
     if (it == _entries.end() || it->second.state == State::WAITING || it->second.state == State::LOADING) {
@@ -210,7 +208,7 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     }
     auto &entry = it->second;
     entry.lastUse = ++_clock;
-    const auto location = locateSample(grid, address);
+    const auto location = locateSample(local, address);
     uint16_t encoded;
     std::memcpy(&encoded, entry.tile.splat.data() + location.texels[0] * 2U, sizeof(encoded));
     if ((encoded & 0x8000U) != 0U) {
@@ -225,19 +223,19 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapeLocalXZ local) {
     return result;
 }
 
-LandscapeQuery::SampleLocation LandscapeQuery::locateSample(LandscapeGridXZ grid, NodeAddress tile) const {
+LandscapeQuery::SampleLocation LandscapeQuery::locateSample(LandscapePoint local, NodeAddress tile) const {
     const uint32_t edge = _data.tileResolution - 1U;
-    const double gx = std::clamp((grid.x / _tileSize - tile.x) * edge, 0.0, double(edge));
-    const double gz = std::clamp((grid.z / _tileSize - tile.z) * edge, 0.0, double(edge));
+    const float gx = std::clamp((local.x / _tileSize - tile.x) * edge, 0.0F, float(edge));
+    const float gz = std::clamp((local.z / _tileSize - tile.z) * edge, 0.0F, float(edge));
     const auto ix = std::min(static_cast<uint32_t>(gx), edge - 1U);
     const auto iz = std::min(static_cast<uint32_t>(gz), edge - 1U);
     const size_t a = size_t(iz) * _data.tileResolution + ix;
     return {{a, a + 1U, a + _data.tileResolution, a + _data.tileResolution + 1U},
-            static_cast<float>(gx - ix), static_cast<float>(gz - iz)};
+            gx - ix, gz - iz};
 }
 
 bool LandscapeQuery::interpolateHeightNormal(const Entry &entry, const SampleLocation &location,
-                                             LandscapeLocalXZ local, LandscapeSurfaceResult &result) const {
+                                             LandscapePoint local, LandscapeSurfaceResult &result) const {
     const float fx = location.fx;
     const float fz = location.fz;
     // Shading normals retain smooth bilinear interpolation. Physical height
@@ -246,21 +244,21 @@ bool LandscapeQuery::interpolateHeightNormal(const Entry &entry, const SampleLoc
     const std::array<float, 4> heightWeights = fx + fz <= 1.0F
         ? std::array<float, 4>{1-fx-fz, fx, fz, 0}
         : std::array<float, 4>{0, 1-fz, 1-fx, fx+fz-1};
-    double height = 0, nx = 0, ny = 0, nz = 0;
+    float height = 0, nx = 0, ny = 0, nz = 0;
     for (size_t i = 0; i < location.texels.size(); ++i) {
         const auto h = location.texels[i] * 2U, n = location.texels[i] * 3U;
         height += heightWeights[i] * (uint32_t(entry.tile.height[h]) * 256U + entry.tile.height[h + 1U]);
-        nx += weights[i] * (entry.tile.normal[n] * (2.0 / 255.0) - 1.0);
-        ny += weights[i] * (entry.tile.normal[n + 1U] * (2.0 / 255.0) - 1.0);
-        nz += weights[i] * (entry.tile.normal[n + 2U] * (2.0 / 255.0) - 1.0);
+        nx += weights[i] * (entry.tile.normal[n] * (2.0F / 255.0F) - 1.0F);
+        ny += weights[i] * (entry.tile.normal[n + 1U] * (2.0F / 255.0F) - 1.0F);
+        nz += weights[i] * (entry.tile.normal[n + 2U] * (2.0F / 255.0F) - 1.0F);
     }
-    const double length = std::sqrt(nx*nx + ny*ny + nz*nz);
+    const float length = std::sqrt(nx*nx + ny*ny + nz*nz);
     if (!(length > 0)) {
         result.status = LandscapeQueryStatus::ERROR;
         return false;
     }
-    result.position.set(static_cast<float>(local.x), static_cast<float>(_data.heightBias + height * (_data.heightScale / 65535.0)), static_cast<float>(local.z));
-    result.normal.set(static_cast<float>(nx / length), static_cast<float>(ny / length), static_cast<float>(nz / length));
+    result.position.set(local.x, _data.heightBias + height * (_data.heightScale / 65535.0F), local.z);
+    result.normal.set(nx / length, ny / length, nz / length);
     return true;
 }
 

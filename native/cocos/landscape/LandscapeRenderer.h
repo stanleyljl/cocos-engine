@@ -208,6 +208,7 @@ private:
     void commitPending();
     void updateReferences(uint64_t key, const ccstd::vector<Patch> &patches, bool add);
     bool colorRegion(NodeAddress node) const;
+    void stopLoading();
     void syncTerrainModels();
     void bindRuntimeTextures();
     void syncDecals(const ccstd::vector<Patch> &patches);
@@ -221,7 +222,7 @@ private:
     void updateModelBounds(scene::Model *model, const Patch &patch);
     void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
                        ccstd::vector<Patch> &patches);
-    LandscapeLocalRegion patchRegion(const Patch &patch) const;
+    LandscapeRegion patchRegion(const Patch &patch) const;
     float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
 
     IntrusivePtr<Node> _node;
@@ -277,7 +278,7 @@ private:
     bool _castShadow{true};
     bool _receiveShadow{true};
     bool _ready{false};
-    bool _initializationFailed{false};
+    bool _loadingFailed{false};
 };
 
 } // namespace landscape

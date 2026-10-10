@@ -19,7 +19,7 @@ CCEffect %{
         vtLayout: { value: [4352, 272, 8, 1] }
         sourceParams: { value: [129, 1, 0, 0] }
         cliffParams: { value: [0, 1, 0, 0] }
-        cliffLayout: { value: [0, 0, 1, 0] }
+        cliffLayout: { value: [1, 0, 0, 0] }
         cliffMaterialParams: { value: [0, 1, 0, 0] }
         cliffSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
         terrainHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
@@ -141,7 +141,7 @@ CCProgram vt-compose-uniforms %{
     vec4 decalParams; // placed decal count
     vec4 decalLayerParams[32]; // config::DECAL_LIBRARY_MAX; X: modulate terrain color
     vec4 cliffParams; // reference state: 0 pending, +1 triplanar, -1 planar; height scale/bias; override layer + 1
-    vec4 cliffLayout; // landscape minimum XZ, reference tile world size, reserved
+    vec4 cliffLayout; // reference tile size, unused YZW
     vec4 cliffMaterialParams; // override maximum normal Y, global color influence, reserved
   };
 }%
@@ -304,7 +304,7 @@ CCProgram vt-compose-fs %{
     vec3 position = vec3(v_localXZ.x, 0.0, v_localXZ.y);
     vec3 axisWeights = vec3(0.0, 1.0, 0.0);
     if (abs(cliffParams.x) > 0.5) {
-      ivec2 cell = clamp(ivec2(floor((v_localXZ - cliffLayout.xy) / cliffLayout.z)),
+      ivec2 cell = clamp(ivec2(floor(v_localXZ / cliffLayout.x)),
           ivec2(0), textureSize(cliffSourceMap, 0) - ivec2(1));
       vec4 source = texelFetch(cliffSourceMap, cell, 0);
       // Unlike geometry/normal LOD sources, this reference never changes with
@@ -406,7 +406,7 @@ CCProgram vt-compose-fs %{
     // covers the whole landscape once, including all VT pages and their borders.
     float globalColorStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
     if (globalColorStrength > 0.0) {
-      vec2 globalUV = v_localXZ * globalColorParams.xy + vec2(0.5);
+      vec2 globalUV = v_localXZ * globalColorParams.xy;
       vec3 globalColor = SRGBToLinear(texture(globalColorMap, globalUV).rgb);
       albedo *= mix(vec3(1.0), globalColor, globalColorStrength);
     }

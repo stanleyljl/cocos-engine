@@ -220,8 +220,8 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     _fallbackGlobalColorMap = materials.whiteTexture();
     _globalColorSampler = materials.clampSampler();
     bindComposeTexture("globalColorMap", _fallbackGlobalColorMap, _globalColorSampler);
-    _globalColorParams = Vec4{1.0F / data.worldWidth(),
-                              1.0F / data.worldDepth(), 0.0F, 0.0F};
+    _globalColorParams = Vec4{1.0F / data.width(),
+                              1.0F / data.depth(), 0.0F, 0.0F};
     _material->setPropertyVec4("globalColorParams", _globalColorParams);
     _material->setPropertyVec4Array("tilingParams", materials.tilingParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
@@ -271,9 +271,7 @@ bool VTRenderer::initCliffReference(const LandscapeAsset &asset, TilePagePool &t
     _material->setPropertyVec4("cliffMaterialParams", Vec4{cliffMaterial.maxNormalY,
                                                            cliffMaterial.globalColorInfluence, 0, 0});
     _material->setPropertyVec4("cliffParams", _cliff.params);
-    const auto origin = data.gridToLocal({});
-    _material->setPropertyVec4("cliffLayout", Vec4{static_cast<float>(origin.x),
-                                                   static_cast<float>(origin.z), referenceSize, 0});
+    _material->setPropertyVec4("cliffLayout", Vec4{referenceSize, 0, 0, 0});
     return true;
 }
 

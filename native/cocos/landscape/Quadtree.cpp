@@ -69,9 +69,9 @@ bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
         return false;
     }
     _selected.clear();
-    _nodeLayout = NodeRangeLayout(_data);
+    _nodeIndexLayout = NodeIndexLayout(_data);
 
-    _heightRanges.assign(_nodeLayout.nodeCount(),
+    _heightRanges.assign(_nodeIndexLayout.nodeCount(),
                          HeightRange{_data.minHeight(), _data.maxHeight()});
     for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
         const uint32_t side = _data.nodesPerSectorSide(level);
@@ -82,7 +82,7 @@ bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
                 if (!asset.getHeightRange(level, globalX, globalZ, minY, maxY)) {
                     return false;
                 }
-                const size_t index = _nodeLayout.globalNodeIndex(level, globalX, globalZ);
+                const size_t index = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
                 _heightRanges[index] = HeightRange{minY, maxY};
             }
         }
@@ -106,7 +106,7 @@ void Quadtree::computeRanges(float lodQualityScale) {
 
     // Horizontal terrain diagonal, independent of height range and camera far clip.
     // A larger scale keeps finer LODs visible farther away.
-    const float visibilityDistance = std::hypot(_data.worldWidth(), _data.worldDepth()) * lodQualityScale;
+    const float visibilityDistance = std::hypot(_data.width(), _data.depth()) * lodQualityScale;
     const float section = visibilityDistance / totalWeight;
     float previousRange = 0.0F;
     currentWeight = 1.0F;
@@ -133,7 +133,7 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
         level > _data.maxLevel) {
         return;
     }
-    const size_t index = _nodeLayout.sectorNodeIndex(_sectorX, _sectorZ, level, ix, iz);
+    const size_t index = _nodeIndexLayout.sectorNodeIndex(_sectorX, _sectorZ, level, ix, iz);
     if (index >= _heightRanges.size()) {
         return;
     }

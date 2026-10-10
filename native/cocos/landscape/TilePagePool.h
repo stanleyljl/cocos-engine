@@ -115,7 +115,6 @@ public:
     void update(uint32_t maxUploads);
     int resident(NodeAddress source) const;
     bool ready() const;
-    bool failed() const;
     uint64_t updateRevision() const { return _updateRevision; }
     gfx::Texture *heightArray() const { return _heightArray; }
     gfx::Texture *splatArray() const { return _splatArray; }
@@ -137,7 +136,7 @@ private:
     bool _heightUnorm{false};
     ccstd::vector<uint16_t> _heightUpload;
     Reservations _reservations;
-    ccstd::unordered_set<uint64_t> _inFlight, _failed;
+    ccstd::unordered_set<uint64_t> _inFlight;
     uint64_t _updateRevision{0};
 };
 
@@ -155,7 +154,7 @@ public:
     bool resolvePage(VTPageAddress page, bool bakeNormals, VTPageInputs &output) const;
 
 private:
-    uint32_t sourceLevelForWorldSize(float size) const;
+    uint32_t sourceLevelForSize(float size) const;
     NodeAddress splatSource(VTPageAddress page) const;
     std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normalSources(VTPageAddress page, bool bakeNormals) const;
     TilePagePool &_pool;

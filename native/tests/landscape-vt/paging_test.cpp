@@ -177,7 +177,7 @@ void checkStitchedEdges(const RenderSelection &selection, const LandscapeData &d
         const double size = d.nodeSize(n.level), x = n.x * size, z = n.z * size, step = size / 16;
         const uint8_t mask = selection.edgeMask(n);
         for (uint32_t edge = 0; edge < 4; ++edge) {
-            if ((edge == 0 && x == 0) || (edge == 1 && x + size == d.worldWidth()) || (edge == 2 && z == 0) || (edge == 3 && z + size == d.worldDepth())) {
+            if ((edge == 0 && x == 0) || (edge == 1 && x + size == d.width()) || (edge == 2 && z == 0) || (edge == 3 && z + size == d.depth())) {
                 continue;
             }
             for (uint32_t j = 0; j <= 16; ++j) {
@@ -416,7 +416,7 @@ void testStitchedPageBounds() {
     const VTPageLayout layout(4096);
     // Near-camera patch at x=1, z=0: the top edge can snap x=1 to x=0 even
     // before the old distance morph threshold. Reproduce the former undersized page.
-    const auto unsafe = layout.coveringPage(0, {{1, 0}, {2, 1}});
+    const auto unsafe = layout.coveringPage(0, {1, 0}, {2, 1});
     require(unsafe.level == 0 && unsafe.x == 1, "Near-edge regression setup");
     const auto safe = layout.coveringPatch(0, {0, 0}, 1, 1, 0, 1);
     require(safe.level == 1 && safe.x == 0 && safe.z == 0,
@@ -483,16 +483,16 @@ void testSyncCache() {
 }
 
 void testCoordinateLayouts() {
-    const auto invalid = NodeRangeLayout::INVALID_INDEX;
-    require(NodeRangeLayout{}.nodeCount() == 0, "Default layout must be empty");
-    require(NodeRangeLayout{}.globalNodeIndex(0, 0, 0) == invalid, "Empty layout must reject addresses");
+    const auto invalid = NodeIndexLayout::INVALID_INDEX;
+    require(NodeIndexLayout{}.nodeCount() == 0, "Default layout must be empty");
+    require(NodeIndexLayout{}.globalNodeIndex(0, 0, 0) == invalid, "Empty layout must reject addresses");
     for (uint32_t root = 0; root < config::MAX_LOD_LEVELS; ++root) {
         LandscapeData data;
         data.sectorsX = 2;
         data.sectorsZ = 3;
         data.maxLevel = root;
         data.sectorSize = 1000;
-        const NodeRangeLayout layout(data);
+        const NodeIndexLayout layout(data);
         size_t expected = 0;
         // Independently enumerate the serialized storage order. Every address
         // must map exactly once, and local/global addressing must agree.
@@ -512,8 +512,8 @@ void testCoordinateLayouts() {
                             const auto ancestor = address.ancestor(root);
                             require(ancestor.x == sx && ancestor.z == sz, "Ancestor crossed a sector");
                             const auto region = data.nodeRegion(address);
-                            const auto center = data.localToGrid({region.x + region.size / 2, region.z + region.size / 2});
-                            require(data.nodeAtGridClamped(level, center).key() == address.key(), "Node/local/grid round trip failed");
+                            const LandscapePoint center{region.x + region.size / 2, region.z + region.size / 2};
+                            require(data.nodeAtClamped(level, center).key() == address.key(), "Node/position round trip failed");
                         }
                     }
                     require(layout.sectorNodeIndex(sx, sz, level, side, 0) == invalid, "Local X overflow accepted");
@@ -526,22 +526,40 @@ void testCoordinateLayouts() {
         require(layout.globalNodeIndex(root, 2, 0) == invalid, "Global X overflow accepted");
         require(layout.globalNodeIndex(root, 0, 3) == invalid, "Global Z overflow accepted");
         require(data.nodeSize(root + 1) == 0, "Invalid node level must have zero size");
-        const auto nearCorner = data.localToGrid({-1000, -1500});
-        const auto farCorner = data.localToGrid({1000, 1500});
-        require(nearCorner.x == 0 && nearCorner.z == 0 && farCorner.x == 2000 && farCorner.z == 3000,
-                "Non-square landscape center/corner conversion failed");
-        require(data.containsGridPoint(nearCorner) && data.containsGridPoint(farCorner), "Outer edge must be sampleable");
-        require(!data.containsGridPoint({-0.001, 0}) && !data.containsGridPoint({2000.001, 0}), "Outside sample accepted");
-        const auto last = data.nodeAtGridClamped(0, farCorner);
+        const LandscapePoint nearCorner{0, 0};
+        const LandscapePoint farCorner{data.width(), data.depth()};
+        require(farCorner.x == 2000 && farCorner.z == 3000, "Non-square landscape dimensions failed");
+        require(data.contains(nearCorner) && data.contains(farCorner), "Outer edge must be sampleable");
+        require(!data.contains({-0.001F, 0}) && !data.contains({2000.001F, 0}), "Outside sample accepted");
+        const auto last = data.nodeAtClamped(0, farCorner);
         require(last.x == data.nodesX(0) - 1 && last.z == data.nodesZ(0) - 1, "Far edge must select the last tile");
-        require(data.nodeAtGridClamped(0, {-1, -1}).key() == NodeAddress{0, 0, 0}.key(), "Gutter probe must clamp");
+        require(data.nodeAtClamped(0, {-1, -1}).key() == NodeAddress{0, 0, 0}.key(), "Gutter probe must clamp");
+        // Adjacent float values must stay on opposite sides of a sector edge.
+        for (uint32_t level = 0; level <= root; ++level) {
+            const uint32_t side = data.nodesPerSectorSide(level);
+            const float before = std::nextafter(data.sectorSize, 0.0F);
+            const float after = std::nextafter(data.sectorSize, data.width());
+            require(data.nodeAtClamped(level, {before, before}).x == side - 1U &&
+                    data.nodeAtClamped(level, {before, before}).z == side - 1U,
+                    "Float position before sector edge selected the next sector");
+            require(data.nodeAtClamped(level, {data.sectorSize, after}).x == side &&
+                    data.nodeAtClamped(level, {after, data.sectorSize}).z == side,
+                    "Float position at/after sector edge selected the previous sector");
+        }
         data.maxLevel = config::MAX_LOD_LEVELS;
-        require(NodeRangeLayout(data).nodeCount() == 0, "Invalid LOD must produce an empty layout");
+        require(NodeIndexLayout(data).nodeCount() == 0, "Invalid LOD must produce an empty layout");
         require(layout.nodeCount() == expected, "Layout must own its dimension snapshot");
     }
     const VTPageLayout fractional(1000);
     require(fractional.rootLevel() == 9 && fractional.pageSize(0) == 1.953125F, "Non-power-of-two VT layout changed");
     require(fractional.pageSize(10) == 0, "Invalid VT level must not underflow a shift");
+    for (uint32_t level = 0; level <= fractional.rootLevel(); ++level) {
+        const float size = fractional.pageSize(level);
+        const LandscapePoint min{2000.0F - size, 3000.0F - size};
+        const auto page = fractional.coveringPage(level, min, {2000.0F, 3000.0F});
+        require(page.level == level && page.x * size == min.x && page.z * size == min.z,
+                "Float VT page at a distant sector edge changed coverage");
+    }
     std::cout << "PASS: coordinate layouts, all geometry levels, non-square sectors and boundary round trips\n";
 }
 
@@ -683,11 +701,11 @@ int main() {
         require(count <= config::PAGE_POOL_LAYERS / 4U, "Cliff references exceeded cache budget");
         require(level >= reference.minTileLevel && level <= reference.maxLevel, "Invalid reference level");
     }
-    const auto fine = pageLayout.coveringPage(0, {{17, 29}, {18, 30}});
+    const auto fine = pageLayout.coveringPage(0, {17, 29}, {18, 30});
     require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
-    const auto morph = pageLayout.coveringPage(0, {{16, 28}, {18, 30}});
+    const auto morph = pageLayout.coveringPage(0, {16, 28}, {18, 30});
     require(morph.level == 1 && morph.x == 8 && morph.z == 14, "A morphing odd cell must use its containing parent");
-    const auto coarse = pageLayout.coveringPage(4, {{17, 29}, {18, 30}});
+    const auto coarse = pageLayout.coveringPage(4, {17, 29}, {18, 30});
     require(coarse.level == 4 && coarse.x == 1 && coarse.z == 1, "One geometry cell must also support a coarser VT page");
 
     uint64_t checked = 0;
@@ -725,7 +743,7 @@ int main() {
     // requested density. Pages must still line up at distant sector boundaries.
     const VTPageLayout oddLayout(1000.0F);
     require(config::VT_PAGE_INTERIOR / oddLayout.pageSize(0) <= 256.0F, "Finest page must not exceed 256 texels/m");
-    const auto boundary = pageLayout.coveringPage(root, {{8191, 4095}, {8192, 4096}});
+    const auto boundary = pageLayout.coveringPage(root, {8191, 4095}, {8192, 4096});
     require(boundary.x == 1 && boundary.z == 0, "Boundary must remain in its own permanent sector root");
     std::cout << "PASS: VT density, independent levels, page boundaries and " << checked << " stitch samples\n";
 }
