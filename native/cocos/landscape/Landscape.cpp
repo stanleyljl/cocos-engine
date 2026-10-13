@@ -29,6 +29,7 @@
 #include <cstdio>
 
 #include "base/Log.h"
+#include "base/std/container/unordered_set.h"
 #include "core/Root.h"
 #include "core/assets/Texture2D.h"
 #include "core/geometry/AABB.h"
@@ -82,16 +83,17 @@ Landscape::~Landscape() {
     onDisable();
 }
 
-void Landscape::onEnable(Node *node, float lodQualityScale) {
-    if (node == nullptr || _renderer != nullptr || lodQualityScale <= 0.0F) {
+void Landscape::onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity) {
+    if (node == nullptr || _renderer != nullptr || lodQualityScale <= 0.0F ||
+        queryCacheCapacity == 0 || queryCacheCapacity > 4096) {
         return;
     }
     _lodQualityScale = lodQualityScale;
     _node = node;
-    initializeRenderer();
+    initializeRenderer(queryCacheCapacity);
 }
 
-void Landscape::initializeRenderer() {
+void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
     if (_node == nullptr || _renderer != nullptr) {
         return;
     }
@@ -125,9 +127,17 @@ void Landscape::initializeRenderer() {
     applyRendererSettings(*renderer);
     logLodRanges(*asset, *quadtree);
 
+    // Create the empty CPU cache with the other runtime objects. Tile I/O
+    // starts only after a query source is registered and update() runs.
+    auto query = std::make_unique<LandscapeQuery>(asset->data(),
+        [this](uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
+            _asset->requestQueryTile(x, z, std::move(completion));
+        }, queryCacheCapacity);
+
     _asset = std::move(asset);
     _quadtree = std::move(quadtree);
     _renderer = std::move(renderer);
+    _query = std::move(query);
     _scene->addLandscape(this);
 }
 
@@ -173,7 +183,6 @@ void Landscape::onDisable() {
         _scene->removeLandscape(this);
     }
     _passes.clear();
-    _coveredShadowModels.clear();
     _passCount = 0;
     _geometryNodes.clear();
     _renderer = nullptr;
@@ -231,25 +240,13 @@ bool Landscape::queryTransformValid() const {
     return true;
 }
 
-void Landscape::setQueryCacheCapacity(uint32_t capacity) {
-    if (!_query && capacity > 0 && capacity <= 4096) {
-        _queryCacheCapacity = capacity;
-    }
-}
-
 uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
-    if (!_asset || !_node) {
+    if (!_query || !_node) {
         return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
     }
     if (!queryTransformValid()) {
         removeQuerySource(id);
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
-    }
-    if (!_query) {
-        _query = std::make_unique<LandscapeQuery>(_asset->data(),
-            [this](uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
-                _asset->requestQueryTile(x, z, std::move(completion));
-            }, _queryCacheCapacity);
     }
     const auto &origin = _node->getWorldPosition();
     return static_cast<uint32_t>(_query->setSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
@@ -318,7 +315,6 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     if ((camera.getVisibility() & layer) != layer) {
         return;
     }
-    update();
     _visibilityDistanceWarning = false;
 
     // The first selection is the only color pass in this forward camera batch.
@@ -393,10 +389,10 @@ void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate) {
 }
 
 void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
-    _coveredShadowModels.clear();
     if (cascadeCount < 2U) {
         return;
     }
+    ccstd::unordered_set<const scene::Model *> coveredShadowModels;
     // Match legacy shadowCulling: a model completely inside an earlier cascade
     // is omitted from later cascades. Intersecting the frustum is not sufficient.
     // All passes have already traversed their own quadtrees independently.
@@ -405,12 +401,12 @@ void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
         auto &pass = _passes[i];
         size_t count = 0;
         for (const auto *model : pass.models) {
-            if (_coveredShadowModels.count(model) != 0) {
+            if (coveredShadowModels.count(model) != 0) {
                 continue;
             }
             pass.models[count++] = model;
             if (i < cascadeCount && geometry::aabbFrustumCompletelyInside(*model->getWorldBounds(), *pass.frustum)) {
-                _coveredShadowModels.insert(model);
+                coveredShadowModels.insert(model);
             }
         }
         pass.models.resize(count);

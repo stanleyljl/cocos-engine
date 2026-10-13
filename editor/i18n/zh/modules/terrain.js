@@ -1,6 +1,74 @@
 module.exports = {
     classes: {
         cc: {
+            Landscape: {
+                properties: {
+                    landscapeAsset: {
+                        tooltip: '地形资源，包含地形尺寸、图层及瓦片数据。运行时按需加载瓦片。',
+                    },
+                    lodQualityScale: {
+                        tooltip: '几何 LOD 精度倍率，默认值和最小值均为 1。值越大，较远处保留的几何细节越多；仅能在地形初始化前设置，不控制 Query 或物理精度。',
+                    },
+                    queryCacheCapacity: {
+                        tooltip: 'CPU 表面查询缓存的瓦片数量上限，默认 64，范围 1～4096；仅能在地形初始化前设置。查询区域及其他查询源占用的瓦片超出容量时返回 OutOfCapacity。独立于几何、VT 和物理缓存。',
+                    },
+                    shadowCastingModeForInspector: {
+                        tooltip: '控制地形及其立体贴花是否投射实时阴影。光源和渲染管线还需开启相应阴影功能。',
+                    },
+                    receiveShadowForInspector: {
+                        tooltip: '控制地形及其立体贴花是否接收实时阴影。',
+                    },
+                    debugData: {
+                        tooltip: '地形调试及渲染开关，包含线框、LOD、虚拟纹理和贴花显示选项。',
+                    },
+                    holeMode: {
+                        tooltip: 'Fast 模式在顶点阶段移除三角形；HighQuality 模式在片元阶段裁剪。两者均跟随源数据 LOD。不支持顶点剔除时使用 HighQuality 模式。',
+                    },
+                    globalColorMap: {
+                        tooltip: '覆盖整个地形的全局调色图，与材质底色相乘；白色保持原色，其他颜色用于压暗或染色。未指定时使用原图层颜色。',
+                    },
+                    globalColorStrength: {
+                        tooltip: '全局调色强度：0 使用原图层颜色，1 将材质底色完全乘以全局图颜色。默认 0.1；未指定全局图时不生效。',
+                    },
+                },
+            },
+            LandscapeDebugData: {
+                properties: {
+                    wireframe: {
+                        tooltip: '以线框显示地形和立体贴花网格，便于检查几何细分。',
+                    },
+                    lodColor: {
+                        tooltip: '按地形几何 LOD 层级着色，便于观察细节层级分布和切换。',
+                    },
+                    showBox: {
+                        tooltip: '绘制主相机当前视野内选中四叉树节点的包围盒。',
+                    },
+                    unlit: {
+                        tooltip: '以无光照方式显示地形及立体贴花材质，便于检查表面颜色。',
+                    },
+                    showVTAtlas: {
+                        tooltip: 'VT 图集预览开关。需由项目调试界面读取此开关，并使用 getVTAtlas() 显示图集。',
+                    },
+                    showRanges: {
+                        tooltip: '显示 LOD 距离范围和 Sector 边界。',
+                    },
+                    freezeLod: {
+                        tooltip: '就绪后冻结主相机 LOD 位置和 VT 数据，各 Pass 仍按当前视锥剔除。',
+                    },
+                    cliffEnabled: {
+                        tooltip: '悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。',
+                    },
+                    heightBlendEnabled: {
+                        tooltip: '开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。',
+                    },
+                    bakeNormalEnabled: {
+                        tooltip: '将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。冻结期间的切换在解冻后生效。',
+                    },
+                    decal3DEnabled: {
+                        tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。',
+                    },
+                },
+            },
             Terrain: {
                 properties: {
                     _asset: {

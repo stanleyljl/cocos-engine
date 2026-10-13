@@ -48,6 +48,12 @@ struct LandscapeRegion {
     float size{0};
 };
 
+// Node bounds in landscape-local height units, indexed by NodeIndexLayout.
+struct HeightRange {
+    float minY{0.0F};
+    float maxY{0.0F};
+};
+
 // Integer node indices across all sectors at a geometry/source LOD.
 struct NodeAddress {
     uint32_t level{0};
@@ -104,7 +110,7 @@ public:
     static constexpr size_t INVALID_INDEX = std::numeric_limits<size_t>::max();
 
     NodeIndexLayout() = default;
-    // Zero sectors or an invalid maxLevel produce an empty layout.
+    // Zero/excess sectors or an invalid maxLevel produce an empty layout.
     explicit NodeIndexLayout(const LandscapeData &data);
 
     size_t nodeCount() const { return static_cast<size_t>(_sectorsX) * _sectorsZ * _nodesPerSector; }

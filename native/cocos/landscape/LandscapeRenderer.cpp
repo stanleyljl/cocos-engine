@@ -993,8 +993,9 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
             return;
         }
     }
-    // Warmup is synchronous. Runtime transactions share page/admission/time
-    // budgets, even across multiple sync calls in the same engine frame.
+    // Warmup and streaming use the same capacity admission and atomic commits.
+    // Warmup loads synchronously until no more changes fit; it need not reach
+    // the requested detail. Runtime work additionally shares per-frame budgets.
     const bool warmingUp = !_ready;
     do {
         if (!warmingUp && !_streamingBudget.nextStep(nowMs())) {
@@ -1007,14 +1008,18 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
         if (_pending || !pages.ready() || !_reserved) {
             if (!_reserved || _preparedPageRevision != pages.revision()) {
                 if (!planResources(true)) {
+                    const bool rejectedChange = _pending;
                     _pendingDraws.clear();
                     _change = {};
                     _pending = _reserved = false;
-                    if (!_ready) {
-                        _loadingFailed = true;
+                    // Capacity refusal cancels the complete candidate, including
+                    // any neighbor splits. Keep the committed cut and retry its
+                    // resources in both warmup and streaming. Do not turn a
+                    // refused detail upgrade into a permanent loading failure.
+                    if (!rejectedChange || !_initialized || !planResources(true)) {
+                        CC_LOG_WARNING("[Landscape] Resource reservation deferred; retaining committed bindings.");
+                        break;
                     }
-                    CC_LOG_ERROR("[Landscape] Resource preparation failed; retaining committed bindings.");
-                    break;
                 }
                 _reserved = true;
                 _preparedPageRevision = pages.revision();

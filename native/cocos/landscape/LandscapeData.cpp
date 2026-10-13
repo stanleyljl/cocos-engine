@@ -59,6 +59,7 @@ NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
 
 bool LandscapeData::valid() const {
     return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
+           static_cast<uint64_t>(sectorsX) * sectorsZ <= config::MAX_SECTOR_COUNT &&
            minTileLevel <= maxLevel && tileResolution > 1U && sectorSize > 0.0F &&
            heightScale > 0.0F;
 }
@@ -98,7 +99,8 @@ NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint
 }
 
 NodeIndexLayout::NodeIndexLayout(const LandscapeData &data) {
-    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS) {
+    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS ||
+        static_cast<uint64_t>(data.sectorsX) * data.sectorsZ > config::MAX_SECTOR_COUNT) {
         return;
     }
     _sectorsX = data.sectorsX;

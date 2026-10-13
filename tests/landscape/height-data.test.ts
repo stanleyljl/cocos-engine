@@ -79,6 +79,16 @@ test('finest tile layout and imported URLs retain content hash and query', async
     expect(() => parseLandscapeHeightLayout({ ...manifest, heightScale: 0 })).toThrow();
 });
 
+test('sector limit applies to the total, including narrow landscapes', () => {
+    const manifest = { maxLevel: 0, minTileLevel: 0, sectorSizeMeters: 128, heightScale: 1, heightBias: 0, files: {} };
+    for (const sectorCount of [[8, 8], [64, 1], [1, 64]]) {
+        expect(() => parseLandscapeHeightLayout({ ...manifest, sectorCount })).not.toThrow();
+    }
+    for (const sectorCount of [[65, 1], [1, 65], [9, 8], [65536, 65536]]) {
+        expect(() => parseLandscapeHeightLayout({ ...manifest, sectorCount })).toThrow('sector count must not exceed 64');
+    }
+});
+
 test('physics hole mask reads bit15 at cell minimum corners from the finest splat', async () => {
     const fixture = png(4, [0xffff, 0x7fff, 0xffff, 0, 0x8000, 0xffff, 0xffff, 0xffff, 0xffff]);
     const layout = { resolution: 3, tilesX: 1, tilesZ: 1, tileSize: 2, heightScale: 1, heightBias: 0,

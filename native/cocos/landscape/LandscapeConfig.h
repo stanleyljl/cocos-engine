@@ -44,6 +44,9 @@ constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
 // L0-L8: maximum sector size = 4096 m at 1 m finest-grid spacing
 // (16 cells per node side * 2^8). Keep the shader/importer limits in sync.
 constexpr uint32_t MAX_LOD_LEVELS = 9;
+// Total sectors (X * Z), not the count along either axis. Keep creation tools,
+// the importer and the TypeScript height-layout validator in sync.
+constexpr uint32_t MAX_SECTOR_COUNT = 64;
 constexpr uint8_t ALL_QUADRANTS = 0x0FU;
 
 // Active height-page cache configuration.
@@ -76,6 +79,11 @@ constexpr uint32_t STREAMING_ADMISSION_BUDGET = 16;
 constexpr double   STREAMING_TIME_BUDGET_MS = 2.0;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
+static_assert(MAX_SECTOR_COUNT <= VT_PAGE_COUNT, "VT must hold every sector root");
+// Root geometry/splat uses one source per sector; baked root normals use at
+// most four. The fixed cliff reference uses at most a quarter of the pool.
+static_assert(MAX_SECTOR_COUNT * 5U + PAGE_POOL_LAYERS / 4U <= PAGE_POOL_LAYERS,
+              "Source pool must hold root coverage and its composition inputs");
 static_assert(VT_PAGE_RES % (1U << (VT_MIP_LEVELS - 1)) == 0 &&
                   VT_PAGE_BORDER % (1U << (VT_MIP_LEVELS - 1)) == 0,
               "Every VT mip requires aligned slots and whole-texel gutters");

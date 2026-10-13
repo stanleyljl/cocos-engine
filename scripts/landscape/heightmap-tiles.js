@@ -5,6 +5,8 @@ const path = require('path');
 const { PNG } = require('pngjs');
 
 const DEFAULT_SECTOR_SIZE = 4096;
+// Total X * Y sectors; must match native LandscapeConfig.h.
+const MAX_SECTOR_COUNT = 64;
 const DEFAULT_TILE_SIZE = 129;
 const DEFAULT_MAX_LEVEL = 5;
 const DEFAULT_MIN_TILE_LEVEL = 0;
@@ -144,6 +146,7 @@ Output:
 Layout options:
   --sectors-x <n>     Sector count on X (default: 1)
   --sectors-y <n>     Sector count on Y (default: 1)
+                      Total sectors (X * Y) must not exceed ${MAX_SECTOR_COUNT}
   --sector-size <m>   Sector size in meters (default: 4096)
   --max-level <n>     Quadtree levels L0..Ln (default: 5)
   --min-tile-level <n> Finest level with a generated tile (default: 0).
@@ -318,6 +321,9 @@ function generate (rawOptions) {
 
     const sectorsX = intOption(options, 'sectorsX', 1);
     const sectorsY = intOption(options, 'sectorsY', 1);
+    if (sectorsX * sectorsY > MAX_SECTOR_COUNT) {
+        fail(`Landscape sector count must not exceed ${MAX_SECTOR_COUNT}`);
+    }
     const sectorSize = intOption(options, 'sectorSize', DEFAULT_SECTOR_SIZE);
     const tileSize = DEFAULT_TILE_SIZE;
     const maxLevel = intOption(options, 'maxLevel', DEFAULT_MAX_LEVEL, 0);

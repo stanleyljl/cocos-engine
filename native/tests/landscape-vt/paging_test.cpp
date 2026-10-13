@@ -42,6 +42,32 @@ LandscapeData cacheData(uint32_t root, uint32_t sectorsX = 1, uint32_t sectorsZ 
     return d;
 }
 
+void testSectorCountLimit() {
+    for (const auto dimensions : {std::pair<uint32_t, uint32_t>{8, 8}, {64, 1}, {1, 64}}) {
+        const auto d = cacheData(4, dimensions.first, dimensions.second);
+        require(d.valid() && NodeIndexLayout(d).nodeCount() > 0, "64 sectors must be accepted on either axis");
+        TilePagePool::Reservations sources;
+        sources.data = d;
+        sources.capacity = config::PAGE_POOL_LAYERS;
+        VirtualTexture pages;
+        require(pages.init(d), "maximum sector count must initialize VT");
+        ccstd::vector<NodeAddress> roots;
+        ccstd::vector<VTPageAddress> rootPages;
+        const VTPageLayout layout(d.sectorSize);
+        for (uint32_t z = 0; z < d.sectorsZ; ++z) {
+            for (uint32_t x = 0; x < d.sectorsX; ++x) {
+                roots.push_back({d.maxLevel, x, z});
+                rootPages.push_back({layout.rootLevel(), x, z});
+            }
+        }
+        require(sources.reserve(roots) && pages.reserve(rootPages), "maximum root coverage must fit both caches");
+    }
+    for (const auto dimensions : {std::pair<uint32_t, uint32_t>{65, 1}, {1, 65}, {9, 8}, {65536, 65536}}) {
+        const auto d = cacheData(4, dimensions.first, dimensions.second);
+        require(!d.valid() && NodeIndexLayout(d).nodeCount() == 0, "excess sector count must be rejected without overflow");
+    }
+}
+
 void testHeightReservations() {
     TilePagePool::Reservations slots;
     slots.data = cacheData(3);
@@ -204,6 +230,135 @@ void checkStitchedEdges(const RenderSelection &selection, const LandscapeData &d
             }
         }
     }
+}
+
+// The same balanced transactions must converge under a synchronous warmup or
+// delayed streaming, even when either cache cannot hold the requested detail.
+void testCapacityLimitedTransitions() {
+    const auto d = cacheData(4, 2, 2);
+    // Four resident roots plus four replacement children need eight slots
+    // during an atomic split, even though the resulting cut has seven leaves.
+    for (const auto capacities : {std::pair<uint32_t, uint32_t>{4, 256}, {256, 4}, {4, 4},
+                                 {7, 256}, {256, 7}, {7, 7}, {8, 8}}) {
+        RenderSelection selection;
+        selection.init(d);
+        TilePagePool::Reservations heights;
+        heights.data = d; heights.capacity = capacities.first;
+        VirtualTexture pages;
+        require(pages.init(d, capacities.second), "root-only VT capacity must initialize");
+        ccstd::vector<NodeAddress> roots;
+        ccstd::vector<VTPageAddress> materials;
+        for (const auto key : selection.leaves()) {
+            const auto n = NodeAddress::fromKey(key);
+            roots.push_back(n); materials.push_back({n.level, n.x, n.z});
+        }
+        require(heights.reserve(roots) && pages.reserve(materials), "exact root capacity must fit");
+        selection.target({QuadNode{0, 15, 15, 0, 1}});
+        bool planned = false;
+        for (const auto &request : selection.requests()) {
+            RenderSelection::Change change;
+            if (!selection.plan(request, change)) continue;
+            planned = true;
+            auto sources = roots;
+            auto pending = materials;
+            for (const auto n : change.added) {
+                sources.push_back(n); pending.push_back({n.level, n.x, n.z});
+            }
+            const bool fits = heights.canReserve(sources) && pages.canReserve(pending);
+            require(fits == (capacities.first == 8 && capacities.second == 8), "atomic split capacity boundary");
+            checkCut(selection, d); checkStitchedEdges(selection, d);
+        }
+        require(planned && selection.leaves().size() == 4, "capacity probe must retain complete roots");
+    }
+    for (const auto capacities : {std::pair<uint32_t, uint32_t>{12, 256}, {256, 12}, {12, 12},
+                                 {19, 256}, {256, 19}, {19, 19}, {20, 256}, {256, 20}, {20, 20}}) {
+        ccstd::unordered_set<uint64_t> warmupCut;
+        for (const bool delayed : {false, true}) {
+            RenderSelection selection;
+            selection.init(d);
+            TilePagePool::Reservations heights;
+            heights.data = d;
+            heights.capacity = capacities.first;
+            VirtualTexture pages;
+            require(pages.init(d, capacities.second), "capacity test VT init");
+            const auto reserve = [&](const RenderSelection::Change &change) {
+                ccstd::vector<NodeAddress> sources;
+                ccstd::vector<VTPageAddress> materials;
+                const auto add = [&](NodeAddress n) {
+                    sources.push_back(n);
+                    materials.push_back({n.level, n.x, n.z});
+                };
+                for (const auto key : selection.leaves()) add(NodeAddress::fromKey(key));
+                for (const auto node : change.added) add(node);
+                if (!heights.canReserve(sources) || !pages.canReserve(materials)) return false;
+                return heights.reserve(sources) && pages.reserve(materials);
+            };
+            const auto complete = [&](uint32_t budget) {
+                for (auto &entry : heights.slots) entry.second.ready = true;
+                for (const auto slot : pages.activeSlots()) {
+                    if (pages.page(slot).state == VirtualTexture::State::DIRTY) pages.setInputs(slot, {});
+                }
+                ccstd::vector<uint32_t> updates;
+                pages.collectUpdates(updates, budget);
+                pages.publish(updates);
+            };
+            require(reserve({}), "minimum root coverage must fit");
+            complete(capacities.second);
+            size_t refused = 0, commits = 0;
+            for (const auto target : {QuadNode{0, 15, 15, 0, 1}, QuadNode{0, 24, 24, 0, 1},
+                                     QuadNode{0, 0, 0, 0, 1}, QuadNode{0, 31, 0, 0, 1},
+                                     QuadNode{0, 0, 31, 0, 1}, QuadNode{0, 31, 31, 0, 1},
+                                     QuadNode{0, 16, 16, 0, 1}, QuadNode{0, 15, 15, 0, 1}}) {
+                selection.target({target});
+                bool settled = false;
+                for (uint32_t step = 0; step < 256; ++step) {
+                    bool changed = false;
+                    for (const auto &request : selection.requests()) {
+                        RenderSelection::Change change;
+                        if (!selection.plan(request, change)) continue;
+                        const auto before = selection.leaves();
+                        if (!reserve(change)) {
+                            ++refused;
+                            require(selection.leaves() == before, "capacity refusal partially split neighbors");
+                            checkCut(selection, d);
+                            checkStitchedEdges(selection, d);
+                            continue;
+                        }
+                        do {
+                            complete(delayed ? 1U : capacities.second);
+                            require(selection.leaves() == before, "incomplete pages changed committed coverage");
+                        } while (!pages.ready());
+                        selection.commit(change);
+                        require(reserve({}), "committed cut exceeds capacity");
+                        checkCut(selection, d);
+                        checkStitchedEdges(selection, d);
+                        ++commits;
+                        changed = true;
+                        break;
+                    }
+                    if (!changed) {
+                        settled = true;
+                        break;
+                    }
+                }
+                require(settled && pages.ready(), "capacity-limited cut must settle with complete material coverage");
+                // Corner targets can reach full detail with fewer balancing
+                // neighbors. Capacity refusal is checked across the route below.
+                if (target.ix == 15 && target.iz == 15) {
+                    require(selection.at(target.ix, target.iz).level > target.level, "central target must exceed cache capacity");
+                }
+                for (const auto key : selection.leaves()) {
+                    const auto n = NodeAddress::fromKey(key);
+                    require(heights.resident(n) >= 0 && pages.resolve({n.level, n.x, n.z}) >= 0,
+                            "capacity-limited coverage lost a published resource");
+                }
+            }
+            require(refused > 0 && commits > 1, "capacity test must exercise refusal and recovery");
+            if (!delayed) warmupCut = selection.leaves();
+            else require(selection.leaves() == warmupCut, "warmup and streaming produced different balanced cuts");
+        }
+    }
+    std::cout << "PASS: source/VT/both capacity limits, warmup/streaming parity, balanced coarse coverage and movement\n";
 }
 
 void testLocalTransitions() {
@@ -659,8 +814,10 @@ void testFrameStreamingBudget() {
 }
 
 int main() {
+    testSectorCountLimit();
     testHeightReservations();
     testExactPageLifecycle();
+    testCapacityLimitedTransitions();
     testLocalTransitions();
     testIndexedDemand();
     testCommittedVisibility();

@@ -6,11 +6,15 @@
 
 # Collaboration rules
 
+- Run performance tests, profiling, and benchmarks only with Release builds. Do not use Debug builds for performance measurements or optimization conclusions; Debug builds may still be used for functional debugging and compilation checks.
+- Engine code maintainability is a hard requirement for every change, including performance optimizations. Follow established engine flows and keep module responsibilities clear. Avoid one-off special cases, cross-module interfaces, or extra state for local optimizations unless their necessity is demonstrated and the maintenance cost is justified. When a fix requires substantial complexity, explain the evidence and tradeoffs before implementing it.
 - Only modify code and ensure it compiles.
 - Do not automatically commit or push code unless the user explicitly requests it.
 - Prefer SSH when connecting to remote Git repositories. For HTTPS-configured remotes, use a per-command SSH URL rewrite without changing the remote configuration.
 - When adding native `.cpp` or `.h` files, register them in the owning CMake target/source list and regenerate the Visual Studio project so they appear in the project and filters. Do not rely only on an include directive or edit generated project files as the lasting fix.
 - Keep small, closely related helpers in existing files when practical instead of introducing a separate file.
+- Always put each statement on its own line. Never combine multiple statements on one line, including in short functions, branches, or lambdas.
+- Declare each class or struct data member separately on its own line. Never combine multiple members in one declaration, including members of nested or implementation-local structs.
 - Whenever code changes, review the related comments and update or remove any outdated comments in the same change so they accurately describe the current implementation.
 - Landscape code assumes floating-point inputs and calculations are finite; do not add `isfinite` / `isFinite` guards. Retain the relevant type, range, and index checks.
 - During development, do not preserve compatibility with old data. Update affected code and data together, removing obsolete fields, migration paths, and compatibility fallbacks within the scope of the change. Only introduce backward compatibility when the user explicitly requests it.
@@ -27,8 +31,9 @@
 - After changing engine TypeScript code, explicitly remind the user to restart the editor.
 - After changing Effects or project TypeScript code, explicitly remind the user to rebuild the project.
 - After changing C++ code, explicitly remind the user to recompile the native code.
-- After changing editor extension or importer code, explicitly remind the user to restart the editor and reimport affected assets when necessary. The editor may retain the old importer in memory until restarted.
-- When multiple change types are involved, list all required steps in execution order: restart the editor, reimport affected assets when necessary, rebuild the project, then recompile native code.
+- After changing editor extension or importer code, explicitly remind the user to restart the editor. The editor may retain the old importer in memory until restarted.
+- Do not remind the user to manually reimport Landscape resources. The editor automatically reimports them when resources are updated.
+- When multiple change types are involved, list all required steps in execution order: restart the editor, rebuild the project, then recompile native code.
 - Include the applicable reminders in the final response, stating which steps have already been completed and which remain for the user.
 
 # Progress communication

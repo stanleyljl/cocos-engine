@@ -34,6 +34,7 @@ using namespace cc;
 %ignore cc::landscape::LandscapeAsset::decals;
 %ignore cc::landscape::LandscapeAsset::decalResolution;
 %ignore cc::landscape::LandscapeAsset::data;
+%ignore cc::landscape::LandscapeAsset::heightRanges;
 %ignore cc::landscape::LandscapeAsset::dataDir;
 %ignore cc::landscape::LandscapeAsset::valid;
 %ignore cc::landscape::LandscapeAsset::getHeightRange;

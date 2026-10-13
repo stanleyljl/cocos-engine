@@ -61,32 +61,17 @@ Quadtree::Quadtree() {
 Quadtree::~Quadtree() = default;
 
 bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
-    if (!asset.valid()) {
+    if (!asset.valid() || lodQualityScale <= 0.0F) {
         return false;
     }
     _data = asset.data();
-    if (lodQualityScale <= 0.0F) {
-        return false;
-    }
     _selected.clear();
     _nodeIndexLayout = NodeIndexLayout(_data);
-
-    _heightRanges.assign(_nodeIndexLayout.nodeCount(),
-                         HeightRange{_data.minHeight(), _data.maxHeight()});
-    for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
-        const uint32_t side = _data.nodesPerSectorSide(level);
-        for (uint32_t globalZ = 0; globalZ < _data.sectorsZ * side; ++globalZ) {
-            for (uint32_t globalX = 0; globalX < _data.sectorsX * side; ++globalX) {
-                float minY = _data.minHeight();
-                float maxY = _data.maxHeight();
-                if (!asset.getHeightRange(level, globalX, globalZ, minY, maxY)) {
-                    return false;
-                }
-                const size_t index = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
-                _heightRanges[index] = HeightRange{minY, maxY};
-            }
-        }
+    const auto &heightRanges = asset.heightRanges();
+    if (heightRanges.size() != _nodeIndexLayout.nodeCount()) {
+        return false;
     }
+    _heightRanges = heightRanges;
     computeRanges(lodQualityScale);
     return true;
 }

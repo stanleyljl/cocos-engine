@@ -119,6 +119,7 @@ public:
     float decalFarDistance() const { return _decalFarDistance; }
     uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
+    const ccstd::vector<HeightRange> &heightRanges() const { return _heightRanges; }
     const ccstd::string &dataDir() const { return _dataDir; }
     bool valid() const { return _data.valid(); }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
@@ -132,11 +133,6 @@ private:
         std::deque<TileData> ready;
         std::atomic<bool> loadFailed{false};
         std::atomic<bool> cancelled{false};
-    };
-
-    struct HeightRange {
-        float minY{0.0F};
-        float maxY{0.0F};
     };
 
     void resetAsyncState();

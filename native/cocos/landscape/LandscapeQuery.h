@@ -17,7 +17,8 @@ enum class LandscapeQueryStatus : uint32_t {
     HIT,
     MISS,
     NOT_READY,
-    ERROR
+    ERROR,
+    OUT_OF_CAPACITY // Requested region and other sources' pinned tiles exceed the cache budget.
 };
 
 struct LandscapeSurfaceResult {
@@ -35,9 +36,9 @@ struct LandscapeQueryTile {
     ccstd::vector<uint8_t> splat;
 };
 
-// Main-thread cache; only completion delivery may run on a worker. It never
-// reads render residency, camera LOD, or GPU resources. Source rectangles pin
-// their union; unreferenced tiles are LRU eviction candidates.
+// Sources pin rectangular regions of CPU tiles, independently of rendering.
+// Only unpinned tiles can be evicted. All cache/source changes happen on the
+// main thread; workers only deliver results through the lifetime-safe queue.
 class LandscapeQuery final {
 public:
     using Completion = std::function<void(LandscapeQueryTile, bool)>;
@@ -52,46 +53,82 @@ public:
     LandscapeSurfaceResult sample(LandscapePoint local);
 
 private:
-    enum class State { WAITING, LOADING, READY, FAILED };
-    struct Entry {
-        LandscapeQueryTile tile;
-        State state{State::WAITING};
-        uint32_t references{0};
-        uint64_t lastUse{0};
-        uint64_t ticket{0};
+    // Inclusive tile indices at minTileLevel. A source needs no allocated key
+    // list: region equality, membership and tile count use these four bounds.
+    struct TileRegion {
+        uint32_t minX{0};
+        uint32_t minZ{0};
+        uint32_t maxX{0};
+        uint32_t maxZ{0};
+        uint64_t tileCount() const;
+        bool contains(NodeAddress tile) const;
+        bool operator==(const TileRegion &other) const;
+        template <class Visitor>
+        void forEachTile(uint32_t level, Visitor visit) const {
+            for (uint32_t z = minZ; z <= maxZ; ++z) {
+                for (uint32_t x = minX; x <= maxX; ++x) {
+                    visit(makeNodeKey(level, x, z));
+                }
+            }
+        }
     };
-    struct Finished {
+    enum class TileState {
+        WAITING,
+        LOADING,
+        READY,
+        FAILED
+    };
+    struct CachedTile {
+        LandscapeQueryTile data;
+        TileState state{TileState::WAITING};
+        uint32_t pinCount{0};
+        uint64_t lastUse{0};
+        uint64_t loadId{0}; // Distinguishes an evicted/re-requested tile's loads.
+    };
+    struct CompletedLoad {
         uint64_t key;
-        uint64_t ticket;
-        LandscapeQueryTile tile;
+        uint64_t loadId;
+        LandscapeQueryTile data;
         bool success;
     };
-    struct Deliveries {
+    struct CompletionQueue {
         std::mutex mutex;
-        ccstd::vector<Finished> finished;
+        ccstd::vector<CompletedLoad> results;
     };
+
     struct SampleLocation {
         std::array<size_t, 4> texels;
         float fx{0};
         float fz{0};
     };
-    LandscapeQueryStatus collectSourceKeys(LandscapePoint center, float radius, ccstd::vector<uint64_t> &keys) const;
-    bool sourceFits(const ccstd::vector<uint64_t> &keys, const ccstd::vector<uint64_t> *previous) const;
-    void pinSourceTiles(const ccstd::vector<uint64_t> &keys);
+
+    // Region admission and cache ownership. Admission is checked before pins
+    // change, so a request can never evict another source's resident tiles.
+    LandscapeQueryStatus resolveRegion(LandscapePoint center, float radius, TileRegion &region) const;
+    bool canAdmit(const TileRegion &region, const TileRegion *previous) const;
+    void pinRegion(const TileRegion &region);
+    void evictUnusedTile(const TileRegion &protectedRegion);
+
+    // One update publishes completed loads, then fills the available IO slots.
+    void acceptCompletedLoads();
+    void startPendingLoads();
+
+    // Sampling only reads resident bytes; it never submits loading work.
     SampleLocation locateSample(LandscapePoint local, NodeAddress tile) const;
-    bool interpolateHeightNormal(const Entry &entry, const SampleLocation &location,
-                                 LandscapePoint local, LandscapeSurfaceResult &result) const;
-    void interpolateSurface(const Entry &entry, const SampleLocation &location, LandscapeSurfaceResult &result) const;
+    bool sampleGeometry(const LandscapeQueryTile &tile, const SampleLocation &location,
+                        LandscapePoint local, LandscapeSurfaceResult &result) const;
+    static void sampleMaterial(const LandscapeQueryTile &tile, const SampleLocation &location, LandscapeSurfaceResult &result);
+
     LandscapeData _data;
     Loader _loader;
     uint32_t _capacity;
     float _tileSize;
     uint64_t _clock{0};
-    uint64_t _nextTicket{0};
+    uint64_t _nextLoadId{0};
     uint32_t _inFlight{0};
-    ccstd::unordered_map<uint64_t, Entry> _entries;
-    ccstd::unordered_map<uint32_t, ccstd::vector<uint64_t>> _sources;
-    std::shared_ptr<Deliveries> _deliveries;
+    ccstd::unordered_map<uint32_t, TileRegion> _sources;
+    ccstd::unordered_map<uint64_t, CachedTile> _cache;
+    std::shared_ptr<CompletionQueue> _completions;
 };
 
 } // namespace landscape

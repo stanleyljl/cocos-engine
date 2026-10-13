@@ -38,7 +38,26 @@ describe('Landscape CPU surface query API', () => {
         expect(native.removeQuerySource).toHaveBeenCalledWith(id);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.Miss);
         expect(terrain.setQuerySourceRadius(id, 8)).toBe(false);
-        terrain.onDestroy(); node.destroy();
+        terrain.onDestroy();
+        node.destroy();
+    });
+
+    test('capacity rejection is distinct from loading and the same source can recover', () => {
+        const { terrain, node, native } = fixture();
+        const id = terrain.addQuerySource(node, 64);
+        native.setQuerySource.mockReturnValue(Status.OutOfCapacity);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.OutOfCapacity);
+        expect(terrain.isQuerySourceReady(id)).toBe(false);
+        expect(terrain.setQuerySourceRadius(id, 16)).toBe(true);
+        native.setQuerySource.mockReturnValue(Status.NotReady);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
+        expect(native.setQuerySource).toHaveBeenLastCalledWith(id, 0, 0, 16);
+        expect(terrain.isQuerySourceReady(id)).toBe(false);
+        native.setQuerySource.mockReturnValue(Status.Hit);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.Hit);
+        expect(terrain.isQuerySourceReady(id)).toBe(true);
+        terrain.onDestroy();
+        node.destroy();
     });
 
     test('inactive and destroyed sources stop protecting the CPU cache', () => {
@@ -75,7 +94,8 @@ describe('Landscape CPU surface query API', () => {
         expect(output.height).toBe(12);
         expect(output.surfaceType).toBe(7);
         expect(native.sampleSurface).toHaveBeenCalledTimes(2);
-        terrain.onDestroy(); node.destroy();
+        terrain.onDestroy();
+        node.destroy();
     });
 
     test('invalid budgets and radii are rejected and disabled/native-free query is nonblocking', () => {

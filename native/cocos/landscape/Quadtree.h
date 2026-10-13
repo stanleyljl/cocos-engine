@@ -60,7 +60,7 @@ public:
     Quadtree();
     ~Quadtree();
 
-    // Copies the metadata needed for selection; does not load or retain the asset.
+    // Copies the already decoded height ranges; does not load or retain the asset.
     bool init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
 
     // Inputs are world space; output QuadNodes always use global node coordinates.
@@ -80,11 +80,6 @@ private:
         CULLED,       // Outside the frustum; the parent must not fill this area.
         OUT_OF_RANGE, // The parent must draw this quadrant instead.
         SELECTED,     // Covered by this node or its descendants.
-    };
-
-    struct HeightRange {
-        float minY{0.0F};
-        float maxY{0.0F};
     };
 
     void computeRanges(float lodQualityScale);
@@ -114,7 +109,8 @@ private:
 class RenderSelection {
 public:
     struct Change {
-        ccstd::vector<NodeAddress> removed, added;
+        ccstd::vector<NodeAddress> removed;
+        ccstd::vector<NodeAddress> added;
         bool empty() const { return removed.empty() && added.empty(); }
     };
     struct Request {

@@ -2,8 +2,39 @@ import { CCClass } from '../../cocos/core';
 import { Landscape, LandscapeDebugData, LandscapeHoleMode } from '../../cocos/landscape';
 import { deserialize } from '../../cocos/serialization/deserialize';
 import { Texture2D } from '../../cocos/asset/assets';
+import { Component } from '../../cocos/scene-graph/component';
 
 describe('Landscape debug data', () => {
+    test.each(['en', 'zh'])('all visible Landscape properties have matching Inspector tooltips in %s', (language) => {
+        const catalog = { ENGINE: require(`../../editor/i18n/${language}/localization.js`) };
+        const inherited = new Set((Component as unknown as { __props__: string[] }).__props__);
+        const groups = [
+            { type: Landscape, name: 'Landscape', count: 9 },
+            { type: LandscapeDebugData, name: 'LandscapeDebugData', count: 11 },
+        ];
+        for (const { type, name, count } of groups) {
+            const attributes = CCClass.Attr.getClassAttrs(type);
+            const properties = (type as unknown as { __props__: string[] }).__props__.filter(property => (
+                !inherited.has(property) && attributes[`${property}$_$visible`] !== false
+            ));
+            expect(properties).toHaveLength(count);
+            for (const property of properties) {
+                const tooltip = attributes[`${property}$_$tooltip`] as string;
+                expect(tooltip).toBe(`i18n:ENGINE.classes.cc.${name}.properties.${property}.tooltip`);
+                const text = tooltip.slice('i18n:'.length).split('.').reduce((value, key) => value?.[key], catalog);
+                expect(typeof text).toBe('string');
+                expect(text).not.toBe('');
+                expect(text).not.toMatch(/^(i18n:|ENGINE\.)/);
+                const displayName = attributes[`${property}$_$displayName`] as string | undefined;
+                if (displayName?.startsWith('i18n:')) {
+                    const label = displayName.slice('i18n:'.length).split('.').reduce((value, key) => value?.[key], catalog);
+                    expect(typeof label).toBe('string');
+                    expect(label).not.toBe('');
+                }
+            }
+        }
+    });
+
     test('hole mode defaults to Fast, serializes and immediately updates native', () => {
         const terrain = new Landscape();
         expect(terrain.holeMode).toBe(LandscapeHoleMode.Fast);
@@ -50,13 +81,14 @@ describe('Landscape debug data', () => {
         }
     });
 
-    test('nested edits synchronize once before update, including during warmup and re-enable', () => {
+    test('nested edits synchronize only on changes, including during warmup and re-enable', () => {
         const terrain = new Landscape();
         const submitted: LandscapeDebugData[] = [];
+        terrain.queryCacheCapacity = 16;
         const native = {
             setDebugData: jest.fn(data => submitted.push({ ...data })),
             setAssetPath: jest.fn(), setGlobalColorStrength: jest.fn(), setGlobalColorMap: jest.fn(),
-            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setQueryCacheCapacity: jest.fn(), setHoleMode: jest.fn(),
+            setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setHoleMode: jest.fn(),
             onEnable: jest.fn(), onDisable: jest.fn(),
             isInitialized: jest.fn(() => true), update: jest.fn(),
             drawDebugBounds: jest.fn(),
@@ -66,34 +98,70 @@ describe('Landscape debug data', () => {
         terrain.debugData.freezeLod = true;
         terrain.debugData.heightBlendEnabled = false;
         terrain.onEnable();
+        expect(native.onEnable).toHaveBeenLastCalledWith(terrain.node, terrain.lodQualityScale, 16);
         expect(native.setGlobalColorMap).toHaveBeenLastCalledWith(null);
         expect(submitted).toHaveLength(1);
         expect(submitted[0].freezeLod).toBe(true);
         expect(submitted[0].heightBlendEnabled).toBe(false);
-        internal._beforeDraw();
-        internal._beforeDraw();
+        terrain.update();
+        terrain.update();
         expect(submitted).toHaveLength(1);
 
+        native.isInitialized.mockReturnValue(false);
+        native.update.mockClear();
         terrain.debugData.bakeNormalEnabled = false;
         terrain.debugData.showBox = true;
         terrain.debugData.showRanges = true;
-        internal._beforeDraw();
+        terrain.update();
         expect(submitted).toHaveLength(2);
         expect(submitted[1].bakeNormalEnabled).toBe(false);
         expect(submitted[1].showRanges).toBe(true);
-        expect(native.drawDebugBounds).toHaveBeenCalledTimes(1);
+        expect(native.update).not.toHaveBeenCalled();
 
+        native.isInitialized.mockReturnValue(true);
         terrain.debugData.wireframe = true;
         terrain.debugData.showRanges = false;
-        internal._beforeDraw();
+        terrain.update();
+        expect(submitted).toHaveLength(3);
         expect(submitted[2].wireframe).toBe(true);
         expect(submitted[2].showRanges).toBe(false);
-        expect(submitted).toHaveLength(3);
+        expect(native.drawDebugBounds).not.toHaveBeenCalled();
+        internal._beforeDraw();
+        expect(native.drawDebugBounds).toHaveBeenCalledTimes(1);
+        expect(native.setDebugData.mock.invocationCallOrder[2]).toBeLessThan(native.update.mock.invocationCallOrder[0]);
         terrain.onDisable();
         terrain.onEnable();
+        expect(native.onEnable).toHaveBeenLastCalledWith(terrain.node, terrain.lodQualityScale, 16);
         expect(submitted).toHaveLength(4);
         expect(submitted[3]).toEqual(submitted[2]);
         terrain.onDisable();
+    });
+
+    test('every debug switch detects both transitions and equal replacements do not resubmit', () => {
+        const terrain = new Landscape();
+        const native = { setDebugData: jest.fn(), isInitialized: jest.fn(() => false) };
+        const internal = terrain as unknown as { _native: typeof native; _beforeDraw(): void };
+        internal._native = native;
+        terrain.update();
+        for (const key of Object.keys(terrain.debugData) as (keyof LandscapeDebugData)[]) {
+            for (let transition = 0; transition < 2; ++transition) {
+                native.setDebugData.mockClear();
+                terrain.debugData[key] = !terrain.debugData[key];
+                terrain.update();
+                expect(native.setDebugData).toHaveBeenCalledTimes(1);
+                terrain.update();
+                expect(native.setDebugData).toHaveBeenCalledTimes(1);
+            }
+        }
+        native.setDebugData.mockClear();
+        terrain.debugData = new LandscapeDebugData();
+        expect(native.setDebugData).not.toHaveBeenCalled();
+        const replacement = new LandscapeDebugData();
+        replacement.wireframe = true;
+        terrain.debugData = replacement;
+        expect(native.setDebugData).toHaveBeenCalledTimes(1);
+        terrain.update();
+        expect(native.setDebugData).toHaveBeenCalledTimes(1);
     });
 
     test('optional global color map can be assigned and cleared; strength stays bounded', () => {

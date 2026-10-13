@@ -28,7 +28,7 @@ import { Component } from '../scene-graph/component';
 import { Asset, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
-import { Enum, isValid, Vec3 } from '../core';
+import { Enum, isValid, System, SystemPriority, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
 import { LandscapePhysics } from './landscape-physics';
 
@@ -45,6 +45,7 @@ export enum LandscapeQueryStatus {
     Miss = 1,
     NotReady = 2,
     Error = 3,
+    OutOfCapacity = 4,
 }
 
 /** Reusable world-space result. Surface type is the dominant painted material ID.
@@ -108,79 +109,70 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(0)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.wireframe.tooltip')
     public wireframe = false;
 
     @serializable
     @editable
     @displayOrder(1)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.lodColor.tooltip')
     public lodColor = false;
 
     @serializable
     @editable
     @displayOrder(2)
-    @tooltip('显示 LOD 距离范围和 Sector 边界。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showRanges.tooltip')
     public showRanges = false;
 
     @serializable
     @editable
     @displayOrder(3)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showBox.tooltip')
     public showBox = false;
 
     @serializable
     @editable
     @displayOrder(4)
-    @tooltip('就绪后冻结主相机 LOD 位置和 VT 数据，各 Pass 仍按当前视锥剔除。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.freezeLod.tooltip')
     public freezeLod = false;
 
     @serializable
     @editable
     @displayOrder(5)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.unlit.tooltip')
     public unlit = false;
 
     @serializable
     @editable
     @displayOrder(6)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showVTAtlas.tooltip')
     public showVTAtlas = false;
 
     @serializable
     @editable
     @displayOrder(7)
-    @tooltip('悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.cliffEnabled.tooltip')
     public cliffEnabled = true;
 
     @serializable
     @editable
     @displayOrder(8)
-    @tooltip('开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.heightBlendEnabled.tooltip')
     public heightBlendEnabled = true;
 
     @serializable
     @editable
     @displayOrder(9)
-    @tooltip('将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。冻结期间的切换在解冻后生效。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.bakeNormalEnabled.tooltip')
     public bakeNormalEnabled = true;
 
     @serializable
     @editable
     @displayOrder(10)
-    @tooltip('显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。')
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.decal3DEnabled.tooltip')
     public decal3DEnabled = true;
 
 }
-
-const DEBUG_PROPERTIES = [
-    'wireframe',
-    'lodColor',
-    'showRanges',
-    'showBox',
-    'freezeLod',
-    'unlit',
-    'showVTAtlas',
-    'cliffEnabled',
-    'heightBlendEnabled',
-    'bakeNormalEnabled',
-    'decal3DEnabled',
-] as const;
 
 /**
  * @en Terrain component backed by a native `cc::landscape::Landscape` object.
@@ -197,10 +189,10 @@ export class Landscape extends Component {
 
     @type(LandscapeHoleMode)
     @displayName('Hole Mode')
-    @tooltip('Fast removes triangles at vertices; HighQuality clips fragments. Both follow source LOD. Unsupported vertex culling uses HighQuality.')
+    @tooltip('i18n:classes.cc.Landscape.properties.holeMode.tooltip')
     get holeMode (): LandscapeHoleMode { return this._holeMode; }
     set holeMode (value: LandscapeHoleMode) {
-        this._holeMode = value === LandscapeHoleMode.Fast ? LandscapeHoleMode.Fast : LandscapeHoleMode.HighQuality;
+        this._holeMode = value;
         this._native?.setHoleMode(this._holeMode);
     }
 
@@ -228,6 +220,7 @@ export class Landscape extends Component {
 
     @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName', style: 'section' })
     @displayName('i18n:ENGINE.classes.cc.MeshRenderer.properties.shadowCastingModeForInspector.displayName')
+    @tooltip('i18n:classes.cc.Landscape.properties.shadowCastingModeForInspector.tooltip')
     @disallowAnimation
     get shadowCastingModeForInspector (): boolean {
         return this._shadowCastingMode === ShadowCastingMode.ON;
@@ -251,6 +244,7 @@ export class Landscape extends Component {
 
     @group({ id: 'DynamicShadow', name: 'i18n:ENGINE.classes.cc.MeshRenderer.groups.DynamicShadow.displayName' })
     @displayName('i18n:ENGINE.classes.cc.MeshRenderer.properties.receiveShadowForInspector.displayName')
+    @tooltip('i18n:classes.cc.Landscape.properties.receiveShadowForInspector.tooltip')
     @disallowAnimation
     get receiveShadowForInspector (): boolean {
         return this._shadowReceivingMode === ShadowReceivingMode.ON;
@@ -285,6 +279,7 @@ export class Landscape extends Component {
      */
     @editable
     @range([1, 4096, 1])
+    @tooltip('i18n:classes.cc.Landscape.properties.queryCacheCapacity.tooltip')
     get queryCacheCapacity (): number { return this._queryCacheCapacity; }
     set queryCacheCapacity (value: number) {
         if (!Number.isInteger(value) || value < 1 || value > 4096) {
@@ -299,7 +294,7 @@ export class Landscape extends Component {
     /** Register a node to preload/pin a square XZ region around its world position.
      * Follows the node automatically. Inactive nodes stop pinning; destroyed
      * nodes are removed automatically. Multiple sources share overlapping tiles.
-     * Over-budget regions remain NotReady instead of evicting another source.
+     * Over-budget regions report OutOfCapacity instead of evicting another source.
      * Native platforms only; independent of camera LOD and VT readiness.
      */
     public addQuerySource (node: Node, preloadRadius = 64): number {
@@ -330,6 +325,8 @@ export class Landscape extends Component {
 
     /** Hit means the entire requested region is ready; Error means invalid
      * input/placement or a failed source decode. Miss means no terrain overlap.
+     * OutOfCapacity means the region cannot fit alongside other sources' pinned tiles.
+     * Sources retry automatically as they move, shrink, or other sources release tiles.
      */
     public getQuerySourceStatus (id: number): LandscapeQueryStatus {
         const source = this._querySources.get(id);
@@ -405,12 +402,14 @@ export class Landscape extends Component {
     @type(LandscapeDebugData)
     private _debugData = new LandscapeDebugData();
 
-    private _appliedDebugData: LandscapeDebugData | null = null;
+    // One bit per debug switch; -1 forces the initial native submission.
+    private _appliedDebugFlags = -1;
 
-    /** Settings are synchronized before drawing; nested Inspector edits work too. */
+    /** Settings are synchronized during tick; nested Inspector edits work too. */
     @editable
     @type(LandscapeDebugData)
     @displayOrder(1000)
+    @tooltip('i18n:classes.cc.Landscape.properties.debugData.tooltip')
     get debugData (): LandscapeDebugData {
         return this._debugData;
     }
@@ -423,6 +422,7 @@ export class Landscape extends Component {
     @editable
     @type(LandscapeAsset)
     @displayOrder(0)
+    @tooltip('i18n:classes.cc.Landscape.properties.landscapeAsset.tooltip')
     get landscapeAsset (): LandscapeAsset | null {
         return this._landscapeAsset;
     }
@@ -447,6 +447,7 @@ export class Landscape extends Component {
     @editable
     @displayOrder(9)
     @rangeMin(1.0)
+    @tooltip('i18n:classes.cc.Landscape.properties.lodQualityScale.tooltip')
     get lodQualityScale (): number {
         return this._lodQualityScale;
     }
@@ -464,7 +465,7 @@ export class Landscape extends Component {
     @editable
     @type(Texture2D)
     @displayOrder(1)
-    @tooltip('覆盖整个地形的全局调色图，与材质底色相乘；白色保持原色，其他颜色用于压暗或染色。未指定时使用原图层颜色。')
+    @tooltip('i18n:classes.cc.Landscape.properties.globalColorMap.tooltip')
     get globalColorMap (): Texture2D | null {
         return this._globalColorMap;
     }
@@ -483,7 +484,7 @@ export class Landscape extends Component {
     @displayOrder(10)
     @range([0, 1, 0.01])
     @slide
-    @tooltip('全局调色强度：0 使用原图层颜色，1 将材质底色完全乘以全局图颜色。默认 0.1；未指定全局图时不生效。')
+    @tooltip('i18n:classes.cc.Landscape.properties.globalColorStrength.tooltip')
     get globalColorStrength (): number {
         return this._globalColorStrength;
     }
@@ -498,29 +499,27 @@ export class Landscape extends Component {
         }
     }
 
-    private _syncDebugData (force = false): void {
+    private _syncDebugData (): void {
         if (!this._native) {
             return;
         }
-        const previous = this._appliedDebugData;
-        let changed = force || !previous;
-        if (previous && !changed) {
-            for (const key of DEBUG_PROPERTIES) {
-                if (previous[key] !== this._debugData[key]) {
-                    changed = true;
-                    break;
-                }
-            }
-        }
-        if (!changed) {
+        const data = this._debugData;
+        const flags = (Number(data.wireframe) << 0)
+            | (Number(data.lodColor) << 1)
+            | (Number(data.showRanges) << 2)
+            | (Number(data.showBox) << 3)
+            | (Number(data.freezeLod) << 4)
+            | (Number(data.unlit) << 5)
+            | (Number(data.showVTAtlas) << 6)
+            | (Number(data.cliffEnabled) << 7)
+            | (Number(data.heightBlendEnabled) << 8)
+            | (Number(data.bakeNormalEnabled) << 9)
+            | (Number(data.decal3DEnabled) << 10);
+        if (flags === this._appliedDebugFlags) {
             return;
         }
-        this._native.setDebugData(this._debugData);
-        const snapshot = previous || new LandscapeDebugData();
-        for (const key of DEBUG_PROPERTIES) {
-            snapshot[key] = this._debugData[key];
-        }
-        this._appliedDebugData = snapshot;
+        this._native.setDebugData(data);
+        this._appliedDebugFlags = flags;
     }
 
     public onLoad (): void {
@@ -533,33 +532,36 @@ export class Landscape extends Component {
         this._physics?._setEnabled(true);
         if (this._native) {
             this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
-            this._native.setQueryCacheCapacity(this._queryCacheCapacity);
             this._native.setHoleMode(this._holeMode);
-            this._syncDebugData(true);
+            this._appliedDebugFlags = -1;
+            this._syncDebugData();
             this._native.setGlobalColorMap(this._globalColorMap);
             this._native.setGlobalColorStrength(this._globalColorStrength);
             this._native.setCastShadow(this._shadowCastingMode === ShadowCastingMode.ON);
             this._native.setReceiveShadow(this._shadowReceivingMode === ShadowReceivingMode.ON);
-            this._native.onEnable(this.node, this._lodQualityScale);
-            // Wait for camera controllers in update/lateUpdate and systems to finish.
+            this._native.onEnable(this.node, this._lodQualityScale, this._queryCacheCapacity);
+            LandscapeSystem.getInstance().add(this);
+            // Debug geometry is submitted for every draw, including while paused.
             director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         }
     }
 
     public onDisable (): void {
         this._physics?._setEnabled(false);
-        this._appliedDebugData = null;
+        LandscapeSystem.getInstance().remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         if (this._native) {
             this._native.onDisable();
         }
     }
 
-    /**
-     * @en Drives the native per-frame quadtree traversal (LOD selection + frustum culling).
-     * @zh 每帧驱动原生四叉树遍历（LOD 选级 + 视锥剔除）。
-     */
-    private _beforeDraw (): void {
+    /** @engineInternal LandscapeSystem owns update scheduling after physics. */
+    public override get internalUpdate (): undefined {
+        return undefined;
+    }
+
+    /** Updates query streaming and the LOD view after physics and camera controllers. */
+    public update (): void {
         if (!this._native) {
             return;
         }
@@ -573,14 +575,19 @@ export class Landscape extends Component {
         // Snapshot the main-camera LOD position. Native pass collection traverses
         // each current frustum independently, including while LOD/VT is frozen.
         this._native.update();
+    }
+
+    private _beforeDraw (): void {
         // Immediate-mode debug boxes must be re-submitted every frame, even while
         // LOD is frozen.
         if (this._debugData.showBox) {
-            this._native.drawDebugBounds();
+            this._native?.drawDebugBounds();
         }
     }
 
     public onDestroy (): void {
+        LandscapeSystem.getInstance().remove(this);
+        director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         this._physics?._destroy();
         if (this._native) {
             this._native.onDisable();
@@ -596,5 +603,36 @@ export class Landscape extends Component {
      */
     public getVTAtlas (): any {
         return this._native ? this._native.getVTAtlas() : null;
+    }
+}
+
+/** Updates enabled landscapes after the built-in physics systems and their camera callbacks. */
+class LandscapeSystem extends System {
+    private static _instance: LandscapeSystem;
+
+    public static getInstance (): LandscapeSystem {
+        if (!LandscapeSystem._instance) {
+            const system = new LandscapeSystem();
+            LandscapeSystem._instance = system;
+            // Larger priorities run first; both built-in physics systems use LOW (0).
+            director.registerSystem('LANDSCAPE', system, SystemPriority.LOW - 1);
+        }
+        return LandscapeSystem._instance;
+    }
+
+    private readonly _landscapes = new Set<Landscape>();
+
+    public add (landscape: Landscape): void {
+        this._landscapes.add(landscape);
+    }
+
+    public remove (landscape: Landscape): void {
+        this._landscapes.delete(landscape);
+    }
+
+    public postUpdate (_dt: number): void {
+        for (const landscape of this._landscapes) {
+            landscape.update();
+        }
     }
 }

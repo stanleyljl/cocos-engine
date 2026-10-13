@@ -129,9 +129,13 @@ private:
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     gfx::Device *_device{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
-    IntrusivePtr<gfx::Texture> _heightArray, _splatArray, _normalArray;
-    gfx::Sampler *_heightSampler{nullptr}, *_splatSampler{nullptr};
-    uint32_t _tileRes{129}, _layerCount{0};
+    IntrusivePtr<gfx::Texture> _heightArray;
+    IntrusivePtr<gfx::Texture> _splatArray;
+    IntrusivePtr<gfx::Texture> _normalArray;
+    gfx::Sampler *_heightSampler{nullptr};
+    gfx::Sampler *_splatSampler{nullptr};
+    uint32_t _tileRes{129};
+    uint32_t _layerCount{0};
     bool _heightUnorm{false};
     Reservations _reservations;
     ccstd::unordered_set<uint64_t> _inFlight;

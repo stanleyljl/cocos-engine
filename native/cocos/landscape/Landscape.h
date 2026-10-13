@@ -30,7 +30,6 @@
 #include "base/RefCounted.h"
 #include "base/std/container/array.h"
 #include "base/std/container/string.h"
-#include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "landscape/Quadtree.h"
 #include "math/Vec3.h"
@@ -79,11 +78,12 @@ public:
     ~Landscape() override;
 
     // LOD quality is fixed for the lifetime of the loaded terrain.
-    void onEnable(Node *node, float lodQualityScale = 1.0F);
+    void onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
     void onDisable();
+    // Once per tick, after camera controllers: advance queries and snapshot the LOD view.
     void update();
 
-    // Legacy forward entry, called after the pipeline has updated its light frusta.
+    // Render preparation only, after the pipeline has updated its light frusta; does not tick.
     void preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData);
     const ccstd::vector<const scene::Model *> &getPassModels(const geometry::Frustum &frustum, bool shadow) const;
     void onGlobalPipelineStateChanged();
@@ -108,10 +108,9 @@ public:
     uint32_t setQuerySource(uint32_t id, float worldX, float worldZ, float radius);
     void removeQuerySource(uint32_t id);
     uint32_t getQuerySourceStatus(uint32_t id) const;
-    void setQueryCacheCapacity(uint32_t capacity);
 
 private:
-    void initializeRenderer();
+    void initializeRenderer(uint32_t queryCacheCapacity);
     void applyRendererSettings(LandscapeRenderer &renderer) const;
     void logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const;
     scene::Camera *pickMainCamera() const;
@@ -130,7 +129,6 @@ private:
         ccstd::vector<const scene::Model *> models;
     };
     ccstd::vector<PassSelection> _passes;
-    ccstd::unordered_set<const scene::Model *> _coveredShadowModels;
     size_t _passCount{0};
     bool _visibilityDistanceWarning{false};
     Vec3 _lodViewPosition;
@@ -150,7 +148,6 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
-    uint32_t _queryCacheCapacity{64};
     ccstd::vector<QuadNode> _debugNodes;
     bool _lastVisibilityDistanceWarning{false};
 };

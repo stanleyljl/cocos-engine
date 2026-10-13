@@ -6,6 +6,8 @@ import { JSB } from 'internal:constants';
 declare const jsb: any;
 
 export const LANDSCAPE_TILE_RESOLUTION = 129;
+// Total X * Z sectors; must match native LandscapeConfig.h and the importer.
+const MAX_SECTOR_COUNT = 64;
 
 /** CPU-only description of the finest source grid. */
 export interface LandscapeHeightLayout {
@@ -90,6 +92,9 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
         || typeof heightScale !== 'number' || heightScale <= 0 || typeof heightBias !== 'number'
         || !files || typeof files !== 'object') {
         throw new Error('Invalid Landscape height manifest');
+    }
+    if (sectorCount[0] * sectorCount[1] > MAX_SECTOR_COUNT) {
+        throw new Error(`Landscape sector count must not exceed ${MAX_SECTOR_COUNT}`);
     }
     const side = 2 ** (maxLevel - minTileLevel);
     const tilesX = sectorCount[0] * side; const tilesZ = sectorCount[1] * side;
