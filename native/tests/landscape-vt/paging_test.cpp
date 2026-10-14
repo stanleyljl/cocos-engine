@@ -31,6 +31,18 @@ void require(bool condition, const char *message) {
     }
 }
 
+void collectUpdates(const VirtualTexture &pages, ccstd::vector<uint32_t> &updates, uint32_t budget) {
+    updates.clear();
+    for (const auto slot : pages.activeSlots()) {
+        if (updates.size() == budget) {
+            break;
+        }
+        if (pages.page(slot).state != VirtualTexture::State::READY) {
+            updates.push_back(slot);
+        }
+    }
+}
+
 LandscapeData cacheData(uint32_t root, uint32_t sectorsX = 1, uint32_t sectorsZ = 1) {
     LandscapeData d;
     d.sectorsX = sectorsX;
@@ -113,29 +125,22 @@ void testExactPageLifecycle() {
     require(pages.init(cacheData(3), 5), "cache init");
     const VTPageAddress root{3, 0, 0}, fine{0, 0, 0};
     require(pages.reserve({root}), "reserve root");
-    VTPageInputs inputs{};
-    pages.setInputs(pages.activeSlots()[0], inputs);
     ccstd::vector<uint32_t> updates;
-    pages.collectUpdates(updates, 1);
+    collectUpdates(pages, updates, 1);
     pages.publish(updates);
     const int rootSlot = pages.resolve(root);
     require(rootSlot >= 0 && pages.resolve(fine) == -1, "Missing fine pages must NEVER resolve to a resident ancestor");
     ccstd::vector<VTPageAddress> transition{root, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}};
     require(pages.reserve(transition), "reserve parent and four children together");
-    for (const auto slot : pages.activeSlots()) {
-        if (pages.page(slot).state == VirtualTexture::State::DIRTY) {
-            pages.setInputs(slot, inputs);
-        }
-    }
     for (int frame = 0; frame < 3; ++frame) {
-        pages.collectUpdates(updates, 1);
+        collectUpdates(pages, updates, 1);
         pages.publish(updates);
         require(!pages.ready() && pages.resolve(root) == rootSlot, "Partial child completion must preserve the parent");
     }
     auto excess = transition;
     excess.push_back(fine);
     require(!pages.reserve(excess) && pages.resolve(root) == rootSlot && pages.activeSlots().size() == 5, "Failed admission must not alter the working set");
-    pages.collectUpdates(updates, 1);
+    collectUpdates(pages, updates, 1);
     pages.publish(updates);
     require(pages.ready(), "All children complete");
     transition.erase(transition.begin());
@@ -145,6 +150,56 @@ void testExactPageLifecycle() {
     require(!pages.ready(), "invalidated composition must be rebuilt");
     require(pages.resolve(transition[0]) >= 0, "Previously published pixels survive a pending refresh");
     std::cout << "PASS: exact VT lookup, atomic admission, partial completion, refresh and capacity\n";
+}
+
+void testPageRefreshAndReuse() {
+    VirtualTexture pages;
+    require(pages.init(cacheData(3), 2), "refresh cache init");
+    const VTPageAddress a{0, 0, 0};
+    const VTPageAddress b{1, 1, 2};
+    const VTPageAddress c{0, 3, 4};
+    require(pages.reserve({a, b}), "reserve incomplete and complete pages together");
+    const auto aSlot = pages.activeSlots()[0];
+    const auto bSlot = pages.activeSlots()[1];
+    pages.publish({bSlot});
+    pages.invalidate();
+    pages.invalidate();
+    require(pages.page(aSlot).state == VirtualTexture::State::DIRTY && pages.resolve(a) == -1,
+            "invalidating an unfinished page must not make it drawable");
+    require(pages.page(bSlot).state == VirtualTexture::State::STALE && pages.resolve(b) == static_cast<int>(bSlot),
+            "repeated invalidation must retain the previous complete pixels");
+    const auto region = pages.region(b);
+    require(region.x == 2 && region.z == 4 && region.size == 2,
+            "atlas mapping must derive from the page address, not temporary source inputs");
+    const auto revision = pages.revision();
+    require(!pages.reserve({a, b, c}) && pages.activeSlots().size() == 2 && pages.revision() == revision,
+            "capacity refusal changed a pending refresh");
+    require(!pages.reserve({{4, 0, 0}}) && !pages.reserve({{0, 8, 0}}) && pages.resolve(b) == static_cast<int>(bSlot),
+            "invalid addresses changed live page bindings");
+    ccstd::vector<uint32_t> updates;
+    collectUpdates(pages, updates, 0);
+    pages.publish(updates);
+    require(updates.empty() && pages.revision() == revision, "zero budget changed page state");
+    collectUpdates(pages, updates, 2);
+    require(updates.size() == 2, "both unfinished and stale pages require composition");
+    // The renderer can skip a missing source and publish a later ready page.
+    pages.publish({bSlot});
+    require(!pages.ready() && pages.resolve(a) == -1 && !pages.needsComposition(b),
+            "partial composition published an unresolved page");
+    require(pages.reserve({c, b}) && pages.activeSlots()[0] == aSlot, "retired slot was not reused");
+    require(pages.resolve(c) == -1 && pages.page(aSlot).state == VirtualTexture::State::DIRTY,
+            "replacement inherited retired page pixels");
+    pages.publish({aSlot});
+    require(pages.ready(), "replacement page did not complete");
+    require(pages.reserve({b}) && pages.resolve(c) == -1 && !pages.needsComposition(c),
+            "inactive cached pages must stay reusable but cannot satisfy draw bindings");
+    pages.invalidate();
+    require(pages.reserve({b, c}) && pages.resolve(c) == static_cast<int>(aSlot) && pages.needsComposition(c),
+            "reactivated stale pages lost their previous pixels or skipped refresh");
+    collectUpdates(pages, updates, 2);
+    pages.publish(updates);
+    require(pages.ready(), "reactivated pages did not finish refresh");
+    std::cout << "PASS: pending/stale pages, skipped sources, invalid admission, zero budget and slot reuse\n";
 }
 
 // Independent raster oracle: full coverage, no overlaps, and 2:1 at EVERY cell
@@ -295,11 +350,8 @@ void testCapacityLimitedTransitions() {
             };
             const auto complete = [&](uint32_t budget) {
                 for (auto &entry : heights.slots) entry.second.ready = true;
-                for (const auto slot : pages.activeSlots()) {
-                    if (pages.page(slot).state == VirtualTexture::State::DIRTY) pages.setInputs(slot, {});
-                }
                 ccstd::vector<uint32_t> updates;
-                pages.collectUpdates(updates, budget);
+                collectUpdates(pages, updates, budget);
                 pages.publish(updates);
             };
             require(reserve({}), "minimum root coverage must fit");
@@ -421,13 +473,15 @@ void testLocalTransitions() {
                 entry.second.ready = true;
             }
         }
-        for (const auto slot : pages.activeSlots()) {
-            if (pages.page(slot).state == VirtualTexture::State::DIRTY && random() % 3) {
-                pages.setInputs(slot, {});
+        ccstd::vector<uint32_t> candidates;
+        collectUpdates(pages, candidates, static_cast<uint32_t>(pages.capacity()));
+        ccstd::vector<uint32_t> updates;
+        for (const auto slot : candidates) {
+            // Model missing source data outside the page cache, as the renderer does.
+            if (random() % 3 && updates.size() < 2) {
+                updates.push_back(slot);
             }
         }
-        ccstd::vector<uint32_t> updates;
-        pages.collectUpdates(updates, 2);
         pages.publish(updates);
         const bool ready = std::all_of(heights.working.begin(), heights.working.end(), [&](auto n) { return heights.resident(n) >= 0; });
         if (ready && pages.ready() && !pending.empty()) {
@@ -586,13 +640,18 @@ void testSyncCache() {
     LandscapePagingTestAccess::SyncCache cache;
     LandscapePagingTestAccess::SyncCache::Positions positions{1, 2, 3, 0, 0, 0};
     ccstd::vector<QuadNode> selected{{3, 4, 5, -10, 50, 15}, {4, 7, 8, 0, 90, 3}};
-    uint64_t tiles = 4, pages = 0;
+    uint64_t tiles = 4;
+    uint64_t pages = 0;
     require(!cache.matches(positions, tiles, pages, selected, selected), "First frame must initialize bindings");
     cache.store(positions, tiles, pages, selected, selected);
+    require(cache.matchesSelection(selected, selected) && cache.matchesPosition(positions),
+            "one snapshot must retain both selection and camera state");
     // An unmoving camera must still advance streamed tiles and every batch of
     // completed material pages. Otherwise it would stay on the root VT forever.
     for (int batch = 0; batch < 32; ++batch) {
         ++pages;
+        require(cache.matchesSelection(selected, selected) && cache.matchesPosition(positions),
+                "resource publication must not invalidate unchanged selection or camera state");
         require(!cache.matches(positions, tiles, pages, selected, selected), "Completed VT pages must refresh direct instance mappings");
         cache.store(positions, tiles, pages, selected, selected);
         ++tiles;
@@ -614,12 +673,24 @@ void testSyncCache() {
         auto changed = selected;
         auto &node = changed[1];
         switch (field) {
-            case 0: ++node.level; break;
-            case 1: ++node.ix; break;
-            case 2: ++node.iz; break;
-            case 3: ++node.minY; break;
-            case 4: ++node.maxY; break;
-            case 5: node.quadrantMask ^= 1; break;
+            case 0:
+                ++node.level;
+                break;
+            case 1:
+                ++node.ix;
+                break;
+            case 2:
+                ++node.iz;
+                break;
+            case 3:
+                ++node.minY;
+                break;
+            case 4:
+                ++node.maxY;
+                break;
+            case 5:
+                node.quadrantMask ^= 1;
+                break;
         }
         require(!cache.matches(positions, tiles, pages, changed, selected), "Frustum/LOD/bounds changes must not be missed");
     }
@@ -634,6 +705,14 @@ void testSyncCache() {
     require(!cache.matches(positions, tiles, pages, selected, selected), "Newly visible shadow geometry must acquire material bindings");
     cache.invalidate();
     require(!cache.matches(positions, tiles, pages, selected, selected), "LOD configuration/reset must invalidate the cache");
+    require(cache.matchesPosition(positions) && cache.matchesSelection(selected, surface),
+            "frame invalidation must retain planning snapshots");
+    cache.invalidatePosition();
+    require(!cache.matchesPosition(positions) && cache.matchesSelection(selected, surface),
+            "target invalidation must not discard an unchanged selection");
+    cache.clear();
+    require(!cache.matchesPosition(positions) && !cache.matchesSelection(selected, surface),
+            "destroy must clear every snapshot");
     std::cout << "PASS: stable frames, asynchronous residency, VT publication, toggles, movement and selection changes\n";
 }
 
@@ -776,12 +855,7 @@ void testFrameStreamingBudget() {
             active.push_back({0, index % 8, index / 8});
         }
         require(pages.reserve(active), "transaction reservation failed");
-        for (const auto slot : pages.activeSlots()) {
-            if (pages.page(slot).state == VirtualTexture::State::DIRTY) {
-                pages.setInputs(slot, VTPageInputs{});
-            }
-        }
-        pages.collectUpdates(updates, budget.pages);
+        collectUpdates(pages, updates, budget.pages);
         budget.pages -= static_cast<uint32_t>(updates.size());
         composed += static_cast<uint32_t>(updates.size());
         pages.publish(updates);
@@ -793,10 +867,10 @@ void testFrameStreamingBudget() {
     budget.attempts -= 7;
     require(!budget.begin(42, 101.0) && budget.pages == 0 && budget.attempts == config::STREAMING_ADMISSION_BUDGET - 7,
             "another camera replenished the same frame's budgets");
-    pages.collectUpdates(updates, budget.pages);
+    collectUpdates(pages, updates, budget.pages);
     require(updates.empty(), "zero remaining budget still composed pages");
     require(budget.begin(43, 200.0) && budget.nextStep(200.5), "next frame must resume pending work");
-    pages.collectUpdates(updates, budget.pages);
+    collectUpdates(pages, updates, budget.pages);
     budget.pages -= static_cast<uint32_t>(updates.size());
     pages.publish(updates);
     require(updates.size() == 2 && pages.ready() && budget.pages == 6, "pending transaction did not resume exactly");
@@ -817,6 +891,7 @@ int main() {
     testSectorCountLimit();
     testHeightReservations();
     testExactPageLifecycle();
+    testPageRefreshAndReuse();
     testCapacityLimitedTransitions();
     testLocalTransitions();
     testIndexedDemand();

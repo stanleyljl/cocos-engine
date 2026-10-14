@@ -121,11 +121,15 @@ public:
     gfx::Texture *normalArray() const { return _normalArray; }
     gfx::Sampler *heightSampler() const { return _heightSampler; }
     gfx::Sampler *splatSampler() const { return _splatSampler; }
-    uint32_t layerCount() const { return _layerCount; }
+    uint32_t layerCount() const { return _reservations.capacity; }
 
 private:
     bool initTextures();
     void initSamplers();
+    void uploadTile(uint64_t key,
+                    const uint8_t *height,
+                    const uint8_t *splat,
+                    const uint8_t *normal);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     gfx::Device *_device{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
@@ -134,8 +138,6 @@ private:
     IntrusivePtr<gfx::Texture> _normalArray;
     gfx::Sampler *_heightSampler{nullptr};
     gfx::Sampler *_splatSampler{nullptr};
-    uint32_t _tileRes{129};
-    uint32_t _layerCount{0};
     bool _heightUnorm{false};
     Reservations _reservations;
     ccstd::unordered_set<uint64_t> _inFlight;

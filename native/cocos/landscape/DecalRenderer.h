@@ -57,7 +57,6 @@ struct LandscapeSurfaceInstance {
     Vec4 quadrant;
     Vec4 tile;
     Vec4 vt;
-    bool needsMaterial{true};
     void apply(scene::Model *model, TypedArray &scratch) const;
 };
 
@@ -96,7 +95,7 @@ public:
     void endSync();
     void refreshInstances(const Vec3 &viewPosition);
     void preparePasses(uint32_t stamp);
-    void collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
+    void collectPassModels(const QuadNode &node, const geometry::Frustum &frustum,
                            bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
     void setEnabled(bool enabled);
@@ -107,12 +106,17 @@ public:
 private:
     struct Draw {
         IntrusivePtr<scene::Model> model;
-        size_t patch{0};
         uint32_t decal{0};
         Vec4 grid;
     };
-    void updateInstance(const Draw &draw);
-    void appendDraw(size_t patch, uint32_t decal, const Vec4 &grid);
+    // Each terrain patch owns a contiguous range in the reusable draw array.
+    struct Patch {
+        TerrainPatch terrain;
+        size_t firstDraw;
+        size_t endDraw;
+    };
+    void updateInstance(const Draw &draw, const TerrainPatch &patch);
+    void appendDraw(const TerrainPatch &patch, uint32_t decal, const Vec4 &grid);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -123,11 +127,9 @@ private:
     IntrusivePtr<gfx::Texture> _pageIndices;
     ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
     ccstd::vector<Vec3> _centers;
-    ccstd::vector<TerrainPatch> _patches;
+    ccstd::unordered_map<uint64_t, ccstd::vector<Patch>> _patches;
     ccstd::vector<Draw> _draws;
-    ccstd::unordered_map<uint64_t, ccstd::vector<size_t>> _nodeDraws;
-    std::array<uint32_t, config::DECAL_INSTANCE_MAX> _candidates{};
-    size_t _candidateCount{0};
+    ccstd::vector<uint32_t> _candidates;
     size_t _active{0};
     TypedArray _scratch;
     Vec3 _viewPosition;

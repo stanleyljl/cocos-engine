@@ -74,8 +74,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     }
     _device = device;
     _asset = asset;
-    _tileRes = data.tileResolution;
-    _layerCount = layerCount;
     _reservations.data = data;
     _reservations.capacity = layerCount;
     _heightUnorm = supportsHeightUnorm(device);
@@ -87,7 +85,11 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
                 _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
-    CC_LOG_INFO("[Landscape] %zu sector roots; RG8 XZ normals %ux%ux%u", rootCount, _tileRes, _tileRes, _layerCount);
+    CC_LOG_INFO("[Landscape] %zu sector roots; RG8 XZ normals %ux%ux%u",
+                rootCount,
+                _reservations.data.tileResolution,
+                _reservations.data.tileResolution,
+                _reservations.capacity);
 #endif
     return true;
 }
@@ -97,9 +99,9 @@ bool TilePagePool::initTextures() {
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
-    info.width = _tileRes;
-    info.height = _tileRes;
-    info.layerCount = _layerCount;
+    info.width = _reservations.data.tileResolution;
+    info.height = _reservations.data.tileResolution;
+    info.layerCount = _reservations.capacity;
     info.levelCount = 1;
     _heightArray = _device->createTexture(info);
     info.format = gfx::Format::R16UI;
@@ -134,8 +136,8 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
         return;
     }
     gfx::BufferTextureCopy region;
-    region.texExtent.width = _tileRes;
-    region.texExtent.height = _tileRes;
+    region.texExtent.width = _reservations.data.tileResolution;
+    region.texExtent.height = _reservations.data.tileResolution;
     region.texExtent.depth = 1;
     region.texSubres.mipLevel = 0;
     region.texSubres.baseArrayLayer = layer;
@@ -147,15 +149,19 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
 bool TilePagePool::canReserve(const ccstd::vector<NodeAddress> &sources) const {
     return _reservations.canReserve(sources);
 }
+
 bool TilePagePool::reserve(const ccstd::vector<NodeAddress> &sources) {
     return _reservations.reserve(sources);
 }
+
 int TilePagePool::resident(NodeAddress source) const {
     return _reservations.resident(source);
 }
+
 bool TilePagePool::ready() const {
     return std::all_of(_reservations.slots.begin(), _reservations.slots.end(), [](const auto &e) { return e.second.ready; });
 }
+
 bool TilePagePool::loadReserved(bool synchronous) {
     if (_asset->loadingFailed()) {
         return false;
@@ -174,11 +180,7 @@ bool TilePagePool::loadReserved(bool synchronous) {
             if (!_asset->loadTileSet(source.level, source.x, source.z, heightFormat, tile)) {
                 return false;
             }
-            uploadLayer(_heightArray, slot.layer, tile.height.data());
-            uploadLayer(_splatArray, slot.layer, tile.splat.data());
-            uploadLayer(_normalArray, slot.layer, tile.normal.data());
-            slot.ready = true;
-            ++_updateRevision;
+            uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
         } else {
             if (_inFlight.size() >= MAX_IN_FLIGHT) {
                 break;
@@ -191,25 +193,35 @@ bool TilePagePool::loadReserved(bool synchronous) {
     }
     return !_asset->loadingFailed();
 }
+
 void TilePagePool::update(uint32_t budget) {
     LandscapeAsset::TileData tile;
     for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
         _inFlight.erase(tile.key);
-        const auto it = _reservations.slots.find(tile.key);
-        if (it == _reservations.slots.end() || it->second.ready) {
-            continue;
-        }
-        auto &slot = it->second;
-        uploadLayer(_heightArray, slot.layer, tile.height.data());
-        uploadLayer(_splatArray, slot.layer, tile.splat.data());
-        uploadLayer(_normalArray, slot.layer, tile.normal.data());
-        slot.ready = true;
-        ++_updateRevision;
+        uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
     }
 }
+
+void TilePagePool::uploadTile(uint64_t key,
+                              const uint8_t *height,
+                              const uint8_t *splat,
+                              const uint8_t *normal) {
+    const auto it = _reservations.slots.find(key);
+    if (it == _reservations.slots.end() || it->second.ready) {
+        return;
+    }
+    auto &slot = it->second;
+    uploadLayer(_heightArray, slot.layer, height);
+    uploadLayer(_splatArray, slot.layer, splat);
+    uploadLayer(_normalArray, slot.layer, normal);
+    slot.ready = true;
+    ++_updateRevision;
+}
+
 void TilePagePool::destroy() {
-    _reservations.slots.clear();
-    _reservations.working.clear();
+    _reservations = {};
+    _updateRevision = 0;
+    _heightUnorm = false;
     _inFlight.clear();
     _asset = nullptr;
     _heightArray = nullptr;
@@ -219,13 +231,16 @@ void TilePagePool::destroy() {
     _splatSampler = nullptr;
     _device = nullptr;
 }
+
 TilePageResolver::TilePageResolver(TilePagePool &pool, const LandscapeData &data)
 : _pool(pool), _data(data), _vtLayout(data.sectorSize) {}
+
 TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) const {
     const uint32_t level = std::max(node.level, _data.minTileLevel);
     const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
     return {source, _pool.resident(source)};
 }
+
 Vec4 TilePageResolver::shaderParams(const Tile &tile) const {
     const auto region = _data.nodeRegion(tile.address);
     return {region.x, region.z, region.size, static_cast<float>(tile.layer)};

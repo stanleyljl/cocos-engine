@@ -81,9 +81,6 @@ void LandscapeSurfaceInstance::apply(scene::Model *model, TypedArray &scratch) c
     setLandscapeInstanceAttribute(model, scratch, "a_gridInst", grid);
     setLandscapeInstanceAttribute(model, scratch, "a_quadrantInst", quadrant);
     setLandscapeInstanceAttribute(model, scratch, "a_tileInst", tile);
-    if (!needsMaterial) {
-        return;
-    }
     setLandscapeInstanceAttribute(model, scratch, "a_vtInst", vt);
 }
 
@@ -102,6 +99,7 @@ bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm
     _wire = createLandscapeMaterial(true, true, heightUnorm);
     _mesh = GridMesh::create(Root::getInstance()->getDevice(), 16);
     _scratch = Float32Array(4);
+    _candidates.reserve(config::DECAL_INSTANCE_MAX);
     return _mesh && _solid && _wire &&
            _solid->getPasses() && !_solid->getPasses()->empty() &&
            _wire->getPasses() && !_wire->getPasses()->empty();
@@ -114,10 +112,12 @@ std::array<Material *, 2> DecalRenderer::materials() const {
 bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
     _asset = asset;
     const auto &data = asset->data();
+    _centers.clear();
     for (const auto &d : asset->decals()) {
         const float x = d.x + d.size * 0.5F;
         const float z = d.z + d.size * 0.5F;
-        float minY = data.minHeight(), maxY = data.maxHeight();
+        float minY = data.minHeight();
+        float maxY = data.maxHeight();
         const auto address = data.nodeAtClamped(0, {x, z});
         asset->getHeightRange(address.level, address.x, address.z, minY, maxY);
         // Stable whole-decal fade, independent of geometry LOD and streamed heights.
@@ -195,8 +195,7 @@ void DecalRenderer::uploadPageDecals() {
     Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndices, &copy, 1);
 }
 
-void DecalRenderer::updateInstance(const Draw &draw) {
-    const auto &patch = _patches[draw.patch];
+void DecalRenderer::updateInstance(const Draw &draw, const TerrainPatch &patch) {
     patch.surface.apply(draw.model, _scratch);
     const auto &d = _asset->decals()[draw.decal];
     const auto &layer = _asset->decalLayers()[d.layer];
@@ -211,7 +210,7 @@ void DecalRenderer::updateInstance(const Draw &draw) {
     draw.model->updateWorldBound();
 }
 
-void DecalRenderer::appendDraw(size_t patch, uint32_t decal, const Vec4 &grid) {
+void DecalRenderer::appendDraw(const TerrainPatch &patch, uint32_t decal, const Vec4 &grid) {
     const size_t at = _active++;
     if (at == _draws.size()) {
         IntrusivePtr<scene::Model> model = Root::getInstance()->createModel<scene::Model>();
@@ -221,23 +220,20 @@ void DecalRenderer::appendDraw(size_t patch, uint32_t decal, const Vec4 &grid) {
         model->setReceiveShadow(_receiveShadow);
         model->initSubModel(0, _mesh, _wireframe ? _wire.get() : _solid.get());
         model->attachToScene(_scene);
-        _draws.push_back(Draw{model, patch, decal, {}});
+        _draws.push_back(Draw{model, decal, {}});
     }
     auto &draw = _draws[at];
-    draw.patch = patch;
     draw.decal = decal;
     draw.grid = grid;
-    updateInstance(draw);
+    updateInstance(draw, patch);
     draw.model->setEnabled(_enabled);
-    _nodeDraws[_patches[patch].nodeKey].push_back(at);
 }
 
 bool DecalRenderer::beginSync(const Vec3 &viewPosition) {
     _viewPosition = viewPosition;
     _active = 0;
     _patches.clear();
-    _nodeDraws.clear();
-    _candidateCount = 0;
+    _candidates.clear();
     // Evaluate eligibility once per decal, independent of patch subdivision.
     for (uint32_t i = 0; i < _asset->decals().size(); ++i) {
         const auto &d = _asset->decals()[i];
@@ -248,35 +244,31 @@ bool DecalRenderer::beginSync(const Vec3 &viewPosition) {
         if (distance >= _asset->decalFarDistance()) {
             continue;
         }
-        _candidates[_candidateCount++] = i;
+        _candidates.push_back(i);
     }
-    if (_candidateCount == 0) {
+    if (_candidates.empty()) {
         endSync();
     }
-    return _candidateCount != 0;
+    return !_candidates.empty();
 }
 
 void DecalRenderer::addPatch(const TerrainPatch &patch) {
-    if (_candidateCount == 0) {
+    if (_candidates.empty()) {
         return;
     }
-    const size_t patchIndex = _patches.size();
-    bool stored = false;
+    const size_t firstDraw = _active;
     // Fixed lattice at 1/16 of the finest terrain cell. Patch ownership changes
     // only the base height/material mapping, never the decal tessellation.
     const auto &data = _asset->data();
     const float step = data.nodeSize(0) / 16.0F;
     const auto &region = patch.region;
-    const float x = region.x, z = region.z, size = region.size;
-    for (size_t candidate = 0; candidate < _candidateCount; ++candidate) {
-        const uint32_t i = _candidates[candidate];
+    const float x = region.x;
+    const float z = region.z;
+    const float size = region.size;
+    for (const uint32_t i : _candidates) {
         const auto &d = _asset->decals()[i];
         if (x + size <= d.x || z + size <= d.z || x >= d.x + d.size || z >= d.z + d.size) {
             continue;
-        }
-        if (!stored) {
-            _patches.push_back(patch);
-            stored = true;
         }
         const int firstX = static_cast<int>(std::floor((std::max(x, d.x)) / step));
         const int firstZ = static_cast<int>(std::floor((std::max(z, d.z)) / step));
@@ -288,9 +280,12 @@ void DecalRenderer::addPatch(const TerrainPatch &patch) {
                 const float bottom = std::max(iz * step, d.z);
                 const float right = std::min((ix + 1) * step, d.x + d.size);
                 const float top = std::min((iz + 1) * step, d.z + d.size);
-                appendDraw(patchIndex, i, Vec4{left, bottom, right - left, top - bottom});
+                appendDraw(patch, i, Vec4{left, bottom, right - left, top - bottom});
             }
         }
+    }
+    if (_active != firstDraw) {
+        _patches[patch.nodeKey].push_back({patch, firstDraw, _active});
     }
 }
 
@@ -302,8 +297,12 @@ void DecalRenderer::endSync() {
 
 void DecalRenderer::refreshInstances(const Vec3 &viewPosition) {
     _viewPosition = viewPosition;
-    for (size_t i = 0; i < _active; ++i) {
-        updateInstance(_draws[i]);
+    for (const auto &entry : _patches) {
+        for (const auto &patch : entry.second) {
+            for (size_t i = patch.firstDraw; i < patch.endDraw; ++i) {
+                updateInstance(_draws[i], patch.terrain);
+            }
+        }
     }
 }
 
@@ -314,21 +313,19 @@ void DecalRenderer::preparePasses(uint32_t stamp) {
     }
 }
 
-void DecalRenderer::collectPassModels(const ccstd::vector<QuadNode> &selected, const geometry::Frustum &frustum,
+void DecalRenderer::collectPassModels(const QuadNode &node, const geometry::Frustum &frustum,
                                       bool shadow, ccstd::vector<const scene::Model *> &models) const {
-    for (const auto &node : selected) {
-        const auto it = _nodeDraws.find(node.address().key());
-        if (it == _nodeDraws.end()) {
+    const auto it = _patches.find(node.address().key());
+    if (it == _patches.end()) {
+        return;
+    }
+    for (const auto &patch : it->second) {
+        if (!(node.quadrantMask & patch.terrain.quadrantMask)) {
             continue;
         }
-        for (size_t index : it->second) {
-            const auto &draw = _draws[index];
-            const auto *model = draw.model.get();
-            if (!(node.quadrantMask & _patches[draw.patch].quadrantMask) ||
-                !model->isEnabled() || (shadow && !model->isCastShadow())) {
-                continue;
-            }
-            if (model->getWorldBounds()->aabbFrustum(frustum)) {
+        for (size_t i = patch.firstDraw; i < patch.endDraw; ++i) {
+            const auto *model = _draws[i].model.get();
+            if (model->isEnabled() && (!shadow || model->isCastShadow()) && model->getWorldBounds()->aabbFrustum(frustum)) {
                 models.push_back(model);
             }
         }
@@ -350,13 +347,10 @@ void DecalRenderer::setEnabled(bool enabled) {
 
 void DecalRenderer::setWireframe(bool wireframe) {
     _wireframe = wireframe;
-    for (size_t i = 0; i < _draws.size(); ++i) {
-        const auto &draw = _draws[i];
+    for (const auto &draw : _draws) {
         draw.model->setSubModelMaterial(0, wireframe ? _wire.get() : _solid.get());
-        if (i < _active) {
-            updateInstance(draw);
-        }
     }
+    refreshInstances(_viewPosition);
 }
 
 void DecalRenderer::setCastShadow(bool enabled) {

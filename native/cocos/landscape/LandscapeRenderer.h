@@ -142,8 +142,8 @@ private:
 
         bool matches(const Positions &positions, uint64_t tileRevision, uint64_t contentRevision,
                      const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) const {
-            return _valid && positions == _positions && tileRevision == _tileRevision &&
-                   contentRevision == _contentRevision && sameNodes(geometryNodes, _geometryNodes) && sameNodes(surfaceNodes, _surfaceNodes);
+            return _frameValid && matchesPosition(positions) && tileRevision == _tileRevision && contentRevision == _contentRevision &&
+                   matchesSelection(geometryNodes, surfaceNodes);
         }
 
         void store(const Positions &positions, uint64_t tileRevision, uint64_t contentRevision,
@@ -153,10 +153,31 @@ private:
             _contentRevision = contentRevision;
             _geometryNodes = geometryNodes;
             _surfaceNodes = surfaceNodes;
-            _valid = true;
+            _frameValid = true;
+            _positionValid = true;
+            _selectionValid = true;
         }
 
-        void invalidate() { _valid = false; }
+        bool matchesPosition(const Positions &positions) const {
+            return _positionValid && positions == _positions;
+        }
+
+        bool matchesSelection(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes) const {
+            return _selectionValid && sameNodes(geometryNodes, _geometryNodes) && sameNodes(surfaceNodes, _surfaceNodes);
+        }
+
+        void invalidate() { _frameValid = false; }
+
+        void invalidatePosition() {
+            _frameValid = false;
+            _positionValid = false;
+        }
+
+        void clear() {
+            _frameValid = false;
+            _positionValid = false;
+            _selectionValid = false;
+        }
 
     private:
         static bool sameNodes(const ccstd::vector<QuadNode> &a, const ccstd::vector<QuadNode> &b) {
@@ -166,7 +187,9 @@ private:
                    });
         }
 
-        bool _valid{false};
+        bool _frameValid{false};
+        bool _positionValid{false};
+        bool _selectionValid{false};
         Positions _positions{};
         uint64_t _tileRevision{0};
         uint64_t _contentRevision{0};
@@ -191,13 +214,8 @@ private:
         uint32_t z{0};
         uint32_t meshIndex{0}; // 1, 2, 4 or 8 cells per side
         VTPageAddress page;
-        float vtPriority{0.0F};   // visible footprint; ancestors must not inflate it
-        bool needsMaterial{true}; // false for quadrants used exclusively by shadow passes
-    };
-
-    struct ModelState {
+        // Only committed patches own models; pending patches contain the plan alone.
         IntrusivePtr<scene::Model> model;
-        Patch patch;
     };
 
     // Frame stages: selection -> residency/source publication -> models -> decals.
@@ -208,24 +226,27 @@ private:
     void resetPlanning();
     bool planNext(uint32_t &attempts);
     void commitPending();
+    void clearPending();
+    bool updateResources(bool synchronous);
     void updateReferences(uint64_t key, const ccstd::vector<Patch> &patches, bool add);
     bool colorRegion(NodeAddress node) const;
     void stopLoading();
     void syncTerrainModels();
     void bindRuntimeTextures();
-    void syncDecals(const ccstd::vector<Patch> &patches);
+    void syncDecals();
+    void recycleModels(ccstd::vector<Patch> &patches);
     IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
     void updateMaterialProperties();
     void updateMorphCameraProperty();
     LandscapeSurfaceInstance resolveSurface(const Patch &patch);
     std::array<Material *, 4> surfaceMaterials() const;
     void updateInstanceData(scene::Model *model, const Patch &patch);
-    void updateModel(ModelState &state, const Patch &patch);
+    void updateModel(Patch &patch);
     void updateModelBounds(scene::Model *model, const Patch &patch);
-    void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex,
+    void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex, uint32_t bias,
                        ccstd::vector<Patch> &patches);
     LandscapeRegion patchRegion(const Patch &patch) const;
-    float patchDistance(const QuadNode &node, float x, float z, float size, bool farthest) const;
+    float patchDistance(const QuadNode &node, float x, float z, float size) const;
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -238,18 +259,9 @@ private:
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
 
-    ccstd::unordered_map<uint64_t, ModelState> _active;
-    struct NodeModel {
-        uint8_t quadrantMask;
-        scene::Model *model;
-        uint64_t patchKey;
-    };
-    ccstd::unordered_map<uint64_t, ccstd::vector<NodeModel>> _nodeModels;
     std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
     VTPageLayout _vtLayout;
     SyncCache _syncCache;
-    SyncCache _targetCache;
-    SyncCache _selectionCache;
     StreamingBudget _streamingBudget;
     RenderSelection _selection;
     RenderSelection::Change _change;
@@ -266,8 +278,6 @@ private:
     ccstd::vector<VTPageAddress> _workingPages;
     size_t _requestIndex{0};
     size_t _materialIndex{0};
-    uint32_t _materialBias{0};
-    bool _pending{false};
     bool _reserved{false};
     bool _settled{false};
     bool _initialized{false};
@@ -275,8 +285,6 @@ private:
     bool _planningInvalid{false};
     bool _preferMaterial{true};
     uint64_t _preparedPageRevision{0};
-    // Reused across active frames; the stable-camera fast path touches none of these.
-    ccstd::vector<Patch> _patches;
     std::unique_ptr<TilePageResolver> _sourceResolver;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit

@@ -121,31 +121,11 @@ int VirtualTexture::allocate(VTPageAddress address) {
     _lookup[address.key()] = static_cast<uint32_t>(slot);
     return slot;
 }
-void VirtualTexture::setInputs(uint32_t slot, const VTPageInputs &inputs) {
-    auto &p = _pages[slot];
-    assert(p.lastRequested == _frame && p.state == State::DIRTY);
-    p.inputs = inputs;
-    p.inputsResolved = true;
-}
-void VirtualTexture::collectUpdates(ccstd::vector<uint32_t> &slots, uint32_t budget) const {
-    slots.clear();
-    for (const auto slot : _active) {
-        const auto &p = _pages[slot];
-        if (p.state != State::DIRTY || !p.inputsResolved) {
-            continue;
-        }
-        if (slots.size() == budget) {
-            break;
-        }
-        slots.push_back(slot);
-    }
-}
 void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
     for (const auto slot : slots) {
         auto &p = _pages[slot];
-        assert(p.inputsResolved && p.lastRequested == _frame);
+        assert(p.lastRequested == _frame && (p.state == State::DIRTY || p.state == State::STALE));
         p.state = State::READY;
-        p.published = true;
     }
     if (!slots.empty()) {
         ++_revision;
@@ -153,9 +133,8 @@ void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
 }
 void VirtualTexture::invalidate() {
     for (auto &p : _pages) {
-        if (p.state != State::EMPTY) {
-            p.state = State::DIRTY;
-            p.inputsResolved = false;
+        if (p.state == State::READY) {
+            p.state = State::STALE;
         }
     }
     ++_revision;
@@ -163,7 +142,7 @@ void VirtualTexture::invalidate() {
 bool VirtualTexture::ready() const {
     return !_active.empty() && std::all_of(_active.begin(), _active.end(), [this](uint32_t slot) { return _pages[slot].state == State::READY; });
 }
-bool VirtualTexture::needsSources(VTPageAddress address) const {
+bool VirtualTexture::needsComposition(VTPageAddress address) const {
     const auto it = _lookup.find(address.key());
     return it == _lookup.end() || _pages[it->second].state != State::READY;
 }
@@ -173,6 +152,6 @@ int VirtualTexture::resolve(VTPageAddress address) const {
         return -1;
     }
     const auto &p = _pages[it->second];
-    return p.lastRequested == _frame && p.published ? static_cast<int>(it->second) : -1;
+    return p.lastRequested == _frame && (p.state == State::READY || p.state == State::STALE) ? static_cast<int>(it->second) : -1;
 }
 } // namespace cc::landscape

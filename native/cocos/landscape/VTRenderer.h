@@ -58,12 +58,11 @@ public:
     gfx::Sampler *sampler() const { return _sampler; }
     Vec4 mapping(VTPageAddress address) const;
     void requiredSources(ccstd::vector<NodeAddress> &sources) const;
-    void resolveSources(TilePagePool &tiles, TilePageResolver &resolver);
     bool valid() const;
     bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
     // Returns the actual composed page count for the shared frame budget.
-    uint32_t render(uint32_t maxUpdates);
+    uint32_t render(TilePagePool &tiles, TilePageResolver &resolver, uint32_t maxUpdates);
     void setFrozen(bool frozen);
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
@@ -97,9 +96,6 @@ private:
     bool initPageDrawResources(gfx::Device *device);
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
-    void buildPageBatch();
-    void uploadSourceTables();
-    void submitPageBatch();
     void recordPagePass(Material *material, gfx::PipelineState *pipelineState,
                         gfx::Framebuffer *framebuffer, uint32_t atlasSize);
     void invalidateComposedPages();
@@ -150,8 +146,8 @@ private:
     IntrusivePtr<gfx::CommandBuffer> _commands;
     IntrusivePtr<gfx::PipelineState> _pipelineState;
     IntrusivePtr<gfx::RenderPass> _initialPass;
-    ccstd::vector<uint32_t> _dirtySlots;
-    ccstd::vector<PageInstance> _pageInstances;
+    ccstd::vector<uint32_t> _batchSlots;
+    ccstd::vector<PageInstance> _batchInstances;
     bool _needsClear{true};
     bool _pendingInvalidation{false};
     BiomeMap _biomeMap;

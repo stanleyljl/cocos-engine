@@ -230,7 +230,9 @@ CCProgram vt-compose-fs %{
     // Delta Force (GDC 2025, slide 66). Use the same height blending at
     // every page resolution; only the height-blending setting selects linear blending.
     float amount = clamp(heightBlendParams.x, 0.0, 1.0);
-    if (amount <= 0.0 || weight <= 0.0 || weight >= 1.0) return weight;
+    if (amount <= 0.0 || weight <= 0.0 || weight >= 1.0) {
+      return weight;
+    }
     float sharpness = mix(1.0, max(heightBlendParams.z, 1.0), amount);
     // Heights are in [0,1]. This bound preserves both pure-layer endpoints
     // continuously, even when artists reduce the weight scale.
@@ -258,6 +260,106 @@ CCProgram vt-compose-fs %{
   // texture must recover the terrain normal on ALL signed axes, not axis normals.
   vec3 projectionTangent(vec3 t, vec3 axis, vec3 n) {
     return normalize(t - (axis + n) * (dot(t, n) / max(1.0 + dot(axis, n), 0.001)));
+  }
+
+  vec3 decodeNormal(vec2 encoded) {
+    vec2 xy = encoded * 2.0 - 1.0;
+    return normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+  }
+
+  struct ProjectionFrame {
+    vec2 uv;
+    vec2 dx;
+    vec2 dy;
+    vec3 tangent;
+    vec3 bitangent;
+  };
+
+  ProjectionFrame projectionFrame(int axis, vec3 position, vec3 positionDx, vec3 positionDy,
+                                  vec3 referenceNormal, vec3 shadingNormal, vec3 terrainFrameTangent) {
+    ProjectionFrame frame;
+    frame.uv = vec2(position.x, -position.z);
+    frame.dx = vec2(positionDx.x, -positionDx.z);
+    frame.dy = vec2(positionDy.x, -positionDy.z);
+    frame.tangent = terrainFrameTangent;
+    if (axis == 0) {
+      float direction = referenceNormal.x < 0.0 ? -1.0 : 1.0;
+      frame.uv = vec2(-direction * position.z, position.y);
+      frame.dx = vec2(-direction * positionDx.z, positionDx.y);
+      frame.dy = vec2(-direction * positionDy.z, positionDy.y);
+      frame.tangent = projectionTangent(vec3(0.0, 0.0, -direction), vec3(direction, 0.0, 0.0), shadingNormal);
+    } else if (axis == 2) {
+      float direction = referenceNormal.z < 0.0 ? -1.0 : 1.0;
+      frame.uv = vec2(direction * position.x, position.y);
+      frame.dx = vec2(direction * positionDx.x, positionDx.y);
+      frame.dy = vec2(direction * positionDy.x, positionDy.y);
+      frame.tangent = projectionTangent(vec3(direction, 0.0, 0.0), vec3(0.0, 0.0, direction), shadingNormal);
+    }
+    frame.bitangent = cross(shadingNormal, frame.tangent);
+    return frame;
+  }
+
+  struct ComposedSurface {
+    vec3 albedo;
+    vec3 normal;
+    float roughness;
+    float ao;
+  };
+
+  void applyDecals(inout ComposedSurface surface) {
+    // Static planar decals are cached in RVT. Explicit gradients remain valid
+    // at coverage boundaries and while a page is being refined.
+    vec2 decalDx = dFdx(v_localXZ);
+    vec2 decalDy = dFdy(v_localXZ);
+    for (int entry = 0; entry < 512; ++entry) {
+      if (entry >= int(v_decalPage.y)) {
+        break;
+      }
+      vec4 indices = texelFetch(decalIndexMap, ivec2(entry / 2, int(v_decalPage.x)), 0);
+      vec2 encoded = entry % 2 == 0 ? indices.rg : indices.ba;
+      int index = int(dot(floor(encoded * 255.0 + 0.5), vec2(1.0, 256.0)));
+      vec4 region = decalRegions[index];
+      vec2 decalUV = (v_localXZ - region.xy) / region.z;
+      // Half-open footprints give adjoining decal regions one owner at seams.
+      if (any(lessThan(decalUV, vec2(0.0))) || any(greaterThanEqual(decalUV, vec2(1.0)))) {
+        continue;
+      }
+      vec2 decalGradientX = decalDx / region.z;
+      vec2 decalGradientY = decalDy / region.z;
+      vec3 coord = vec3(decalUV, region.w);
+      vec4 color = textureGrad(decalAlbedoMap, coord, decalGradientX, decalGradientY);
+      if (color.a <= 0.0) {
+        continue;
+      }
+      vec4 nra = textureGrad(decalNormalMap, coord, decalGradientX, decalGradientY);
+      vec4 layer = decalLayerParams[int(region.w)];
+      if (layer.y > 0.0 && layer.z > 0.0) {
+        // The low-resolution decal stores coverage and a blend mask only.
+        // Repeated source materials keep their own texel density in every VT page.
+        int a = int(layer.y) - 1;
+        int b = int(layer.z) - 1;
+        vec2 local = v_localXZ - region.xy;
+        float scaleA = materialParams[a].x;
+        float scaleB = materialParams[b].x;
+        vec3 uvA = vec3(local * scaleA, float(a));
+        vec3 uvB = vec3(local * scaleB, float(b));
+        vec4 ca = textureGrad(albedoHeightMap, uvA, decalDx * scaleA, decalDy * scaleA);
+        vec4 cb = textureGrad(albedoHeightMap, uvB, decalDx * scaleB, decalDy * scaleB);
+        vec4 na = textureGrad(normalRoughnessAOMap, uvA, decalDx * scaleA, decalDy * scaleA);
+        vec4 nb = textureGrad(normalRoughnessAOMap, uvB, decalDx * scaleB, decalDy * scaleB);
+        float weight = nra.b;
+        color.rgb = mix(ca.rgb * ca.rgb, cb.rgb * cb.rgb, weight) * color.a;
+        nra = mix(na, nb, weight);
+      }
+      vec3 decalNormal = decodeNormal(nra.rg);
+      // Imprints darken the existing material instead of painting a solid color.
+      vec3 over = surface.albedo * (1.0 - color.a) + color.rgb;
+      vec3 modulated = surface.albedo * (vec3(1.0 - color.a) + color.rgb);
+      surface.albedo = mix(over, modulated, layer.x);
+      surface.normal = normalize(mix(surface.normal, decalNormal, color.a));
+      surface.roughness = mix(surface.roughness, nra.b, color.a);
+      surface.ao = mix(surface.ao, nra.a, color.a);
+    }
   }
 
   void main() {
@@ -288,7 +390,9 @@ CCProgram vt-compose-fs %{
     // Extract min/mid/max without pixel-dependent top-three weight selection.
     int midId = minId;
     for (int i = 0; i < 6; ++i) {
-      if (ids[i] < maxId) midId = max(midId, ids[i]);
+      if (ids[i] < maxId) {
+        midId = max(midId, ids[i]);
+      }
     }
     int layers[3];
     layers[0] = minId;
@@ -344,46 +448,41 @@ CCProgram vt-compose-fs %{
     bool useCliffMaterial = abs(cliffParams.x) > 0.5 && cliffParams.w > 0.0 && referenceNormal.y < cliffMaterialParams.x;
     if (useCliffMaterial) {
       layers[0] = int(cliffParams.w) - 1;
-      for (int i = 0; i < 3; ++i) weights[i] = i == 0 ? 1.0 : 0.0;
-      for (int i = 0; i < 6; ++i) sampleIndices[i] = 0;
+      for (int i = 0; i < 3; ++i) {
+        weights[i] = i == 0 ? 1.0 : 0.0;
+      }
+      for (int i = 0; i < 6; ++i) {
+        sampleIndices[i] = 0;
+      }
     }
     bool contributing[3];
-    for (int i = 0; i < 3; ++i) contributing[i] = weights[i] > 0.0;
-    vec3 positionDx = dFdx(position), positionDy = dFdy(position);
+    for (int i = 0; i < 3; ++i) {
+      contributing[i] = weights[i] > 0.0;
+    }
+    vec3 positionDx = dFdx(position);
+    vec3 positionDy = dFdy(position);
     vec3 frameTangent = terrainTangent(shadingNormal);
     vec3 frameBitangent = cross(shadingNormal, frameTangent);
-    vec3 albedo = vec3(0.0);
+    ComposedSurface surface;
+    surface.albedo = vec3(0.0);
+    surface.normal = vec3(0.0);
+    surface.roughness = 0.0;
+    surface.ao = 0.0;
     vec3 meanColor = vec3(0.0);
-    vec3 normal = vec3(0.0);
-    float roughness = 0.0;
-    float ao = 0.0;
     for (int projection = 0; projection < 3; ++projection) {
       float axisWeight = axisWeights[projection];
-      if (axisWeight <= 0.0) continue;
-      vec2 uv = vec2(position.x, -position.z);
-      vec2 uvDx = vec2(positionDx.x, -positionDx.z);
-      vec2 uvDy = vec2(positionDy.x, -positionDy.z);
-      vec3 tangent = frameTangent;
-      if (projection == 0) {
-        float direction = referenceNormal.x < 0.0 ? -1.0 : 1.0;
-        uv = vec2(-direction * position.z, position.y);
-        uvDx = vec2(-direction * positionDx.z, positionDx.y);
-        uvDy = vec2(-direction * positionDy.z, positionDy.y);
-        tangent = projectionTangent(vec3(0.0, 0.0, -direction), vec3(direction, 0.0, 0.0), shadingNormal);
-      } else if (projection == 2) {
-        float direction = referenceNormal.z < 0.0 ? -1.0 : 1.0;
-        uv = vec2(direction * position.x, position.y);
-        uvDx = vec2(direction * positionDx.x, positionDx.y);
-        uvDy = vec2(direction * positionDy.x, positionDy.y);
-        tangent = projectionTangent(vec3(direction, 0.0, 0.0), vec3(0.0, 0.0, direction), shadingNormal);
+      if (axisWeight <= 0.0) {
+        continue;
       }
+      ProjectionFrame frame = projectionFrame(projection, position, positionDx, positionDy,
+                                              referenceNormal, shadingNormal, frameTangent);
       // Fetch each contributing material's color/height once. Pure endpoints
       // cannot acquire a previously absent layer during height blending.
       for (int i = 0; i < 3; ++i) {
         if (contributing[i]) {
           float scale = materialParams[layers[i]].x;
-          vec3 coord = vec3(uv * scale, float(layers[i]));
-          albedoHeights[i] = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
+          vec3 coord = vec3(frame.uv * scale, float(layers[i]));
+          albedoHeights[i] = textureGrad(albedoHeightMap, coord, frame.dx * scale, frame.dy * scale);
         }
         weights[i] = 0.0;
       }
@@ -402,82 +501,40 @@ CCProgram vt-compose-fs %{
       for (int i = 0; i < 3; ++i) {
         if (weights[i] > 0.0) {
           float scale = materialParams[layers[i]].x;
-          vec3 coord = vec3(uv * scale, float(layers[i]));
+          vec3 coord = vec3(frame.uv * scale, float(layers[i]));
           vec4 ah = albedoHeights[i];
-          vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
-          vec2 xy = nra.rg * 2.0 - 1.0;
-          albedo += SRGBToLinear(ah.rgb) * (weights[i] * axisWeight);
+          vec4 nra = textureGrad(normalRoughnessAOMap, coord, frame.dx * scale, frame.dy * scale);
+          surface.albedo += SRGBToLinear(ah.rgb) * (weights[i] * axisWeight);
           meanColor += materialParams[layers[i]].yzw * (weights[i] * axisWeight);
-          vec3 detail = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
-          vec3 localNormal = tangent * detail.x + cross(shadingNormal, tangent) * detail.y + shadingNormal * detail.z;
-          normal += localNormal * (weights[i] * axisWeight);
-          roughness += nra.b * (weights[i] * axisWeight);
-          ao += nra.a * (weights[i] * axisWeight);
+          vec3 detail = decodeNormal(nra.rg);
+          vec3 localNormal = frame.tangent * detail.x + frame.bitangent * detail.y + shadingNormal * detail.z;
+          surface.normal += localNormal * (weights[i] * axisWeight);
+          surface.roughness += nra.b * (weights[i] * axisWeight);
+          surface.ao += nra.a * (weights[i] * axisWeight);
         }
       }
     }
     // Decals retain their existing terrain tangent-space convention, including
     // when cached normals are disabled. Only the final output encoding depends on that setting.
-    normal = vec3(dot(normal, frameTangent), dot(normal, frameBitangent), dot(normal, shadingNormal));
+    surface.normal = normalize(vec3(dot(surface.normal, frameTangent), dot(surface.normal, frameBitangent),
+                                    dot(surface.normal, shadingNormal)));
     // Source image rows run along +Z, just like height/splat tiles. This map
     // covers the whole landscape once, including all VT pages and their borders.
     float globalColorStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
     if (globalColorStrength > 0.0) {
-      albedo = applyBiomeColor(albedo, meanColor, globalColorStrength);
+      surface.albedo = applyBiomeColor(surface.albedo, meanColor, globalColorStrength);
     }
-    // Static planar decal composition is cached in RVT. Explicit gradients
-    // remain valid at coverage boundaries and while a page is being refined.
-    vec2 decalDx = dFdx(v_localXZ), decalDy = dFdy(v_localXZ);
-    for (int entry = 0; entry < 512; ++entry) {
-      if (entry >= int(v_decalPage.y)) break;
-      vec4 indices = texelFetch(decalIndexMap, ivec2(entry / 2, int(v_decalPage.x)), 0);
-      vec2 encoded = entry % 2 == 0 ? indices.rg : indices.ba;
-      int i = int(dot(floor(encoded * 255.0 + 0.5), vec2(1.0, 256.0)));
-      vec4 region = decalRegions[i];
-      vec2 decalUV = (v_localXZ - region.xy) / region.z;
-      // Half-open footprints give adjoining decal regions one owner at seams.
-      if (any(lessThan(decalUV, vec2(0.0))) || any(greaterThanEqual(decalUV, vec2(1.0)))) continue;
-      vec3 coord = vec3(decalUV, region.w);
-      vec4 color = textureGrad(decalAlbedoMap, coord, decalDx / region.z, decalDy / region.z);
-      if (color.a <= 0.0) continue;
-      vec4 nra = textureGrad(decalNormalMap, coord, decalDx / region.z, decalDy / region.z);
-      vec4 layer = decalLayerParams[int(region.w)];
-      if (layer.y > 0.0 && layer.z > 0.0) {
-        // The low-resolution decal stores coverage and a blend mask only.
-        // Repeated source materials keep their own texel density in every VT page.
-        int a = int(layer.y) - 1, b = int(layer.z) - 1;
-        vec2 local = v_localXZ - region.xy;
-        float scaleA = materialParams[a].x, scaleB = materialParams[b].x;
-        vec3 uvA = vec3(local * scaleA, float(a)), uvB = vec3(local * scaleB, float(b));
-        vec4 ca = textureGrad(albedoHeightMap, uvA, decalDx * scaleA, decalDy * scaleA);
-        vec4 cb = textureGrad(albedoHeightMap, uvB, decalDx * scaleB, decalDy * scaleB);
-        vec4 na = textureGrad(normalRoughnessAOMap, uvA, decalDx * scaleA, decalDy * scaleA);
-        vec4 nb = textureGrad(normalRoughnessAOMap, uvB, decalDx * scaleB, decalDy * scaleB);
-        float weight = nra.b;
-        color.rgb = mix(ca.rgb * ca.rgb, cb.rgb * cb.rgb, weight) * color.a;
-        nra = mix(na, nb, weight);
-      }
-      vec2 xy = nra.rg * 2.0 - 1.0;
-      vec3 decalNormal = normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
-      // Imprints darken the existing material rather than painting a solid
-      // shoe-shaped brown patch. The stored source is premultiplied linear RGB.
-      vec3 over = albedo * (1.0 - color.a) + color.rgb;
-      vec3 modulated = albedo * (vec3(1.0 - color.a) + color.rgb);
-      albedo = mix(over, modulated, layer.x);
-      normal = normalize(mix(normalize(normal), decalNormal, color.a));
-      roughness = mix(roughness, nra.b, color.a);
-      ao = mix(ao, nra.a, color.a);
-    }
-    normal = normalize(normal);
+    applyDecals(surface);
     if (sourceParams.y > 0.5) {
-      normal = normalize(frameTangent * normal.x + frameBitangent * normal.y + shadingNormal * normal.z);
+      surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +
+                                 shadingNormal * surface.normal.z);
     }
     // Three signed components filter continuously, even when the composed
     // normal points below the horizon. Reuse the otherwise unused albedo alpha.
     // OFF stores tangent space; ON stores terrain-local space. All pages are
     // invalidated together when this convention changes.
-    albedoOut = vec4(albedo, normal.y * 0.5 + 0.5);
-    normalOut = vec4(normal.xz * 0.5 + 0.5, roughness, ao);
+    albedoOut = vec4(surface.albedo, surface.normal.y * 0.5 + 0.5);
+    normalOut = vec4(surface.normal.xz * 0.5 + 0.5, surface.roughness, surface.ao);
   }
   #else
   void main() { gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0); }

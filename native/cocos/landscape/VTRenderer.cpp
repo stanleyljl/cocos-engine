@@ -79,8 +79,8 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
         destroy();
         return false;
     }
-    _dirtySlots.reserve(config::VT_PAGE_COUNT);
-    _pageInstances.reserve(config::VT_PAGE_COUNT);
+    _batchSlots.reserve(config::VT_PAGE_COUNT);
+    _batchInstances.reserve(config::VT_PAGE_COUNT);
     return true;
 }
 
@@ -135,8 +135,8 @@ Vec4 VTRenderer::mapping(VTPageAddress address) const {
     if (slot < 0) {
         return {};
     }
-    const auto &region = _pages.page(static_cast<uint32_t>(slot)).inputs.region;
-    return {region.x, region.y, region.z, static_cast<float>(slot)};
+    const auto region = _pages.region(address);
+    return {region.x, region.z, region.size, static_cast<float>(slot)};
 }
 
 void VTRenderer::requiredSources(ccstd::vector<NodeAddress> &sources) const {
@@ -146,22 +146,6 @@ void VTRenderer::requiredSources(ccstd::vector<NodeAddress> &sources) const {
     for (uint32_t z = 0; z < _cliff.rows; ++z) {
         for (uint32_t x = 0; x < _cliff.columns; ++x) {
             sources.push_back({_cliff.level, x, z});
-        }
-    }
-}
-
-void VTRenderer::resolveSources(TilePagePool &tiles, TilePageResolver &resolver) {
-    syncCliffSources(tiles);
-    for (const uint32_t slot : _pages.activeSlots()) {
-        const auto &page = _pages.page(slot);
-        if (page.state != VirtualTexture::State::DIRTY) {
-            continue;
-        }
-        VTPageInputs inputs;
-        if (resolver.resolvePage(page.address, _debugData.bakeNormalEnabled, inputs)) {
-            _pages.setInputs(slot, inputs);
-        } else {
-            _pages.clearInputs(slot);
         }
     }
 }
@@ -424,7 +408,7 @@ void VTRenderer::setCliffEnabled(bool enabled) {
 }
 
 void VTRenderer::syncCliffSources(TilePagePool &tiles) {
-    if ((!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _debugData.freezeLod || !_material) {
+    if (_cliff.ready || (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _debugData.freezeLod || !_material) {
         return;
     }
     bool ready = true;
@@ -437,7 +421,7 @@ void VTRenderer::syncCliffSources(TilePagePool &tiles) {
             _cliff.sources[z * _cliff.columns + x] = Vec4{region.x, region.z, region.size, static_cast<float>(layer)};
         }
     }
-    if (_cliff.ready || !ready) {
+    if (!ready) {
         return;
     }
     // Publish once, after the entire fixed reference is resident. No per-camera
@@ -481,65 +465,50 @@ bool VTRenderer::valid() const {
                        [](const MipPass &pass) { return pass.pipelineState && pass.framebuffer; });
 }
 
-uint32_t VTRenderer::render(uint32_t maxUpdates) {
-    if (maxUpdates == 0 || _debugData.freezeLod || !valid() || !sourcesReady()) {
+uint32_t VTRenderer::render(TilePagePool &tiles, TilePageResolver &resolver, uint32_t maxUpdates) {
+    if (_debugData.freezeLod || !valid()) {
         return 0;
     }
-    // Only explicitly reserved pages with complete inputs may be composed.
-    // Publish after all mip passes, before committing their new draw bindings.
-    _pages.collectUpdates(_dirtySlots, maxUpdates);
-    if (_dirtySlots.empty()) {
+    syncCliffSources(tiles);
+    if (maxUpdates == 0 || !sourcesReady()) {
         return 0;
     }
-    buildPageBatch();
-    uploadSourceTables();
-    submitPageBatch();
-    // Publish only after ALL levels have been submitted on the same queue.
-    _pages.publish(_dirtySlots);
-    _needsClear = false;
-    return static_cast<uint32_t>(_dirtySlots.size());
-}
-
-void VTRenderer::buildPageBatch() {
-    _pageInstances.clear();
-    for (uint32_t slot : _dirtySlots) {
-        const auto &inputs = _pages.page(slot).inputs;
+    // Source slots can change between batches. Resolve only for this submission,
+    // so no cached input bindings or separate input-readiness state can go stale.
+    _batchSlots.clear();
+    _batchInstances.clear();
+    for (const uint32_t slot : _pages.activeSlots()) {
+        const auto &page = _pages.page(slot);
+        if (page.state == VirtualTexture::State::READY) {
+            continue;
+        }
+        VTPageInputs inputs;
+        if (!resolver.resolvePage(page.address, _debugData.bakeNormalEnabled, inputs)) {
+            continue;
+        }
         const uint32_t decalCount = _decals->collectPageDecals(slot, inputs.region);
-        _pageInstances.push_back({Vec4{static_cast<float>(slot), static_cast<float>(decalCount), 0, 0},
+        _batchSlots.push_back(slot);
+        _batchInstances.push_back({Vec4{static_cast<float>(slot), static_cast<float>(decalCount), 0, 0},
                                   inputs.region, inputs.splatSource});
         std::copy(inputs.normalSources.begin(), inputs.normalSources.end(),
                   _normalSourceData.begin() + slot * config::VT_NORMAL_SOURCE_COUNT);
+        if (_batchInstances.size() == maxUpdates) {
+            break;
+        }
     }
-}
-
-void VTRenderer::uploadSourceTables() {
+    if (_batchSlots.empty()) {
+        return 0;
+    }
     _decals->uploadPageDecals();
     gfx::BufferTextureCopy indexCopy;
     indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, config::VT_PAGE_COUNT, 1};
     const uint8_t *normalBytes[]{reinterpret_cast<const uint8_t *>(_normalSourceData.data())};
     Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSources, &indexCopy, 1);
-}
 
-void VTRenderer::recordPagePass(Material *material, gfx::PipelineState *pipelineState,
-                                gfx::Framebuffer *framebuffer, uint32_t atlasSize) {
-    const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 0.5F, 1, 1}};
-    _commands->beginRenderPass(_needsClear ? _initialPass.get() : renderPass(), framebuffer,
-                               gfx::Rect{0, 0, atlasSize, atlasSize}, colors, 1.0F, 0);
-    auto *pass = material->getPasses()->front().get();
-    _commands->bindPipelineState(pipelineState);
-    _commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), pass->getDescriptorSet());
-    _commands->bindInputAssembler(_inputAssembler);
-    auto draw = _inputAssembler->getDrawInfo();
-    draw.instanceCount = static_cast<uint32_t>(_pageInstances.size());
-    _commands->draw(draw);
-    _commands->endRenderPass();
-}
-
-void VTRenderer::submitPageBatch() {
     _material->getPasses()->front()->update();
     _commands->begin();
-    _commands->updateBuffer(_instances, _pageInstances.data(),
-                            static_cast<uint32_t>(_pageInstances.size() * sizeof(PageInstance)));
+    _commands->updateBuffer(_instances, _batchInstances.data(),
+                            static_cast<uint32_t>(_batchInstances.size() * sizeof(PageInstance)));
     recordPagePass(_material, _pipelineState, framebuffer(), config::VT_ATLAS_SIZE);
 
     // Generate mip1 from mip0, then mip2 from mip1 for exactly the same slots.
@@ -553,12 +522,29 @@ void VTRenderer::submitPageBatch() {
     auto *device = Root::getInstance()->getDevice();
     device->flushCommands(&command, 1);
     device->getQueue()->submit(&command, 1);
+    // Publish only after composition and ALL mip levels are on the same queue.
+    _pages.publish(_batchSlots);
+    _needsClear = false;
+    return static_cast<uint32_t>(_batchSlots.size());
+}
+
+void VTRenderer::recordPagePass(Material *material, gfx::PipelineState *pipelineState,
+                                gfx::Framebuffer *framebuffer, uint32_t atlasSize) {
+    const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 0.5F, 1, 1}};
+    _commands->beginRenderPass(_needsClear ? _initialPass.get() : renderPass(), framebuffer,
+                               gfx::Rect{0, 0, atlasSize, atlasSize}, colors, 1.0F, 0);
+    auto *pass = material->getPasses()->front().get();
+    _commands->bindPipelineState(pipelineState);
+    _commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), pass->getDescriptorSet());
+    _commands->bindInputAssembler(_inputAssembler);
+    auto draw = _inputAssembler->getDrawInfo();
+    draw.instanceCount = static_cast<uint32_t>(_batchInstances.size());
+    _commands->draw(draw);
+    _commands->endRenderPass();
 }
 
 void VTRenderer::destroy() {
-    _cliff.texture = nullptr;
-    _cliff.sources.clear();
-    _cliff.ready = false;
+    _cliff = {};
     _normalSources = nullptr;
     _normalSourceData.clear();
     _decals = nullptr;
@@ -593,8 +579,8 @@ void VTRenderer::destroy() {
     _atlas = nullptr;
     _sampler = nullptr;
     _pages = VirtualTexture{};
-    _dirtySlots.clear();
-    _pageInstances.clear();
+    _batchSlots.clear();
+    _batchInstances.clear();
     _needsClear = true;
 }
 } // namespace landscape

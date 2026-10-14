@@ -19,8 +19,7 @@ struct VTPageAddress {
     uint64_t key() const { return makeNodeKey(level, x, z); }
 };
 
-// Resolved inputs for one material page, shared by source lookup, the cache,
-// and the compose pass. These are shader records, not VT addresses or slots.
+// Resolved shader records for one material-page composition.
 struct VTPageInputs {
     Vec4 region;      // output page: landscape-local XZ origin, size, unused
     Vec4 splatSource; // input tile: landscape-local XZ origin, size, array layer
@@ -64,30 +63,28 @@ private:
 // The working set includes BOTH displayed and candidate leaves until commit.
 class VirtualTexture {
 public:
-    enum class State { EMPTY,
-                       DIRTY,
-                       READY };
+    enum class State {
+        EMPTY,
+        DIRTY, // No composed pixels yet.
+        READY,
+        STALE, // Needs recomposition; previous pixels remain drawable.
+    };
     struct Page {
         VTPageAddress address;
-        VTPageInputs inputs;
         State state{State::EMPTY};
         uint64_t lastRequested{0};
-        bool inputsResolved{false};
-        bool published{false};
     };
     bool init(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
     bool reserve(const ccstd::vector<VTPageAddress> &pages);
     const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
     const Page &page(uint32_t slot) const { return _pages[slot]; }
-    void setInputs(uint32_t slot, const VTPageInputs &inputs);
-    void collectUpdates(ccstd::vector<uint32_t> &slots, uint32_t budget) const;
+    LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
     void publish(const ccstd::vector<uint32_t> &slots);
     void invalidate();
     bool ready() const;
     size_t capacity() const { return _pages.size(); }
-    void clearInputs(uint32_t slot) { _pages[slot].inputsResolved = false; }
-    bool needsSources(VTPageAddress address) const;
+    bool needsComposition(VTPageAddress address) const;
     uint64_t revision() const { return _revision; }
     // Exact address only. An absent/unpublished page is an error at draw time.
     int resolve(VTPageAddress address) const;

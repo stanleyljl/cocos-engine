@@ -21,8 +21,9 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
     const compiledBase = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
     const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/builtin-landscape.effect'), 'utf8');
     const extract = name => {
-        const start = source.indexOf(name === 'lodPalette' ? 'vec3 lodPalette(' : 'void SurfacesFragmentModifySharedData(');
+        const start = source.indexOf(name + '(');
         assert.ok(start >= 0);
+        const declaration = source.lastIndexOf('\n', start) + 1;
         let end = source.indexOf('{', start) + 1, depth = 1;
         while (depth && end < source.length) {
             if (source[end] === '{') depth++;
@@ -30,9 +31,16 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
             end++;
         }
         assert.equal(depth, 0);
-        return source.slice(start, end);
+        return source.slice(declaration, end);
     };
-    const shaderFunctions = ['lodPalette', 'SurfacesFragmentModifySharedData'].map(extract).join('\n');
+    const shaderFunctions = [
+        'virtualTextureCoordinates',
+        'sampleVirtualTexture',
+        'decodeTerrainNormal',
+        'applyTerrainNormalFrame',
+        'lodPalette',
+        'SurfacesFragmentModifySharedData',
+    ].map(extract).join('\n');
     const harness = fs.readFileSync(path.join(__dirname, 'rvt-normal-baking.webgl.js'), 'utf8');
     const prefix = path.join(os.tmpdir(), 'landscape-rvt-normal-test-');
     const directory = fs.mkdtempSync(prefix);
