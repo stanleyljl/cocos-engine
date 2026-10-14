@@ -194,9 +194,7 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
         "splatmap",
         "albedoHeightMap",
         "normalRoughnessAOMap",
-        "tilingParams",
-        "globalColorMap",
-        "globalColorParams",
+        "materialParams",
         "heightBlendParams",
         "terrainNormalMap",
         "normalSourceMap",
@@ -217,13 +215,10 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     bindComposeTexture("terrainHeightMap", tiles.heightArray(), tiles.heightSampler());
     bindComposeTexture("albedoHeightMap", materials.albedoHeight(), materials.repeatSampler());
     bindComposeTexture("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.repeatSampler());
-    _fallbackGlobalColorMap = materials.whiteTexture();
-    _globalColorSampler = materials.clampSampler();
-    bindComposeTexture("globalColorMap", _fallbackGlobalColorMap, _globalColorSampler);
-    _globalColorParams = Vec4{1.0F / data.width(),
-                              1.0F / data.depth(), 0.0F, 0.0F};
-    _material->setPropertyVec4("globalColorParams", _globalColorParams);
-    _material->setPropertyVec4Array("tilingParams", materials.tilingParams());
+    if (!_biomeMap.init(_material, data.width(), data.depth(), materials.whiteTexture(), materials.clampSampler())) {
+        return false;
+    }
+    _material->setPropertyVec4Array("materialParams", materials.materialParams());
     _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
                                                 static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
                                                 device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
@@ -368,31 +363,16 @@ bool VTRenderer::initCommandResources(gfx::Device *device) {
 }
 
 void VTRenderer::setGlobalColorMap(Texture2D *texture) {
-    if (!_material) {
-        return;
+    if (_biomeMap.setColorMap(texture)) {
+        invalidateComposedPages();
     }
-    _globalColorMap = texture;
-    auto *gfxTexture = texture ? texture->getGFXTexture() : nullptr;
-    _hasGlobalColorMap = gfxTexture != nullptr;
-    bindComposeTexture("globalColorMap", gfxTexture ? gfxTexture : _fallbackGlobalColorMap.get(), _globalColorSampler);
-    _globalColorParams.z = _hasGlobalColorMap ? _globalColorStrength : 0.0F;
-    _material->setPropertyVec4("globalColorParams", _globalColorParams);
-    invalidateComposedPages();
 }
 
 void VTRenderer::setGlobalColorStrength(float strength) {
-    if (!_material) {
-        return;
+    if (_biomeMap.setColorStrength(strength)) {
+        // Preserve cached pages while frozen; apply edits when updates resume.
+        invalidateComposedPages();
     }
-    _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
-    const float effectiveStrength = _hasGlobalColorMap ? _globalColorStrength : 0.0F;
-    if (_globalColorParams.z == effectiveStrength) {
-        return;
-    }
-    _globalColorParams.z = effectiveStrength;
-    _material->setPropertyVec4("globalColorParams", _globalColorParams);
-    // Preserve the cached image while frozen; apply edits when updates resume.
-    invalidateComposedPages();
 }
 
 void VTRenderer::invalidateComposedPages() {
@@ -584,12 +564,7 @@ void VTRenderer::destroy() {
     _decals = nullptr;
     _debugData.freezeLod = false;
     _pendingInvalidation = false;
-    _hasGlobalColorMap = false;
-    _globalColorMap = nullptr;
-    _fallbackGlobalColorMap = nullptr;
-    _globalColorSampler = nullptr;
-    _globalColorStrength = 0.0F;
-    _globalColorParams = Vec4{};
+    _biomeMap.destroy();
     _commands = nullptr;
     _pipelineState = nullptr;
     for (auto &mip : _mipPasses) {

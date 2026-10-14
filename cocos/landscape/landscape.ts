@@ -274,8 +274,8 @@ export class Landscape extends Component {
     private _queryCacheCapacity = 64;
 
     /** Independent CPU tile budget, set before enabling terrain. At 129x129,
-     * 64 tiles hold about 7.1 MiB of height/RGB normals/splat data, plus at most
-     * two in-flight decodes and their temporary memory. No GPU allocation.
+     * 64 tiles hold about 7.1 MiB of height/RGB normals/splat data, excluding
+     * worker decode memory. Tiles are released with their last source. No GPU allocation.
      */
     @editable
     @range([1, 4096, 1])
@@ -461,7 +461,7 @@ export class Landscape extends Component {
         this._lodQualityScale = value;
     }
 
-    /** Optional non-repeating tint texture covering the whole landscape; white leaves materials unchanged. */
+    /** Optional non-repeating biome base color covering the landscape, without baked lighting. */
     @editable
     @type(Texture2D)
     @displayOrder(1)
@@ -479,7 +479,7 @@ export class Landscape extends Component {
         }
     }
 
-    /** Strength of the global map's multiplicative tint on the tiled materials. */
+    /** Blend toward the biome base color while preserving the tiled materials' light/dark detail. */
     @editable
     @displayOrder(10)
     @range([0, 1, 0.01])

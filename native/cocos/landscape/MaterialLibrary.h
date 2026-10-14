@@ -53,8 +53,8 @@ public:
     gfx::Texture *whiteTexture() const { return _whiteTexture; }
     gfx::Sampler *repeatSampler() const { return _repeatSampler; }
     gfx::Sampler *clampSampler() const { return _clampSampler; }
-    // Shared shader layout, built once from the loaded material layers.
-    const ccstd::vector<Vec4> &tilingParams() const { return _tilingParams; }
+    // Shared shader layout: repeats/m in X, mean linear material RGB in YZW.
+    const ccstd::vector<Vec4> &materialParams() const { return _materialParams; }
 
 private:
     bool initMaterialLayers(gfx::Device *device, const LandscapeAsset &asset);
@@ -70,7 +70,7 @@ private:
     IntrusivePtr<gfx::Texture> _decalHeight;
     gfx::Sampler *_repeatSampler{nullptr}; // cached by device
     gfx::Sampler *_clampSampler{nullptr}; // cached by device
-    ccstd::vector<Vec4> _tilingParams;
+    ccstd::vector<Vec4> _materialParams;
 };
 
 } // namespace landscape

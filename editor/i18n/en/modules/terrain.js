@@ -25,10 +25,10 @@ module.exports = {
                         tooltip: 'Fast removes triangles at vertices; HighQuality clips fragments. Both follow source LOD. Unsupported vertex culling uses HighQuality.',
                     },
                     globalColorMap: {
-                        tooltip: 'A global tint map covering the entire terrain, multiplied with material base colors. White preserves the original colors; other colors darken or tint them. Without a map, the original layer colors are used.',
+                        tooltip: 'Biome base color covering the entire terrain. Use an unlit color map without baked shadows. Replaces the average material color while preserving texture detail; can lighten, darken or recolor the terrain. Without a map, the original layer colors are used.',
                     },
                     globalColorStrength: {
-                        tooltip: 'Global tint strength: 0 uses the original layer colors; 1 fully multiplies material base colors by the global map colors. Defaults to 0.1. Has no effect without a global map.',
+                        tooltip: 'Biome color influence: 0 uses the original layer colors; 1 maps the average material color to the biome color while retaining texture detail. Defaults to 0.1. Has no effect without a global map.',
                     },
                 },
             },

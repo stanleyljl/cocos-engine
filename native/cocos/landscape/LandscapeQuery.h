@@ -1,10 +1,9 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 #pragma once
 
-#include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeData.h"
@@ -18,7 +17,7 @@ enum class LandscapeQueryStatus : uint32_t {
     MISS,
     NOT_READY,
     ERROR,
-    OUT_OF_CAPACITY // Requested region and other sources' pinned tiles exceed the cache budget.
+    OUT_OF_CAPACITY // Requested region and other sources' tiles exceed the capacity.
 };
 
 struct LandscapeSurfaceResult {
@@ -36,21 +35,24 @@ struct LandscapeQueryTile {
     ccstd::vector<uint8_t> splat;
 };
 
-// Sources pin rectangular regions of CPU tiles, independently of rendering.
-// Only unpinned tiles can be evicted. All cache/source changes happen on the
-// main thread; workers only deliver results through the lifetime-safe queue.
+// Sources reference rectangular regions of CPU tiles, independently of rendering.
+// Public methods run on the main thread. Workers only fill their own tile;
+// update() publishes completed data, and removeSource() deletes unreferenced tiles.
 class LandscapeQuery final {
 public:
     using Completion = std::function<void(LandscapeQueryTile, bool)>;
+    // Invoke the completion exactly once, on any thread, including inline.
     using Loader = std::function<void(uint32_t, uint32_t, Completion)>;
     LandscapeQuery(const LandscapeData &data, Loader loader, uint32_t capacity = 64);
     ~LandscapeQuery();
     // Inputs and returned positions are landscape-local; Landscape converts world space.
-    LandscapeQueryStatus setSource(uint32_t id, LandscapePoint center, float radius);
+    // Adding an existing id moves its region, preserving overlapping tiles.
+    // Invalid, out-of-bounds or over-capacity requests leave the old source unchanged.
+    LandscapeQueryStatus addSource(uint32_t id, LandscapePoint center, float radius);
     void removeSource(uint32_t id);
-    LandscapeQueryStatus sourceStatus(uint32_t id) const;
+    LandscapeQueryStatus getSourceStatus(uint32_t id) const;
     void update();
-    LandscapeSurfaceResult sample(LandscapePoint local);
+    LandscapeSurfaceResult sample(LandscapePoint local) const;
 
 private:
     // Inclusive tile indices at minTileLevel. A source needs no allocated key
@@ -72,63 +74,25 @@ private:
             }
         }
     };
-    enum class TileState {
-        WAITING,
-        LOADING,
-        READY,
-        FAILED
-    };
-    struct CachedTile {
+    struct Tile {
         LandscapeQueryTile data;
-        TileState state{TileState::WAITING};
-        uint32_t pinCount{0};
-        uint64_t lastUse{0};
-        uint64_t loadId{0}; // Distinguishes an evicted/re-requested tile's loads.
-    };
-    struct CompletedLoad {
-        uint64_t key;
-        uint64_t loadId;
-        LandscapeQueryTile data;
-        bool success;
-    };
-    struct CompletionQueue {
-        std::mutex mutex;
-        ccstd::vector<CompletedLoad> results;
+        uint32_t references{0};
+        LandscapeQueryStatus status{LandscapeQueryStatus::NOT_READY};
+        // The worker writes data, then publishes it with release ordering.
+        // Only after an acquire read may the main thread consume the bytes.
+        std::atomic<bool> loaded{false};
     };
 
-    struct SampleLocation {
-        std::array<size_t, 4> texels;
-        float fx{0};
-        float fz{0};
-    };
-
-    // Region admission and cache ownership. Admission is checked before pins
-    // change, so a request can never evict another source's resident tiles.
+    // Check capacity before changing references; other sources retain their tiles.
     LandscapeQueryStatus resolveRegion(LandscapePoint center, float radius, TileRegion &region) const;
     bool canAdmit(const TileRegion &region, const TileRegion *previous) const;
-    void pinRegion(const TileRegion &region);
-    void evictUnusedTile(const TileRegion &protectedRegion);
-
-    // One update publishes completed loads, then fills the available IO slots.
-    void acceptCompletedLoads();
-    void startPendingLoads();
-
-    // Sampling only reads resident bytes; it never submits loading work.
-    SampleLocation locateSample(LandscapePoint local, NodeAddress tile) const;
-    bool sampleGeometry(const LandscapeQueryTile &tile, const SampleLocation &location,
-                        LandscapePoint local, LandscapeSurfaceResult &result) const;
-    static void sampleMaterial(const LandscapeQueryTile &tile, const SampleLocation &location, LandscapeSurfaceResult &result);
 
     LandscapeData _data;
     Loader _loader;
     uint32_t _capacity;
     float _tileSize;
-    uint64_t _clock{0};
-    uint64_t _nextLoadId{0};
-    uint32_t _inFlight{0};
     ccstd::unordered_map<uint32_t, TileRegion> _sources;
-    ccstd::unordered_map<uint64_t, CachedTile> _cache;
-    std::shared_ptr<CompletionQueue> _completions;
+    ccstd::unordered_map<uint64_t, std::shared_ptr<Tile>> _tiles;
 };
 
 } // namespace landscape

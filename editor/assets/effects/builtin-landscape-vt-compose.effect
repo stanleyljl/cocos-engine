@@ -23,7 +23,7 @@ CCEffect %{
         cliffMaterialParams: { value: [0, 1, 0, 0] }
         cliffSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
         terrainHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
-        tilingParams: { value: [0.1, 0, 0, 0] }
+        materialParams: { value: [0.1, 0.5, 0.5, 0.5] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
         decalRegions: { value: [0, 0, 1, 0] }
@@ -134,7 +134,7 @@ CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
     vec4 sourceParams; // tile resolution, bake terrain normals, unused ZW
-    vec4 tilingParams[32]; // repeats/m, unused YZW (uniform array alignment)
+    vec4 materialParams[32]; // repeats/m, mean linear material RGB
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
     vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
@@ -212,6 +212,20 @@ CCProgram vt-compose-fs %{
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
 
+  vec3 applyBiomeColor(vec3 albedo, vec3 meanColor, float strength) {
+    // The map supplies the target mean, rather than a darkening multiplier.
+    // Remap [0, mean, 1] to [0, target, 1] independently in linear RGB. This
+    // preserves texture variation on both sides of the mean without clipping
+    // bright details when the target is lighter than the original material.
+    vec2 uv = v_localXZ * globalColorParams.xy;
+    vec3 target = SRGBToLinear(texture(globalColorMap, uv).rgb);
+    vec3 detail = albedo - meanColor;
+    vec3 belowMean = target / max(meanColor, vec3(0.000001));
+    vec3 aboveMean = (vec3(1.0) - target) / max(vec3(1.0) - meanColor, vec3(0.000001));
+    vec3 recolored = target + detail * mix(belowMean, aboveMean, step(vec3(0.0), detail));
+    return mix(albedo, recolored, strength);
+  }
+
   float heightBlend(float weight, float height0, float height1) {
     // Delta Force (GDC 2025, slide 66). Use the same height blending at
     // every page resolution; only the height-blending setting selects linear blending.
@@ -252,14 +266,15 @@ CCProgram vt-compose-fs %{
     ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
     vec2 f = pixel - vec2(origin);
     int page = int(v_source.w);
-    // Match the importer's 00->11 diagonal. Only three integer splat fetches.
-    bool lowerTriangle = f.x >= f.y;
-    ivec2 third = lowerTriangle ? ivec2(1, 0) : ivec2(0, 1);
-    uvec3 splatSamples = uvec3(texelFetch(splatmap, ivec3(origin, page), 0).r,
-      texelFetch(splatmap, ivec3(origin + third, page), 0).r,
-      texelFetch(splatmap, ivec3(origin + ivec2(1, 1), page), 0).r);
-    vec3 spatialWeights = lowerTriangle ? vec3(1.0-f.x, f.x-f.y, f.y)
-      : vec3(1.0-f.y, f.y-f.x, f.x);
+    // A--B / C--D (+X right, +Z down): B-C matches Terrain, physics and import.
+    // Fetch B, C and the remaining corner A or D. Only three integer fetches.
+    bool firstTriangle = f.x + f.y <= 1.0;
+    ivec2 corner = firstTriangle ? origin : origin + ivec2(1, 1);
+    uvec3 splatSamples = uvec3(texelFetch(splatmap, ivec3(origin + ivec2(1, 0), page), 0).r,
+      texelFetch(splatmap, ivec3(origin + ivec2(0, 1), page), 0).r,
+      texelFetch(splatmap, ivec3(corner, page), 0).r);
+    vec3 spatialWeights = firstTriangle ? vec3(f.x, f.y, 1.0-f.x-f.y)
+      : vec3(1.0-f.y, 1.0-f.x, f.x+f.y-1.0);
     int ids[6];
     int minId = 31;
     int maxId = 0;
@@ -338,6 +353,7 @@ CCProgram vt-compose-fs %{
     vec3 frameTangent = terrainTangent(shadingNormal);
     vec3 frameBitangent = cross(shadingNormal, frameTangent);
     vec3 albedo = vec3(0.0);
+    vec3 meanColor = vec3(0.0);
     vec3 normal = vec3(0.0);
     float roughness = 0.0;
     float ao = 0.0;
@@ -365,7 +381,7 @@ CCProgram vt-compose-fs %{
       // cannot acquire a previously absent layer during height blending.
       for (int i = 0; i < 3; ++i) {
         if (contributing[i]) {
-          float scale = tilingParams[layers[i]].x;
+          float scale = materialParams[layers[i]].x;
           vec3 coord = vec3(uv * scale, float(layers[i]));
           albedoHeights[i] = textureGrad(albedoHeightMap, coord, uvDx * scale, uvDy * scale);
         }
@@ -385,12 +401,13 @@ CCProgram vt-compose-fs %{
       }
       for (int i = 0; i < 3; ++i) {
         if (weights[i] > 0.0) {
-          float scale = tilingParams[layers[i]].x;
+          float scale = materialParams[layers[i]].x;
           vec3 coord = vec3(uv * scale, float(layers[i]));
           vec4 ah = albedoHeights[i];
           vec4 nra = textureGrad(normalRoughnessAOMap, coord, uvDx * scale, uvDy * scale);
           vec2 xy = nra.rg * 2.0 - 1.0;
           albedo += SRGBToLinear(ah.rgb) * (weights[i] * axisWeight);
+          meanColor += materialParams[layers[i]].yzw * (weights[i] * axisWeight);
           vec3 detail = normalize(vec3(xy, sqrt(max(1.0-dot(xy,xy), 0.0))));
           vec3 localNormal = tangent * detail.x + cross(shadingNormal, tangent) * detail.y + shadingNormal * detail.z;
           normal += localNormal * (weights[i] * axisWeight);
@@ -406,9 +423,7 @@ CCProgram vt-compose-fs %{
     // covers the whole landscape once, including all VT pages and their borders.
     float globalColorStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
     if (globalColorStrength > 0.0) {
-      vec2 globalUV = v_localXZ * globalColorParams.xy;
-      vec3 globalColor = SRGBToLinear(texture(globalColorMap, globalUV).rgb);
-      albedo *= mix(vec3(1.0), globalColor, globalColorStrength);
+      albedo = applyBiomeColor(albedo, meanColor, globalColorStrength);
     }
     // Static planar decal composition is cached in RVT. Explicit gradients
     // remain valid at coverage boundaries and while a page is being refined.
@@ -432,7 +447,7 @@ CCProgram vt-compose-fs %{
         // Repeated source materials keep their own texel density in every VT page.
         int a = int(layer.y) - 1, b = int(layer.z) - 1;
         vec2 local = v_localXZ - region.xy;
-        float scaleA = tilingParams[a].x, scaleB = tilingParams[b].x;
+        float scaleA = materialParams[a].x, scaleB = materialParams[b].x;
         vec3 uvA = vec3(local * scaleA, float(a)), uvB = vec3(local * scaleB, float(b));
         vec4 ca = textureGrad(albedoHeightMap, uvA, decalDx * scaleA, decalDy * scaleA);
         vec4 cb = textureGrad(albedoHeightMap, uvB, decalDx * scaleB, decalDy * scaleB);

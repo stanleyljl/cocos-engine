@@ -78,7 +78,8 @@ try {
   let checks=0;
   const close=(a,b,label,tolerance=2)=>{if(a.some((v,i)=>Math.abs(v-b[i])>tolerance))throw new Error(label+': '+a+' vs '+b);checks++;};
   const expected=(pairs,x=.5,y=.5)=>{
-    const spatial=x>=y?[1-x,x-y,0,y]:[1-y,0,y-x,x], w=new Array(8).fill(0);
+    const spatial = x + y <= 1 ? [1-x-y, x, y, 0] : [0, 1-y, 1-x, x+y-1];
+    const w = new Array(8).fill(0);
     pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/31);w[b]+=spatial[i]*t/31;});
     return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(128,128,255,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
   };
@@ -89,11 +90,11 @@ try {
   const quadrants = [[255,0,0,255],[0,255,0,255],[0,0,255,255],[255,255,255,255]];
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(quadrants.flat()));
   constants[136]=1/8;constants[137]=1/4;constants[138]=1;
-  const baseColor=expected(repeat([0,0,0])).slice(0,3);
+  // A constant material equals its mean; full biome influence yields the target color.
   for(let z=0;z<2;z++)for(let x=0;x<2;x++){
     const tint=quadrants[z*2+x];
     close(render(repeat([0,0,0]),{x:2+x*4,y:1+z*2,span:.01}).slice(0,3),
-      baseColor.map((v,c)=>v*tint[c]/255),'global color at local quadrant '+x+','+z,2);
+      tint.slice(0,3).map(v=>255*(v/255)**2),'global color at local quadrant '+x+','+z,2);
   }
   gl.activeTexture(gl.TEXTURE3);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
@@ -107,7 +108,7 @@ try {
   close(render(pairs,{scale:64}),render(pairs),'height blending retained at coarse footprint');
   close(render(repeat([0,1,16])),expected(repeat([1,1,31])),'higher material covers lower');
   close(render(repeat([0,1,16])),render(repeat([1,0,15])),'pair reversal');
-  const repeated=[[0,1,31],[0,2,10],[3,0,25],[0,1,0]];
+  const repeated = [[0,1,31],[0,1,31],[0,2,10],[3,0,25]];
   close(render(repeated,{strength:0}),expected(repeated),'first duplicate has zero weight');
   close(render(repeated,{x:0,y:0}),expected(repeat([1,1,0])),'zero spatial weights');
   // Both cells share the right/left edge but have unrelated outer corners.
@@ -124,11 +125,23 @@ try {
     close(render(q,{x,y}),render(swapped,{x,y}),'random pair symmetry '+n);
   }
 
-  const a=[[0,1,15],[1,2,10],[6,7,5],[0,2,25]];
-  const b=a.map(v=>v.slice());b[2]=[3,4,30];
-  close(render(a,{x:.75,y:.25}),render(b,{x:.75,y:.25}),'lower triangle ignores fourth texel',0);
-  a[1]=[5,6,10];a[2]=[1,2,16];b[1]=[3,4,0];b[2]=[1,2,16];
-  close(render(a,{x:.25,y:.75}),render(b,{x:.25,y:.75}),'upper triangle ignores fourth texel',0);
+  // B-C is shared; changing D cannot affect ABC, and changing A cannot affect BCD.
+  const a = [[0,1,15],[1,2,10],[0,2,25],[6,7,5]];
+  const b = a.map(v => v.slice());
+  b[3] = [3,4,30];
+  close(render(a, {x:.25, y:.25}), render(b, {x:.25, y:.25}), 'ABC ignores D', 0);
+  a[0] = [5,6,10];
+  b[0] = [3,4,0];
+  a[3] = [0,1,16];
+  b[3] = [0,1,16];
+  close(render(a, {x:.75, y:.75}), render(b, {x:.75, y:.75}), 'BCD ignores A', 0);
+  const pureCorners = [[0,0,0],[1,1,0],[2,2,0],[3,3,0]];
+  close(render(pureCorners, {strength:0, x:.5, y:.5}), expected(pureCorners), 'B-C midpoint uses only B C');
+  close(render(pureCorners, {strength:0, x:.2, y:.3}), expected(pureCorners,.2,.3), 'ABC barycentric weights');
+  close(render(pureCorners, {strength:0, x:.8, y:.7}), expected(pureCorners,.8,.7), 'BCD barycentric weights');
+  for (const [x,y] of [[0,0],[1,0],[0,1],[1,1]]) {
+    close(render(pureCorners, {strength:0,x,y}), expected(pureCorners,x,y), 'corner '+x+','+y);
+  }
   const diagonal=[[0,1,6],[1,2,15],[0,2,22],[0,1,26]];
   close(render(diagonal,{x:.49999,y:.5}),render(diagonal,{x:.50001,y:.5}),'diagonal continuity');
 

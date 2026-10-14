@@ -128,7 +128,7 @@ void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
     logLodRanges(*asset, *quadtree);
 
     // Create the empty CPU cache with the other runtime objects. Tile I/O
-    // starts only after a query source is registered and update() runs.
+    // starts when addSource() registers the first reference to a tile.
     auto query = std::make_unique<LandscapeQuery>(asset->data(),
         [this](uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
             _asset->requestQueryTile(x, z, std::move(completion));
@@ -249,7 +249,7 @@ uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, floa
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
     }
     const auto &origin = _node->getWorldPosition();
-    return static_cast<uint32_t>(_query->setSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
+    return static_cast<uint32_t>(_query->addSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
 }
 
 void Landscape::removeQuerySource(uint32_t id) {
@@ -259,7 +259,7 @@ void Landscape::removeQuerySource(uint32_t id) {
 }
 
 uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
-    return static_cast<uint32_t>(_query ? _query->sourceStatus(id) : LandscapeQueryStatus::NOT_READY);
+    return static_cast<uint32_t>(_query ? _query->getSourceStatus(id) : LandscapeQueryStatus::NOT_READY);
 }
 
 uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array output) {

@@ -88,11 +88,11 @@ void sampling() {
     LandscapeQuery q(data(), loading.loader(), 8);
     require(q.sample({4, 2}).status == Status::NOT_READY, "cold query must not load");
     require(loading.requests == 0, "query triggered I/O");
-    require(q.setSource(1, {4, 2}, 4) == Status::NOT_READY, "preload should be pending");
+    require(q.addSource(1, {4, 2}, 4) == Status::NOT_READY, "preload should be pending");
     q.update();
-    require(loading.jobs.size() == 2, "decode concurrency must be bounded");
+    require(loading.jobs.size() == 8, "all referenced tiles must be submitted without query scheduling");
     loading.drain(q);
-    require(q.sourceStatus(1) == Status::HIT, "region ready");
+    require(q.getSourceStatus(1) == Status::HIT, "region ready");
     auto hit = q.sample({0.75F, 0.25F});
     require(hit.status == Status::HIT, "sample hit");
     close(hit.position.y, 87.5F, "bilinear height and height bias");
@@ -109,7 +109,7 @@ void sampling() {
     require(q.sample({8.01F, 4}).status == Status::MISS, "outside should miss");
     const auto loaded = loading.requests;
     q.removeSource(1);
-    require(q.sample({4, 2}).status == Status::HIT, "unpinned data retained until evicted");
+    require(q.sample({4, 2}).status == Status::NOT_READY, "last source removal must unload data immediately");
     q.update();
     require(loading.requests == loaded, "queries must not schedule new work");
 }
@@ -117,36 +117,36 @@ void sampling() {
 void budgetAndSharing() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 2);
-    q.setSource(1, {1, 1}, 0);
-    q.setSource(2, {1, 1}, 0);
-    q.setSource(3, {3, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
+    q.addSource(2, {1, 1}, 0);
+    q.addSource(3, {3, 1}, 0);
     loading.drain(q);
     require(loading.requests == 2, "overlapping sources share decoding");
-    require(q.setSource(4, {5, 1}, 0) == Status::OUT_OF_CAPACITY, "pinned capacity must reject admission");
+    require(q.addSource(4, {5, 1}, 0) == Status::OUT_OF_CAPACITY, "pinned capacity must reject admission");
     q.update();
     require(loading.requests == 2, "rejected source must not trigger I/O");
     q.removeSource(1);
-    require(q.setSource(4, {5, 1}, 0) == Status::OUT_OF_CAPACITY, "second owner must still protect tile");
+    require(q.addSource(4, {5, 1}, 0) == Status::OUT_OF_CAPACITY, "second owner must still protect tile");
     q.removeSource(2);
-    require(q.setSource(4, {5, 1}, 0) == Status::NOT_READY, "released capacity admits pending source");
+    require(q.addSource(4, {5, 1}, 0) == Status::NOT_READY, "released capacity admits pending source");
     loading.drain(q);
-    require(q.sample({1, 1}).status == Status::NOT_READY, "unpinned old tile evicted");
+    require(q.sample({1, 1}).status == Status::NOT_READY, "unreferenced old tile removed");
     require(q.sample({3, 1}).status == Status::HIT, "other source preserved");
     require(q.sample({5, 1}).status == Status::HIT, "new source admitted");
-    require(q.setSource(9, {4, 2}, 100000) == Status::OUT_OF_CAPACITY, "huge region bounded");
+    require(q.addSource(9, {4, 2}, 100000) == Status::OUT_OF_CAPACITY, "huge region bounded");
     q.update();
     require(loading.requests == 3, "oversized region must not trigger I/O");
-    require(q.setSource(9, {5, 1}, 0) == Status::HIT, "shrunk region shares resident tiles at capacity");
-    require(q.setSource(9, {4, 2}, -1) == Status::ERROR, "negative radius rejected");
-    require(q.setSource(9, {103, 101}, 1) == Status::MISS, "non-overlapping region");
+    require(q.addSource(9, {5, 1}, 0) == Status::HIT, "shrunk region shares resident tiles at capacity");
+    require(q.addSource(9, {4, 2}, -1) == Status::ERROR, "negative radius rejected");
+    require(q.addSource(9, {103, 101}, 1) == Status::MISS, "non-overlapping region");
 }
 
 void completionLifetime() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
-    q.setSource(1, {5, 1}, 0);
+    q.addSource(1, {5, 1}, 0);
     q.update();
     require(loading.jobs.size() == 2, "two outstanding generations");
     loading.finish();
@@ -160,7 +160,7 @@ void completionLifetime() {
     require(q.sample({5, 1}).status == Status::HIT, "worker result published on update");
     {
         LandscapeQuery temporary(data(), loading.loader(), 1);
-        temporary.setSource(1, {1, 1}, 0);
+        temporary.addSource(1, {1, 1}, 0);
         temporary.update();
     }
     loading.finish(); // Must safely drop results after destruction.
@@ -169,18 +169,18 @@ void completionLifetime() {
 void failureAndSplat() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
     loading.finish(false);
     q.update();
-    require(q.sourceStatus(1) == Status::ERROR && q.sample({1, 1}).status == Status::ERROR, "failed load distinguished from miss");
+    require(q.getSourceStatus(1) == Status::ERROR && q.sample({1, 1}).status == Status::ERROR, "failed load distinguished from miss");
     q.removeSource(1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     loading.drain(q);
-    require(q.sourceStatus(1) == Status::HIT, "new registration retries failed data");
+    require(q.getSourceStatus(1) == Status::HIT, "new registration retries failed data");
     Loading splatLoader;
     LandscapeQuery splat(data(), splatLoader.loader(), 1);
-    splat.setSource(1, {1, 1}, 0);
+    splat.addSource(1, {1, 1}, 0);
     splat.update();
     auto t = tile(0, 0);
     for (const auto &pair : {std::pair<size_t, uint16_t>{0, 3}, {1, 7}, {3, 11}, {4, 13}}) {
@@ -191,13 +191,31 @@ void failureAndSplat() {
     splat.update();
     const auto hit = splat.sample({0.75F, 0.25F});
     require(hit.surfaceType == 7, "splat triangle interpolation");
-    close(hit.surfaceWeight, 0.5F, "splat spatial weights");
+    close(hit.surfaceWeight, 0.75F, "B-C diagonal material weights");
+    const auto first = splat.sample({0.1F, 0.2F});
+    require(first.surfaceType == 3, "first triangle uses A B C");
+    close(first.surfaceWeight, 0.7F, "first triangle material weight");
+    const auto second = splat.sample({0.8F, 0.7F});
+    require(second.surfaceType == 13, "second triangle uses B C D");
+    close(second.surfaceWeight, 0.5F, "second triangle material weight");
+    const auto diagonal = splat.sample({0.5F, 0.5F});
+    require(diagonal.surfaceType == 7, "B-C edge blends B C with deterministic tie");
+    close(diagonal.surfaceWeight, 0.5F, "B-C edge weight");
+    for (const auto &point : {LandscapePoint{0.74999F, 0.25F}, LandscapePoint{0.75001F, 0.25F}}) {
+        const auto edge = splat.sample(point);
+        require(edge.surfaceType == 7, "material is continuous across B-C diagonal");
+        close(edge.surfaceWeight, 0.75F, "continuous B-C weight");
+    }
+    require(splat.sample({0, 0}).surfaceType == 3, "material corner A");
+    require(splat.sample({1, 0}).surfaceType == 7, "material corner B");
+    require(splat.sample({0, 1}).surfaceType == 11, "material corner C");
+    require(splat.sample({1, 1}).surfaceType == 13, "material corner D");
 }
 
 void triangleHeight() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
     auto t = tile(0, 0);
     for (const auto &pair : {std::pair<size_t, uint16_t>{0, 100}, {1, 102}, {3, 104}, {4, 110}}) {
@@ -215,7 +233,7 @@ void triangleHeight() {
 void holes() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
     auto t = tile(0, 0);
     uint16_t hole = 0x8000U | 3U | (7U << 5U) | (10U << 10U);
@@ -223,7 +241,7 @@ void holes() {
     loading.jobs.front().complete(std::move(t), true);
     loading.jobs.pop_front();
     q.update();
-    require(q.sourceStatus(1) == Status::HIT, "hole does not make residency unready");
+    require(q.getSourceStatus(1) == Status::HIT, "hole does not make residency unready");
     require(q.sample({0.25F, 0.25F}).status == Status::MISS, "hole cell misses");
     require(q.sample({0.99F, 0.99F}).status == Status::MISS, "both triangles in hole miss");
     require(q.sample({1.25F, 0.25F}).status == Status::HIT, "adjacent solid cell survives");
@@ -235,7 +253,7 @@ void malformedAndRapidMovement() {
         for (int delta : {-1, 1}) {
             Loading loading;
             LandscapeQuery q(data(), loading.loader(), 1);
-            q.setSource(1, {1, 1}, 0);
+            q.addSource(1, {1, 1}, 0);
             q.update();
             auto damaged = tile(0, 0);
             auto &bytes = channel == 0 ? damaged.height : channel == 1 ? damaged.splat
@@ -244,20 +262,19 @@ void malformedAndRapidMovement() {
             loading.jobs.front().complete(std::move(damaged), true);
             loading.jobs.pop_front();
             q.update();
-            require(q.sourceStatus(1) == Status::ERROR, "wrong decoded channel size must fail");
+            require(q.getSourceStatus(1) == Status::ERROR, "wrong decoded channel size must fail");
             require(q.sample({1, 1}).status == Status::ERROR, "malformed bytes must not be sampled");
             q.removeSource(1);
-            q.setSource(1, {1, 1}, 0);
+            q.addSource(1, {1, 1}, 0);
             loading.drain(q);
-            require(q.sourceStatus(1) == Status::HIT, "valid retry after malformed decode");
+            require(q.getSourceStatus(1) == Status::HIT, "valid retry after malformed decode");
         }
     }
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
     for (uint32_t i = 0; i < 1000; ++i) {
-        q.setSource(1, {float((i % 4) * 2 + 1), 1}, 0);
+        q.addSource(1, {float((i % 4) * 2 + 1), 1}, 0);
         q.update();
-        require(loading.jobs.size() <= 2, "rapid movement exceeded decode concurrency");
         if (i % 7 == 0 && !loading.jobs.empty()) {
             // Finish newest first to exercise out-of-order delivery.
             auto job = std::move(loading.jobs.back());
@@ -265,9 +282,9 @@ void malformedAndRapidMovement() {
             job.complete(tile(job.x, job.z), true);
         }
     }
-    q.setSource(1, {7, 1}, 0);
+    q.addSource(1, {7, 1}, 0);
     loading.drain(q);
-    require(q.sourceStatus(1) == Status::HIT, "latest source must recover after rapid cancellation");
+    require(q.getSourceStatus(1) == Status::HIT, "latest source must recover after rapid cancellation");
     close(q.sample({7, 1}).position.y, 750, "latest generation height");
     require(q.sample({-0.001F, 0}).status == Status::MISS, "near negative X edge");
     require(q.sample({0, -0.001F}).status == Status::MISS, "near negative Z edge");
@@ -277,14 +294,15 @@ void malformedAndRapidMovement() {
 
 void benchmark() {
     auto d = data();
-    d.sectorsX = d.sectorsZ = 8;
+    d.sectorsX = 8;
+    d.sectorsZ = 8;
     d.maxLevel = 2;
     d.sectorSize = 8;
     Loading loading;
     LandscapeQuery q(d, loading.loader(), 64);
-    q.setSource(1, {8, 8}, 4);
+    q.addSource(1, {8, 8}, 4);
     loading.drain(q);
-    q.setSource(2, {24, 24}, 2);
+    q.addSource(2, {24, 24}, 2);
     loading.drain(q);
     double checksum = 0;
     const auto measure = [&](const char *name, uint32_t count, auto operation) {
@@ -295,13 +313,13 @@ void benchmark() {
         std::cout << "{\"case\":\"" << name << "\",\"iterations\":" << count << ",\"ms\":" << ms << "}\n";
     };
     measure("stationary_source", 100000, [&](uint32_t) {
-        checksum += uint32_t(q.setSource(1, {8, 8}, 4));
+        checksum += uint32_t(q.addSource(1, {8, 8}, 4));
     });
     measure("resident_sample", 500000, [&](uint32_t i) {
         checksum += q.sample({6.1F + (i % 30) * .1F, 6.3F}).position.y;
     });
     measure("moving_source", 10000, [&](uint32_t i) {
-        checksum += uint32_t(q.setSource(1, {float((i * 17) % 56 + 4), float((i * 29) % 56 + 4)}, 4));
+        checksum += uint32_t(q.addSource(1, {float((i * 17) % 56 + 4), float((i * 29) % 56 + 4)}, 4));
         loading.drain(q);
     });
     std::cout << "checksum=" << checksum << " requests=" << loading.requests << '\n';
@@ -310,56 +328,61 @@ void benchmark() {
 void regionOwnership() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 3);
-    q.setSource(1, {2, 1}, .9F); // X tiles 0, 1.
-    q.setSource(2, {1, 1}, 0);   // Another owner of tile 0.
+    q.addSource(1, {2, 1}, .9F); // X tiles 0, 1.
+    q.addSource(2, {1, 1}, 0);   // Another owner of tile 0.
     loading.drain(q);
-    q.setSource(1, {4, 1}, .9F); // X tiles 1, 2; releases only its own old pin.
+    q.addSource(1, {4, 1}, .9F); // X tiles 1, 2; releases only its own old pin.
     loading.drain(q);
-    require(q.sourceStatus(1) == Status::HIT && q.sourceStatus(2) == Status::HIT, "overlapping region move must fit");
+    require(q.getSourceStatus(1) == Status::HIT && q.getSourceStatus(2) == Status::HIT, "overlapping region move must fit");
+    require(loading.requests == 3, "moving source must retain overlapping tiles");
     const auto requests = loading.requests;
-    q.setSource(1, {4.05F, 1}, .9F);
+    q.addSource(1, {4.05F, 1}, .9F);
     loading.drain(q);
     require(loading.requests == requests, "unchanged tile rectangle must not reload");
-    require(q.setSource(1, {6, 2}, .9F) == Status::OUT_OF_CAPACITY, "other owner's tile prevents oversized union");
-    require(q.sourceStatus(2) == Status::HIT, "capacity refusal must preserve other source");
-    q.setSource(3, {7, 1}, 0);
+    require(q.addSource(1, {6, 2}, .9F) == Status::OUT_OF_CAPACITY, "other owner's tile prevents oversized union");
+    require(q.getSourceStatus(2) == Status::HIT, "capacity refusal must preserve other source");
+    require(q.getSourceStatus(1) == Status::HIT, "capacity refusal must preserve the moving source");
+    require(q.sample({3, 1}).status == Status::HIT && q.sample({5, 1}).status == Status::HIT, "rejected move preserves old tiles");
+    require(q.addSource(3, {7, 1}, 0) == Status::OUT_OF_CAPACITY, "rejected move must retain its capacity reservation");
+    q.removeSource(1);
+    q.addSource(3, {7, 1}, 0);
     loading.drain(q);
-    require(q.sourceStatus(3) == Status::HIT, "rejected moving source must release its old pins");
+    require(q.getSourceStatus(3) == Status::HIT, "explicit removal releases the old source's capacity");
 
     Loading retained;
     LandscapeQuery cache(data(), retained.loader(), 2);
-    cache.setSource(1, {3, 1}, 0);
+    cache.addSource(1, {3, 1}, 0);
     retained.drain(cache);
-    cache.setSource(2, {5, 1}, 0);
+    cache.addSource(2, {5, 1}, 0);
     retained.drain(cache);
     cache.removeSource(1);
     cache.removeSource(2);
     const auto before = retained.requests;
-    cache.setSource(3, {2, 1}, .9F);
+    cache.addSource(3, {2, 1}, .9F);
     retained.drain(cache);
-    require(retained.requests == before + 1, "inserting first tile must not evict the later requested cached tile");
-    require(cache.sourceStatus(3) == Status::HIT, "full incoming region retained");
+    require(retained.requests == before + 2, "removed tiles must load again on registration");
+    require(cache.getSourceStatus(3) == Status::HIT, "full incoming region retained");
 }
 
 void reusedKeyAndConcurrentDestruction() {
     Loading loading;
     LandscapeQuery q(data(), loading.loader(), 1);
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
-    q.setSource(1, {3, 1}, 0);
+    q.addSource(1, {3, 1}, 0);
     q.update();
-    q.setSource(1, {1, 1}, 0);
+    q.addSource(1, {1, 1}, 0);
     q.update();
-    require(loading.jobs.size() == 2, "eviction must not release outstanding load slots");
+    require(loading.jobs.size() == 3, "a re-requested key must have an independent load");
     loading.finish(false);
     q.update(); // Failure belongs to the old load of the SAME key.
-    require(q.sourceStatus(1) == Status::NOT_READY, "old failure must not poison re-requested key");
+    require(q.getSourceStatus(1) == Status::NOT_READY, "old failure must not poison re-requested key");
     loading.drain(q);
-    require(q.sourceStatus(1) == Status::HIT, "new load of reused key must publish");
+    require(q.getSourceStatus(1) == Status::HIT, "new load of reused key must publish");
     for (uint32_t i = 0; i < 64; ++i) {
         Loading pending;
         auto temporary = std::make_unique<LandscapeQuery>(data(), pending.loader(), 1);
-        temporary->setSource(1, {1, 1}, 0);
+        temporary->addSource(1, {1, 1}, 0);
         temporary->update();
         auto job = std::move(pending.jobs.front());
         pending.jobs.pop_front();
@@ -368,6 +391,134 @@ void reusedKeyAndConcurrentDestruction() {
         });
         temporary.reset();
         worker.join();
+    }
+}
+
+void directLifecycle() {
+    Loading loading;
+    LandscapeQuery q(data(), loading.loader(), 2);
+    q.removeSource(123);
+    require(q.getSourceStatus(123) == Status::NOT_READY, "unknown source status");
+    q.addSource(1, {2, 1}, .9F);
+    require(loading.requests == 2, "addSource starts both tile loads");
+    q.addSource(2, {2, 1}, .9F);
+    require(loading.requests == 2, "loading tiles are shared between sources");
+    q.removeSource(1);
+    loading.finish();
+    require(q.sample({1, 1}).status == Status::NOT_READY, "completion waits for update publication");
+    q.update();
+    require(q.sample({1, 1}).status == Status::HIT, "completed tile can be sampled independently");
+    require(q.getSourceStatus(2) == Status::NOT_READY, "whole source waits for all tiles");
+    loading.finish(false);
+    q.update();
+    require(q.getSourceStatus(2) == Status::ERROR, "a partial failure marks the source failed");
+    require(q.sample({1, 1}).status == Status::HIT, "partial failure preserves valid tile");
+    require(q.addSource(2, {2, 1}, .9F) == Status::ERROR, "unchanged source does not retry failed tiles");
+    require(loading.requests == 2, "unchanged source does not submit more work");
+    q.removeSource(2);
+    q.removeSource(2);
+    require(q.sample({1, 1}).status == Status::NOT_READY, "repeated removal is harmless");
+    q.addSource(3, {2, 1}, .9F);
+    loading.drain(q);
+    require(loading.requests == 4, "released ready and failed tiles both reload");
+    require(q.getSourceStatus(3) == Status::HIT, "reloaded source ready");
+
+    q.addSource(3, {4, 1}, .9F);
+    require(loading.requests == 5, "moving at exact capacity loads only the new tile");
+    require(q.sample({1, 1}).status == Status::NOT_READY, "movement immediately releases old tile");
+    require(q.sample({3, 1}).status == Status::HIT, "movement retains ready overlap");
+    q.removeSource(3);
+    loading.drain(q);
+    require(q.sample({5, 1}).status == Status::NOT_READY, "late completion cannot resurrect removed tile");
+
+    size_t inlineRequests = 0;
+    LandscapeQuery synchronous(data(), [&inlineRequests](uint32_t x, uint32_t z, LandscapeQuery::Completion done) {
+        ++inlineRequests;
+        done(tile(x, z), true);
+    }, 1);
+    require(synchronous.addSource(1, {1, 1}, 0) == Status::NOT_READY, "inline completion follows update publication");
+    synchronous.update();
+    require(synchronous.getSourceStatus(1) == Status::HIT, "inline completion published");
+    for (uint32_t i = 0; i < 1000; ++i) {
+        synchronous.addSource(1, {1, 1}, 0);
+        synchronous.update();
+    }
+    synchronous.removeSource(1);
+    require(inlineRequests == 1 && synchronous.sample({1, 1}).status == Status::NOT_READY, "same region must not leak references");
+
+    auto invalid = data();
+    invalid.tileResolution = 0;
+    LandscapeQuery invalidQuery(invalid, loading.loader());
+    require(invalidQuery.addSource(1, {1, 1}, 0) == Status::ERROR, "invalid terrain rejects source");
+    require(invalidQuery.sample({1, 1}).status == Status::ERROR, "invalid terrain rejects sample");
+    invalidQuery.update();
+}
+
+void rejectedSourceUpdates() {
+    // A rejected update must preserve both pending loads and resident data.
+    for (bool resident : {false, true}) {
+        Loading loading;
+        LandscapeQuery q(data(), loading.loader(), 2);
+        q.addSource(1, {1, 1}, 0);
+        q.addSource(2, {3, 1}, 0);
+        if (resident) {
+            loading.drain(q);
+        }
+        const auto originalStatus = resident ? Status::HIT : Status::NOT_READY;
+        const auto requests = loading.requests;
+        const auto pending = loading.jobs.size();
+        const auto unchanged = [&] {
+            require(q.getSourceStatus(1) == originalStatus, "rejected update preserves source status");
+            require(q.sample({1, 1}).status == originalStatus, "rejected update preserves original data");
+            require(q.getSourceStatus(2) == originalStatus, "rejected update preserves other source");
+            require(loading.requests == requests && loading.jobs.size() == pending, "rejected update leaves I/O unchanged");
+        };
+        require(q.addSource(1, {1, 1}, -1) == Status::ERROR, "invalid radius rejects update");
+        unchanged();
+        require(q.addSource(1, {100, 100}, 1) == Status::MISS, "outside region rejects update");
+        unchanged();
+        require(q.addSource(1, {4, 2}, 100) == Status::OUT_OF_CAPACITY, "oversized region rejects update");
+        unchanged();
+        require(q.addSource(1, {6, 1}, .9F) == Status::OUT_OF_CAPACITY, "union with other sources rejects update");
+        unchanged();
+        require(q.addSource(3, {5, 1}, 0) == Status::OUT_OF_CAPACITY, "rejected source retains references");
+        unchanged();
+        loading.drain(q);
+        require(q.sample({1, 1}).status == Status::HIT, "preserved pending load still completes");
+        q.removeSource(1);
+        require(q.sample({1, 1}).status == Status::NOT_READY, "explicit removal releases preserved references");
+        require(q.addSource(3, {5, 1}, 0) == Status::NOT_READY, "explicit removal frees capacity");
+        loading.drain(q);
+        require(q.getSourceStatus(3) == Status::HIT, "new source can use released capacity");
+    }
+}
+
+void concurrentPublication() {
+    for (uint32_t iteration = 0; iteration < 64; ++iteration) {
+        Loading loading;
+        LandscapeQuery q(data(), loading.loader(), 8);
+        q.addSource(1, {4, 2}, 4);
+        std::atomic<bool> done{false};
+        std::thread worker([&] {
+            while (!loading.jobs.empty()) {
+                loading.finish();
+                std::this_thread::yield();
+            }
+            done.store(true, std::memory_order_release);
+        });
+        do {
+            q.update();
+            const auto hit = q.sample({1, 1});
+            require(hit.status == Status::NOT_READY || hit.status == Status::HIT, "concurrent publication status");
+            if (hit.status == Status::HIT) {
+                close(hit.position.y, 150, "published data is complete");
+            }
+        } while (!done.load(std::memory_order_acquire));
+        worker.join();
+        q.update();
+        require(q.getSourceStatus(1) == Status::HIT, "all concurrent completions published");
+        q.removeSource(1);
+        require(q.sample({1, 1}).status == Status::NOT_READY, "concurrently loaded tiles released");
     }
 }
 
@@ -385,5 +536,8 @@ int main(int argc, char **argv) {
     malformedAndRapidMovement();
     regionOwnership();
     reusedKeyAndConcurrentDestruction();
+    directLifecycle();
+    rejectedSourceUpdates();
+    concurrentPublication();
     std::cout << "Landscape CPU query tests passed\n";
 }

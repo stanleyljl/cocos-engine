@@ -24,6 +24,7 @@
 #pragma once
 
 #include "core/Root.h"
+#include "landscape/BiomeMap.h"
 #include "landscape/Landscape.h"
 #include "landscape/VirtualTexture.h"
 
@@ -153,12 +154,7 @@ private:
     ccstd::vector<PageInstance> _pageInstances;
     bool _needsClear{true};
     bool _pendingInvalidation{false};
-    bool _hasGlobalColorMap{false};
-    IntrusivePtr<Texture2D> _globalColorMap;
-    IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
-    gfx::Sampler *_globalColorSampler{nullptr}; // cached by device
-    float _globalColorStrength{0.0F};
-    Vec4 _globalColorParams;
+    BiomeMap _biomeMap;
 };
 } // namespace landscape
 } // namespace cc

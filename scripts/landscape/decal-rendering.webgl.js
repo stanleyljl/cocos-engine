@@ -43,7 +43,8 @@ try {
   const normals=Array.from({length:8},(_,i)=>[128,128,20+i*25,230-i*20]);
   const ah=tex('albedoHeightMap',1,gl.TEXTURE_2D_ARRAY); gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(colors.flat()));
   const nra=tex('normalRoughnessAOMap',2,gl.TEXTURE_2D_ARRAY); gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(normals.flat()));
-  tex('globalColorMap',3,gl.TEXTURE_2D); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
+  const biomeTexture = tex('globalColorMap',3,gl.TEXTURE_2D);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
   const decalColor=tex('decalAlbedoMap',4,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,32,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:32},()=>[50,25,10,128]).flat()));
   tex('decalNormalMap',5,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,32,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:32},()=>[190,90,128,255]).flat()));
   const decalIndices=tex('decalIndexMap',9,gl.TEXTURE_2D);
@@ -62,13 +63,13 @@ try {
   if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete framebuffer');
   gl.viewport(0,0,1,1);
   const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
-  const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0}={})=>{
+  const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0,meanColor=null}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2192],0,0);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
-    for(let i=0;i<32;i++) constants.set([scale,...(colors[i%8].slice(0,3).map(v=>(v/255)**2))],8+i*4);
+    for(let i=0;i<32;i++) constants.set([scale,...(meanColor || colors[i%8].slice(0,3).map(v=>(v/255)**2))],8+i*4);
     constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
@@ -79,7 +80,8 @@ try {
   let checks=0;
   const close=(a,b,label,tolerance=2)=>{if(a.some((v,i)=>Math.abs(v-b[i])>tolerance))throw new Error(label+': '+a+' vs '+b);checks++;};
   const expected=(pairs,x=.5,y=.5)=>{
-    const spatial=x>=y?[1-x,x-y,0,y]:[1-y,0,y-x,x], w=new Array(8).fill(0);
+    const spatial = x + y <= 1 ? [1-x-y, x, y, 0] : [0, 1-y, 1-x, x+y-1];
+    const w = new Array(8).fill(0);
     pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/31);w[b]+=spatial[i]*t/31;});
     return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(255,128,128,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
   };
@@ -93,7 +95,7 @@ try {
   close(render(pairs,{scale:64}),render(pairs),'height blending retained at coarse footprint');
   close(render(repeat([0,1,16])),expected(repeat([1,1,31])),'higher material covers lower');
   close(render(repeat([0,1,16])),render(repeat([1,0,15])),'pair reversal');
-  const repeated=[[0,1,31],[0,2,10],[3,0,25],[0,1,0]];
+  const repeated = [[0,1,31],[0,1,31],[0,2,10],[3,0,25]];
   close(render(repeated,{strength:0}),expected(repeated),'first duplicate has zero weight');
   close(render(repeated,{x:0,y:0}),expected(repeat([1,1,0])),'zero spatial weights');
   // Both cells share the right/left edge but have unrelated outer corners.
@@ -110,14 +112,77 @@ try {
     close(render(q,{x,y}),render(swapped,{x,y}),'random pair symmetry '+n);
   }
 
-  const a=[[0,1,15],[1,2,10],[6,7,5],[0,2,25]];
-  const b=a.map(v=>v.slice());b[2]=[3,4,30];
-  close(render(a,{x:.75,y:.25}),render(b,{x:.75,y:.25}),'lower triangle ignores fourth texel',0);
-  a[1]=[5,6,10];a[2]=[1,2,16];b[1]=[3,4,0];b[2]=[1,2,16];
-  close(render(a,{x:.25,y:.75}),render(b,{x:.25,y:.75}),'upper triangle ignores fourth texel',0);
+  // B-C is shared; changing D cannot affect ABC, and changing A cannot affect BCD.
+  const a = [[0,1,15],[1,2,10],[0,2,25],[6,7,5]];
+  const b = a.map(v => v.slice());
+  b[3] = [3,4,30];
+  close(render(a, {x:.25, y:.25}), render(b, {x:.25, y:.25}), 'ABC ignores D', 0);
+  a[0] = [5,6,10];
+  b[0] = [3,4,0];
+  a[3] = [0,1,16];
+  b[3] = [0,1,16];
+  close(render(a, {x:.75, y:.75}), render(b, {x:.75, y:.75}), 'BCD ignores A', 0);
+  const pureCorners = [[0,0,0],[1,1,0],[2,2,0],[3,3,0]];
+  close(render(pureCorners, {strength:0, x:.5, y:.5}), expected(pureCorners), 'B-C midpoint uses only B C');
+  close(render(pureCorners, {strength:0, x:.2, y:.3}), expected(pureCorners,.2,.3), 'ABC barycentric weights');
+  close(render(pureCorners, {strength:0, x:.8, y:.7}), expected(pureCorners,.8,.7), 'BCD barycentric weights');
+  for (const [x,y] of [[0,0],[1,0],[0,1],[1,1]]) {
+    close(render(pureCorners, {strength:0,x,y}), expected(pureCorners,x,y), 'corner '+x+','+y);
+  }
   const diagonal=[[0,1,6],[1,2,15],[0,2,22],[0,1,26]];
   close(render(diagonal,{x:.49999,y:.5}),render(diagonal,{x:.50001,y:.5}),'diagonal continuity');
 
+
+  // Exercise biome recoloring through the actual VT composition shader.
+  const setBiomeColor = (color, strength) => {
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, biomeTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([...color, 255]));
+    constants[138] = strength;
+  };
+  const biomeBase = render(repeat([0, 0, 0]));
+  const targetColor = [210, 120, 80];
+  const targetLinear = targetColor.map(v => 255 * (v / 255) ** 2);
+  setBiomeColor(targetColor, 0);
+  close(render(repeat([0, 0, 0])), biomeBase, 'zero biome strength preserves all channels', 0);
+  setBiomeColor(targetColor, 1);
+  for (const id of [0, 2, 7]) {
+    const shaded = render(repeat([id, id, 0]));
+    close(shaded.slice(0, 3), targetLinear, 'biome sets target mean for material ' + id);
+    close(shaded.slice(3), expected(repeat([id, id, 0])).slice(3), 'biome preserves normal roughness AO ' + id);
+  }
+  close(render(pairs, {strength: 0}).slice(0, 3), targetLinear, 'mixed material means use the same blend weights');
+  close(render(left, {x: 1, y: .37}), render(right, {x: 0, y: .37}), 'biome shared tile edge');
+  close(render(diagonal, {x: .49999, y: .5}), render(diagonal, {x: .50001, y: .5}), 'biome diagonal continuity');
+  setBiomeColor(targetColor, 0.5);
+  close(render(repeat([0, 0, 0])).slice(0, 3), targetLinear.map((v, i) => (v + biomeBase[i]) / 2), 'partial biome influence');
+  setBiomeColor([180, 180, 180], 1);
+  const ramp = [32, 64, 128, 192, 240];
+  let previous = -1;
+  for (const value of ramp) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([value, value, value, 0]));
+    const pixel = render(repeat([0, 0, 0]), {meanColor: [0.25, 0.25, 0.25]})[0];
+    if (!(pixel > previous && pixel > 0 && pixel < 255)) {
+      throw new Error('Biome detail must remain ordered without black/white clipping: ' + pixel);
+    }
+    previous = pixel;
+    checks++;
+  }
+  for (const value of [0, 255]) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([value, value, value, 0]));
+    const mean = (value / 255) ** 2;
+    close(render(repeat([0, 0, 0]), {meanColor: [mean, mean, mean]}).slice(0, 3), [180 * 180 / 255, 180 * 180 / 255, 180 * 180 / 255], 'black/white material mean stays defined');
+    const nearEndpoint = ((value === 0 ? 1 : 254) / 255) ** 2;
+    close(render(repeat([0, 0, 0]), {meanColor: [nearEndpoint, nearEndpoint, nearEndpoint]}).slice(0, 3), [value, value, value], 'near-black/white material preserves detail endpoints');
+  }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
+  gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(colors[0]));
+  setBiomeColor([255, 255, 255], 0);
 
   const plain=render(repeat([0,0,0]));
   constants.set([0,0,1,0],144);constants[2192]=1;
