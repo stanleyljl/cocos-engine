@@ -48,7 +48,7 @@ float sampleHeight(vec2 localXZ) {
 #if __VERSION__ >= 300 && USE_INSTANCING
 vec4 terrainVertex(vec2 parentUV) {
   vec2 grid = floor(parentUV * 16.0 + 0.5);
-  int edges = int(a_quadrantInst.w + 0.5);
+  int edges = int(a_mappingInst.y + 0.5);
   // Only the fine side of an actual 2:1 boundary collapses odd vertices.
   // The coarse side remains fixed. This applies identically to color,
   // shadow, wireframe and decal reconstruction, regardless of IO latency.

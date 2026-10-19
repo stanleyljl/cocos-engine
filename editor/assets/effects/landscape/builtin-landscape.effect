@@ -10,11 +10,12 @@ CCEffect %{
         holeParams: { value: [0, 0, 0, 0] }
         holeSplatmap: { sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         terrainParams: { value: [3000, 0, 0, 0] }
-        sectorParams: { value: [1, 0, 0, 0] }
+        sectorParams: { value: [1, 1, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4352, 272, 8, 4] }
         rvtNormalParams: { value: [1, 0, 0, 0] }
+        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -60,7 +61,7 @@ CCProgram landscape-uniforms %{
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
-    vec4 sectorParams; // sector size, unused YZW
+    vec4 sectorParams; // sector size, finest VT page size, unused ZW
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
@@ -121,11 +122,8 @@ CCProgram landscape-vertex %{
   #endif
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_quadrantInst; // UV offset XY, patch UV size Z, coarse-neighbor edge mask W
+    in vec4 a_mappingInst; // local table slot, coarse-neighbor edge mask, unused ZW
     in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
-    #if !LANDSCAPE_SHADOW_PASS
-      in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
-    #endif
   #endif
   #if __VERSION__ >= 300
     uniform highp sampler2DArray heightmap;
@@ -151,9 +149,6 @@ CCProgram landscape-vertex %{
     vec2 localXZ = In.position.xy;
   #if LANDSCAPE_WIREFRAME && !LANDSCAPE_SHADOW_PASS
     float wireCells = 16.0;
-    #if USE_INSTANCING
-      wireCells = a_quadrantInst.z * 16.0;
-    #endif
     // GridMesh uses (a,c,b), (b,c,d). This three-colouring gives each
     // triangle all three barycentric corners without duplicating vertices.
     // Derive from the original lattice so edges follow the final geometry.
@@ -169,12 +164,12 @@ CCProgram landscape-vertex %{
     v_normalUV = vec2(0.5);
     v_normalLayer = 0.0;
     #if USE_INSTANCING
-      v_vtParams = a_vtInst;
+      v_vtParams = vec4(a_gridInst.xyz, a_mappingInst.x);
     #endif
   #endif
   #endif
   #if USE_INSTANCING
-    vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
+    vec2 parentUV = In.position.xy;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     #if !LANDSCAPE_SHADOW_PASS
       v_lod = a_gridInst.w;

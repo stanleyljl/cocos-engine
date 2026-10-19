@@ -9,7 +9,6 @@
 namespace cc::landscape {
 struct LandscapePagingTestAccess {
     using SyncCache = LandscapeRenderer::SyncCache;
-    using StreamingBudget = LandscapeRenderer::StreamingBudget;
     static uint32_t cliffReferenceLevel(const LandscapeData &data) {
         return VTRenderer::cliffReferenceLevel(data);
     }
@@ -103,9 +102,8 @@ void testHeightReservations() {
         layers.insert(entry.second.layer);
     }
     require(layers.size() == 5 && *layers.rbegin() < slots.capacity, "Reserved layers overlap or exceed capacity");
-    auto repeated = transition;
-    repeated.insert(repeated.end(), transition.begin(), transition.end());
-    require(slots.reserve(repeated) && slots.working.size() == 5, "Duplicate requests inflated the budget");
+    require(slots.reserve(transition) && slots.resident(root) == layer && slots.working.size() == 5,
+            "Reserving the same unique working set changed its bindings");
     transition.erase(transition.begin());
     require(slots.reserve(transition), "release retired parent");
     for (const auto n : transition) {
@@ -117,7 +115,7 @@ void testHeightReservations() {
     transition.push_back(root);
     require(slots.reserve(transition), "merge transition cannot make progress");
     require(slots.resident(root) == -1, "Reallocated parent incorrectly inherited old ready state");
-    std::cout << "PASS: exact height slots, capacity, deduplication, readiness and merge headroom\n";
+    std::cout << "PASS: exact height slots, capacity, stable reservations, readiness and merge headroom\n";
 }
 
 void testExactPageLifecycle() {
@@ -432,12 +430,18 @@ void testLocalTransitions() {
         selection.target({{0, x, z, 0, 1}});
         auto resources = [&](const RenderSelection::Change &change) {
             ccstd::vector<NodeAddress> result;
+            ccstd::unordered_set<uint64_t> unique;
+            const auto add = [&](NodeAddress node) {
+                const auto source = node.ancestor(std::max(node.level, d.minTileLevel));
+                if (unique.insert(source.key()).second) {
+                    result.push_back(source);
+                }
+            };
             for (const auto key : selection.leaves()) {
-                auto n = NodeAddress::fromKey(key);
-                result.push_back(n.ancestor(std::max(n.level, d.minTileLevel)));
+                add(NodeAddress::fromKey(key));
             }
-            for (auto n : change.added) {
-                result.push_back(n.ancestor(std::max(n.level, d.minTileLevel)));
+            for (const auto node : change.added) {
+                add(node);
             }
             return result;
         };
@@ -561,7 +565,12 @@ void testIndexedDemand() {
     }
     // Actual visibility traverses committed leaves, independently of targets.
     ccstd::unordered_set<uint64_t> coverage;
-    selection.cull([](NodeAddress) { return true; }, [&](NodeAddress n) { require(coverage.insert(n.key()).second, "Pass coverage overlaps"); });
+    selection.cull([&](NodeAddress n, bool leaf) {
+        if (leaf) {
+            require(coverage.insert(n.key()).second, "Pass coverage overlaps");
+        }
+        return true;
+    });
     require(coverage == selection.leaves(), "Pass selection misses committed coverage");
     std::cout << "PASS: indexed 4096-target demand and committed pass coverage\n";
 }
@@ -575,11 +584,17 @@ void testCommittedVisibility() {
     // The frustum-like box at Y=[1,4] rejects the fine target, not the coarse draw.
     const auto visible = [&](double x0, double z0, double x1, double z1) {
         ccstd::unordered_set<uint64_t> result;
-        selection.cull([&](NodeAddress n) {
+        selection.cull([&](NodeAddress n, bool leaf) {
             const double size = d.nodeSize(n.level);
-            const double lowX = n.x * size, lowZ = n.z * size;
+            const double lowX = n.x * size;
+            const double lowZ = n.z * size;
             const double maxY = n.level == 0 ? 0.0 : 10.0;
-            return lowX < x1 && lowX + size > x0 && lowZ < z1 && lowZ + size > z0 && maxY >= 1.0; }, [&](NodeAddress n) { require(result.insert(n.key()).second, "Duplicate visible leaf"); });
+            const bool intersects = lowX < x1 && lowX + size > x0 && lowZ < z1 && lowZ + size > z0 && maxY >= 1.0;
+            if (intersects && leaf) {
+                require(result.insert(n.key()).second, "Duplicate visible leaf");
+            }
+            return intersects;
+        });
         return result;
     };
     selection.target({}); // The distance/target traversal selected nothing.
@@ -614,26 +629,68 @@ void testCommittedVisibility() {
     const auto shadow = visible(32.25, 32.25, 32.75, 32.75);
     require(shadow.size() == 1 && shadow.count(NodeAddress{5, 1, 1}.key()),
             "Pass visibility leaked the main camera's target selection");
-    uint32_t visited = 0, emitted = 0;
-    selection.cull([&](NodeAddress) { ++visited; return false; }, [&](NodeAddress) { ++emitted; });
-    require(visited == d.sectorsX * d.sectorsZ && emitted == 0,
+    uint32_t visited = 0;
+    selection.cull([&](NodeAddress n, bool leaf) {
+        ++visited;
+        require(n.level == d.maxLevel, "Rejected root still traversed its children");
+        require(leaf == (selection.leaves().count(n.key()) != 0), "Incorrect committed leaf classification");
+        return false;
+    });
+    require(visited == d.sectorsX * d.sectorsZ,
             "Invisible sectors must be pruned without scanning their leaves");
     std::cout << "PASS: actual-cut culling, empty targets, pending refinement, independent passes and subtree pruning\n";
 }
 
 void testStitchedPageBounds() {
     const VTPageLayout layout(4096);
-    // Near-camera patch at x=1, z=0: the top edge can snap x=1 to x=0 even
+    // Near-camera cell at x=1, z=0: the top edge can snap x=1 to x=0 even
     // before the old distance morph threshold. Reproduce the former undersized page.
     const auto unsafe = layout.coveringPage(0, {1, 0}, {2, 1});
     require(unsafe.level == 0 && unsafe.x == 1, "Near-edge regression setup");
-    const auto safe = layout.coveringPatch(0, {0, 0}, 1, 1, 0, 1);
+    const auto horizontalMapping = layout.gridMapping({0, 0, 16}, 0, 0, cc::Vec3{1, 0, 0}, 0);
+    const auto safe = horizontalMapping.pages[horizontalMapping.cells[1]];
     require(safe.level == 1 && safe.x == 0 && safe.z == 0,
             "Near-camera stitching escaped its explicitly planned VT page");
-    const auto vertical = layout.coveringPatch(0, {4096, 4096}, 1, 0, 1, 1);
+    const auto verticalMapping = layout.gridMapping({4096, 4096, 16}, 0, 0, cc::Vec3{4096, 0, 4097}, 0);
+    const auto vertical = verticalMapping.pages[verticalMapping.cells[16]];
     require(vertical.level == 1 && vertical.x == 2048 && vertical.z == 2048,
             "Vertical/cross-sector stitch coverage differs from horizontal coverage");
-    std::cout << "PASS: near-camera VT coverage reserves possible neighbor stitching\n";
+    // Reconstruct page origins exactly as the fragment shader does, across
+    // nodes, distance bands and non-power-of-two sector dimensions.
+    for (const float sectorSize : {1000.0F, 2048.0F, 4096.0F}) {
+        const VTPageLayout localLayout(sectorSize);
+        for (const uint32_t divisions : {1U, 8U, 128U}) {
+            const float size = sectorSize / divisions;
+            const LandscapeRegion region{sectorSize + size, sectorSize + size, size};
+            // The root must remain within its sector as required by gridMapping.
+            const LandscapeRegion node = divisions == 1 ? LandscapeRegion{sectorSize, sectorSize, size} : region;
+            for (const float distance : {0.0F, 10.0F, 100.0F, 10000.0F}) {
+                const auto entries = localLayout.gridMapping(node, 0, 10, {node.x, distance, node.z}, 0);
+                std::unordered_set<uint64_t> unique;
+                for (const auto page : entries.pages) {
+                    require(unique.insert(page.key()).second, "Local mapping contains duplicate page addresses");
+                }
+                for (uint32_t z = 0; z < 16; ++z) {
+                    for (uint32_t x = 0; x < 16; ++x) {
+                        const auto index = entries.cells[z * 16 + x];
+                        require(index < entries.pages.size(), "Local cell references an absent page");
+                        const auto page = entries.pages[index];
+                        const float pageSize = localLayout.pageSize(page.level);
+                        const float cellSize = size / 16;
+                        require(std::floor((node.x + (x + 0.5F) * cellSize) / pageSize) == page.x &&
+                                std::floor((node.z + (z + 0.5F) * cellSize) / pageSize) == page.z,
+                                "Local lookup reconstructed a different page origin");
+                        require(node.x + x * cellSize >= page.x * pageSize &&
+                                node.z + z * cellSize >= page.z * pageSize &&
+                                node.x + (x + 1) * cellSize <= (page.x + 1) * pageSize &&
+                                node.z + (z + 1) * cellSize <= (page.z + 1) * pageSize,
+                                "Local mapping did not cover the complete grid cell");
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "PASS: local grid mappings preserve cell coverage, stitched bounds and shader page origins\n";
 }
 
 void testSyncCache() {
@@ -652,7 +709,7 @@ void testSyncCache() {
         ++pages;
         require(cache.matchesSelection(selected, selected) && cache.matchesPosition(positions),
                 "resource publication must not invalidate unchanged selection or camera state");
-        require(!cache.matches(positions, tiles, pages, selected, selected), "Completed VT pages must refresh direct instance mappings");
+        require(!cache.matches(positions, tiles, pages, selected, selected), "Completed VT pages must refresh local grid mappings");
         cache.store(positions, tiles, pages, selected, selected);
         ++tiles;
         require(!cache.matches(positions, tiles, pages, selected, selected), "Completed source uploads must refresh normals");
@@ -838,25 +895,24 @@ void testAtlasFilterFootprint() {
     std::cout << "PASS: 20000 atlas filter footprints across all mips\n";
 }
 
-void testFrameStreamingBudget() {
-    LandscapePagingTestAccess::StreamingBudget budget;
+void testPageCompositionBudget() {
+    uint32_t remainingPages = config::VT_PAGE_UPDATE_BUDGET;
     VirtualTexture pages;
     require(pages.init(cacheData(3), 16), "streaming budget cache init");
-    require(budget.begin(42, 100.0), "first sync must start a frame budget");
     ccstd::vector<VTPageAddress> active;
     ccstd::vector<uint32_t> updates;
-    uint32_t composed = 0, committed = 0;
+    uint32_t composed = 0;
+    uint32_t committed = 0;
     // Two small transactions finish in one frame. The third stays pending
     // after consuming exactly the remaining pages, preserving earlier bindings.
     for (uint32_t count : {3U, 3U, 4U}) {
-        require(budget.nextStep(100.5), "ready transactions must share one frame");
         for (uint32_t i = 0; i < count; ++i) {
             const auto index = static_cast<uint32_t>(active.size());
             active.push_back({0, index % 8, index / 8});
         }
         require(pages.reserve(active), "transaction reservation failed");
-        collectUpdates(pages, updates, budget.pages);
-        budget.pages -= static_cast<uint32_t>(updates.size());
+        collectUpdates(pages, updates, remainingPages);
+        remainingPages -= static_cast<uint32_t>(updates.size());
         composed += static_cast<uint32_t>(updates.size());
         pages.publish(updates);
         committed += pages.ready();
@@ -864,27 +920,14 @@ void testFrameStreamingBudget() {
     require(composed == 8 && committed == 2 && !pages.ready(), "transactions exceeded the shared eight-page budget");
     require(pages.resolve(active.front()) >= 0 && pages.resolve(active.back()) == -1,
             "partial composition damaged old bindings or published unfinished pages");
-    budget.attempts -= 7;
-    require(!budget.begin(42, 101.0) && budget.pages == 0 && budget.attempts == config::STREAMING_ADMISSION_BUDGET - 7,
-            "another camera replenished the same frame's budgets");
-    collectUpdates(pages, updates, budget.pages);
+    collectUpdates(pages, updates, remainingPages);
     require(updates.empty(), "zero remaining budget still composed pages");
-    require(budget.begin(43, 200.0) && budget.nextStep(200.5), "next frame must resume pending work");
-    collectUpdates(pages, updates, budget.pages);
-    budget.pages -= static_cast<uint32_t>(updates.size());
+    remainingPages = config::VT_PAGE_UPDATE_BUDGET;
+    collectUpdates(pages, updates, remainingPages);
+    remainingPages -= static_cast<uint32_t>(updates.size());
     pages.publish(updates);
-    require(updates.size() == 2 && pages.ready() && budget.pages == 6, "pending transaction did not resume exactly");
-    require(!budget.nextStep(202.0), "time slice expiration must stop further transactions");
-    require(!budget.begin(43, 203.0) && !budget.nextStep(203.0), "same-frame sync bypassed the deadline");
-    require(budget.begin(44, 300.0), "new frame must reset the step budget");
-    budget.pages = 0;
-    for (uint32_t i = 0; i < config::STREAMING_STEP_BUDGET; ++i) {
-        require(budget.nextStep(300.5), "cached transactions must proceed without new page composition");
-    }
-    require(!budget.nextStep(300.5), "cached transactions bypassed the step limit");
-    require(budget.begin(45, 400.0) && budget.nextStep(403.0) && !budget.nextStep(403.0),
-            "an expensive upload/selection must allow one progress step, not unbounded work");
-    std::cout << "PASS: shared frame budget, multiple commits, partial composition, pass reuse and time/step limits\n";
+    require(updates.size() == 2 && pages.ready() && remainingPages == 6, "pending transaction did not resume exactly");
+    std::cout << "PASS: shared page allowance, multiple commits and partial composition\n";
 }
 
 int main() {
@@ -900,7 +943,7 @@ int main() {
     testSyncCache();
     testAtlasFilterFootprint();
     testCoordinateLayouts();
-    testFrameStreamingBudget();
+    testPageCompositionBudget();
     constexpr float sectorSize = 4096.0F;
     const VTPageLayout pageLayout(sectorSize);
     const uint32_t root = pageLayout.rootLevel();
@@ -951,7 +994,9 @@ int main() {
                 for (uint32_t x = 0; x < 16; x += cells) {
                     for (uint32_t desired = 0; desired <= root; ++desired) {
                         for (float sectorOrigin : {0.0F, sectorSize * 3.0F}) {
-                            const auto page = pageLayout.coveringPatch(desired, {sectorOrigin, sectorOrigin}, cell, x, z, cells);
+                            const auto page = pageLayout.coveringPage(desired,
+                                {sectorOrigin + (x - (x & 1U)) * cell, sectorOrigin + (z - (z & 1U)) * cell},
+                                {sectorOrigin + (x + cells) * cell, sectorOrigin + (z + cells) * cell});
                             const float size = pageLayout.pageSize(page.level);
                             for (uint32_t vz = z; vz <= z + cells; ++vz) {
                                 for (uint32_t vx = x; vx <= x + cells; ++vx) {

@@ -3,6 +3,7 @@
   in vec3 v_wireBarycentric;
 #endif
 #if __VERSION__ >= 300
+  uniform sampler2D vtPageMap;
   uniform sampler2D vtAlbedo;
   uniform sampler2D vtNormalRoughnessAO;
   flat in vec4 v_vtParams;
@@ -21,12 +22,21 @@
 #if __VERSION__ >= 300
 void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY,
                                out vec2 atlasUV, out vec2 atlasDX, out vec2 atlasDY) {
-  // Each patch carries one resident mapping covering its complete stitched footprint.
-  vec2 pageUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
+  // One local entry per grid cell; geometry and material resolution are independent.
+  ivec2 cell = ivec2(clamp(floor((localXZ - v_vtParams.xy) * (16.0 / v_vtParams.z)), vec2(0.0), vec2(15.0)));
+  int entry = int(v_vtParams.w + 0.5) * 256 + cell.y * 16 + cell.x;
+  int width = textureSize(vtPageMap, 0).x;
+  vec2 mapping = floor(texelFetch(vtPageMap, ivec2(entry % width, entry / width), 0).rg * 255.0 + 0.5);
+  float pageSize = sectorParams.y * exp2(mapping.y);
+  // Derive the origin from the cell center: a vertex exactly on the node's
+  // outer edge must still sample this cell's page, not the adjacent page.
+  vec2 center = v_vtParams.xy + (vec2(cell) + 0.5) * (v_vtParams.z / 16.0);
+  vec2 pageOrigin = floor(center / pageSize) * pageSize;
+  vec2 pageUV = clamp((localXZ - pageOrigin) / pageSize, vec2(0.0), vec2(1.0));
   float slotsPerSide = vtLayout.x / vtLayout.y;
-  vec2 slot = vec2(mod(v_vtParams.w, slotsPerSide), floor(v_vtParams.w / slotsPerSide));
+  vec2 slot = vec2(mod(mapping.x, slotsPerSide), floor(mapping.x / slotsPerSide));
   atlasUV = (slot * vtLayout.y + vtLayout.z + pageUV * (vtLayout.y - 2.0 * vtLayout.z)) / vtLayout.x;
-  float gradientScale = (vtLayout.y - 2.0 * vtLayout.z) / (vtLayout.x * v_vtParams.z);
+  float gradientScale = (vtLayout.y - 2.0 * vtLayout.z) / (vtLayout.x * pageSize);
   atlasDX = localDX * gradientScale;
   atlasDY = localDY * gradientScale;
 

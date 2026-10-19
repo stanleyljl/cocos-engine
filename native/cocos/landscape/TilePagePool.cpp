@@ -181,15 +181,15 @@ bool TilePagePool::loadReserved(bool synchronous) {
                 return false;
             }
             uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
-        } else {
-            if (_inFlight.size() >= MAX_IN_FLIGHT) {
-                break;
-            }
-            if (!_asset->requestTile(source.level, source.x, source.z, heightFormat)) {
-                return false;
-            }
-            _inFlight.insert(source.key());
+            continue;
         }
+        if (_inFlight.size() >= MAX_IN_FLIGHT) {
+            break;
+        }
+        if (!_asset->requestTile(source.level, source.x, source.z, heightFormat)) {
+            return false;
+        }
+        _inFlight.insert(source.key());
     }
     return !_asset->loadingFailed();
 }
@@ -273,9 +273,21 @@ std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::normal
     return result;
 }
 void TilePageResolver::pageSources(VTPageAddress page, bool bake, ccstd::vector<NodeAddress> &output) const {
-    output.push_back(splatSource(page));
+    // Return each input once, in sampling order. Clamped edge samples and the
+    // non-baked normal path may refer to the same tile many times.
+    const auto append = [&output](NodeAddress source) {
+        const auto duplicate = std::find_if(output.begin(), output.end(), [source](NodeAddress entry) {
+            return entry.key() == source.key();
+        });
+        if (duplicate == output.end()) {
+            output.push_back(source);
+        }
+    };
+    append(splatSource(page));
     const auto normals = normalSources(page, bake);
-    output.insert(output.end(), normals.begin(), normals.end());
+    for (const auto source : normals) {
+        append(source);
+    }
 }
 bool TilePageResolver::resolvePage(VTPageAddress page, bool bake, VTPageInputs &output) const {
     const auto splat = resolve(splatSource(page));

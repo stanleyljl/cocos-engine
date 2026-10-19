@@ -4,7 +4,6 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
-#include "base/std/container/unordered_set.h"
 namespace cc::landscape {
 
 VTPageLayout::VTPageLayout(float sectorSize) : _sectorSize(sectorSize) {
@@ -22,11 +21,57 @@ uint32_t VTPageLayout::levelForDistance(float distance) const {
     return level;
 }
 
-VTPageAddress VTPageLayout::coveringPatch(uint32_t desiredLevel, LandscapePoint origin, float cellSize,
-                                        uint32_t x, uint32_t z, uint32_t cells) const {
-    return coveringPage(desiredLevel,
-                        {origin.x + (x - (x & 1U)) * cellSize, origin.z + (z - (z & 1U)) * cellSize},
-                         {origin.x + (x + cells) * cellSize, origin.z + (z + cells) * cellSize});
+VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, float maxY,
+                                  const Vec3 &camera, uint32_t bias) const {
+    VTGridMapping result;
+    std::array<bool, 256> assigned{};
+    const float cell = region.size / 16.0F;
+    const auto axisDistance = [](float p, float lo, float hi) {
+        return std::max({lo - p, p - hi, 0.0F});
+    };
+    const float dy = axisDistance(camera.y, minY, maxY);
+    for (uint32_t z = 0; z < 16; ++z) {
+        for (uint32_t x = 0; x < 16; ++x) {
+            if (assigned[z * 16 + x]) {
+                continue;
+            }
+            // Evaluate aligned distance bands from eight cells down to one.
+            // This controls page resolution only; the geometry is always whole.
+            for (uint32_t cells = 8; cells > 0; cells /= 2) {
+                const uint32_t left = x / cells * cells;
+                const uint32_t bottom = z / cells * cells;
+                const float loX = region.x + left * cell;
+                const float loZ = region.z + bottom * cell;
+                const float size = cells * cell;
+                const float dx = axisDistance(camera.x, loX, loX + size);
+                const float dz = axisDistance(camera.z, loZ, loZ + size);
+                const uint32_t desired = std::min(_rootLevel, levelForDistance(std::sqrt(dx * dx + dy * dy + dz * dz)) + bias);
+                if (cells > 1 && pageSize(desired) < size) {
+                    continue;
+                }
+                // Odd edge vertices may snap to the preceding even vertex.
+                // Reserve that coverage even before a neighbor changes LOD.
+                const auto page = coveringPage(desired,
+                    {loX - (left & 1U) * cell, loZ - (bottom & 1U) * cell},
+                    {loX + size, loZ + size});
+                const auto found = std::find_if(result.pages.begin(), result.pages.end(), [page](const auto &entry) {
+                    return entry.key() == page.key();
+                });
+                const auto index = static_cast<size_t>(found - result.pages.begin());
+                assert(index < result.cells.size());
+                if (found == result.pages.end()) {
+                    result.pages.push_back(page);
+                }
+                // Fill a whole band once, avoiding repeated distance queries.
+                for (uint32_t row = bottom; row < bottom + cells; ++row) {
+                    std::fill_n(result.cells.begin() + row * 16 + left, cells, static_cast<uint8_t>(index));
+                    std::fill_n(assigned.begin() + row * 16 + left, cells, true);
+                }
+                break;
+            }
+        }
+    }
+    return result;
 }
 
 VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
@@ -41,7 +86,7 @@ VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint m
             return page;
         }
     }
-    assert(false && "A VT patch must not cross sector boundaries");
+    assert(false && "VT coverage must not cross sector boundaries");
     return {};
 }
 
@@ -56,7 +101,9 @@ bool VirtualTexture::init(const LandscapeData &data, uint32_t capacity) {
     return true;
 }
 bool VirtualTexture::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
-    ccstd::unordered_set<uint64_t> unique;
+    if (pages.size() > _pages.size()) {
+        return false;
+    }
     for (const auto p : pages) {
         if (p.level > _layout.rootLevel()) {
             return false;
@@ -65,31 +112,27 @@ bool VirtualTexture::canReserve(const ccstd::vector<VTPageAddress> &pages) const
         if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
             return false;
         }
-        unique.insert(p.key());
     }
-    return unique.size() <= _pages.size();
+    return true;
 }
 bool VirtualTexture::reserve(const ccstd::vector<VTPageAddress> &pages) {
     if (!canReserve(pages)) {
         return false;
     }
-    ++_frame;
+    ++_reservation;
+    // Protect every existing requested page before allocating any replacements.
     _active.clear();
     for (const auto p : pages) {
         const auto it = _lookup.find(p.key());
         if (it != _lookup.end()) {
-            _pages[it->second].lastRequested = _frame;
+            _pages[it->second].lastReserved = _reservation;
         }
     }
-    ccstd::unordered_set<uint64_t> unique;
     for (const auto p : pages) {
-        if (!unique.insert(p.key()).second) {
-            continue;
-        }
         const auto it = _lookup.find(p.key());
         const int slot = it == _lookup.end() ? allocate(p) : static_cast<int>(it->second);
         assert(slot >= 0);
-        _pages[slot].lastRequested = _frame;
+        _pages[slot].lastReserved = _reservation;
         _active.push_back(static_cast<uint32_t>(slot));
     }
     return true;
@@ -103,8 +146,8 @@ int VirtualTexture::allocate(VTPageAddress address) {
             slot = static_cast<int>(i);
             break;
         }
-        if (p.lastRequested != _frame && p.lastRequested < oldest) {
-            oldest = p.lastRequested;
+        if (p.lastReserved != _reservation && p.lastReserved < oldest) {
+            oldest = p.lastReserved;
             slot = static_cast<int>(i);
         }
     }
@@ -124,7 +167,7 @@ int VirtualTexture::allocate(VTPageAddress address) {
 void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
     for (const auto slot : slots) {
         auto &p = _pages[slot];
-        assert(p.lastRequested == _frame && (p.state == State::DIRTY || p.state == State::STALE));
+        assert(p.lastReserved == _reservation && p.needsComposition());
         p.state = State::READY;
     }
     if (!slots.empty()) {
@@ -152,6 +195,6 @@ int VirtualTexture::resolve(VTPageAddress address) const {
         return -1;
     }
     const auto &p = _pages[it->second];
-    return p.lastRequested == _frame && (p.state == State::READY || p.state == State::STALE) ? static_cast<int>(it->second) : -1;
+    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
 }
 } // namespace cc::landscape

@@ -99,7 +99,7 @@ RenderingSubMesh *createGrid(gfx::Device *device, int n) {
 
 RenderingSubMesh *GridMesh::create(gfx::Device *device, uint32_t cells) {
     static_assert((config::VERTS_PER_NODE_SIDE - 1) % 2 == 0,
-                  "CDLOD quadrant mesh requires an even parent quad count");
+                  "CDLOD stitching requires an even node cell count");
     return createGrid(device, static_cast<int>(cells + 1U));
 }
 

@@ -25,10 +25,10 @@
 #include "landscape/LandscapeRenderer.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 
+#include "application/ApplicationManager.h"
 #include "base/Log.h"
 #include "base/Macros.h"
 #include "base/std/container/unordered_set.h"
@@ -46,8 +46,10 @@
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
+#include "renderer/gfx-base/GFXInputAssembler.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "renderer/gfx-base/states/GFXSampler.h"
+#include "renderer/pipeline/InstancedBuffer.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
 
@@ -97,15 +99,13 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
 
     _node = node;
     _scene = scene;
-    for (uint32_t i = 0; i < _meshes.size(); ++i) {
-        _meshes[i] = GridMesh::create(device, 1U << i);
-    }
+    _mesh = GridMesh::create(device, 16);
     const bool heightUnorm = TilePagePool::supportsHeightUnorm(device);
     _materialSolid = createLandscapeMaterial(false, heightUnorm);
     _materialWire = createLandscapeMaterial(true, heightUnorm);
     _decals = std::make_unique<DecalRenderer>();
     const bool decalsReady = _decals->init(node, scene, heightUnorm);
-    if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
+    if (_mesh == nullptr ||
         !decalsReady || _materialSolid == nullptr || _materialWire == nullptr) {
         destroy();
         return false;
@@ -190,6 +190,50 @@ std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
     return {_materialSolid.get(), _materialWire.get(), decals[0], decals[1]};
 }
 
+LandscapeDrawCalls LandscapeRenderer::getDrawCalls(uint32_t frame) const {
+    return _drawCallFrame == frame ? _drawCalls : LandscapeDrawCalls{};
+}
+
+void LandscapeRenderer::estimateDrawCalls(const ccstd::vector<const scene::Model *> &models) {
+    const uint32_t frame = CC_CURRENT_ENGINE()->getTotalFrames();
+    if (_drawCallFrame != frame) {
+        _drawCallFrame = frame;
+        _drawCalls = {};
+    }
+    std::array<const scene::Pass *, 4> basePasses{};
+    const auto materials = surfaceMaterials();
+    for (size_t i = 0; i < materials.size(); ++i) {
+        auto *material = materials[i];
+        if (material && material->getPasses() && !material->getPasses()->empty()) {
+            basePasses[i] = material->getPasses()->front().get();
+        }
+    }
+    // Landscape instances share attributes/textures within each material.
+    // Estimate batches by material, mesh and the engine's instance limit.
+    // This describes visible models, not commands submitted by the pipeline.
+    std::array<ccstd::unordered_map<const gfx::Buffer *, uint32_t>, 4> instances;
+    for (const auto *model : models) {
+        for (const auto &subModel : model->getSubModels()) {
+            const auto *pass = subModel->getPass(0);
+            const auto it = std::find(basePasses.begin(), basePasses.end(), pass);
+            if (it == basePasses.end()) {
+                continue;
+            }
+            const auto index = static_cast<size_t>(it - basePasses.begin());
+            auto &count = index < 2 ? _drawCalls.terrainBase : _drawCalls.decalsBase;
+            if (pass->getBatchingScheme() == scene::BatchingSchemes::INSTANCING) {
+                auto &instanceCount = instances[index][subModel->getInputAssembler()->getIndexBuffer()];
+                if (instanceCount % pipeline::InstancedBuffer::MAX_CAPACITY == 0) {
+                    ++count;
+                }
+                ++instanceCount;
+            } else {
+                ++count;
+            }
+        }
+    }
+}
+
 void LandscapeRenderer::bindRuntimeTextures() {
     // Bind full VT textures with anisotropic mip filtering for terrain and decals.
     auto &vt = *_vtRenderer;
@@ -209,6 +253,7 @@ void LandscapeRenderer::bindRuntimeTextures() {
         setRuntimeTexture("heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
         setRuntimeTexture("terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture("vtAlbedo", vt.albedo(), vt.sampler());
+        setRuntimeTexture("vtPageMap", vt.gridMappings(), _tilePages->splatSampler());
         if (material != _materialSolid.get() && material != _materialWire.get()) {
             setRuntimeTexture("decalHeightMap", _materialLibrary->decalHeight(), _tilePages->heightSampler());
         }
@@ -310,7 +355,7 @@ void LandscapeRenderer::setShowRanges(bool enabled) {
     updateMaterialProperties();
 }
 
-IntrusivePtr<scene::Model> LandscapeRenderer::createModel(uint32_t meshIndex) {
+IntrusivePtr<scene::Model> LandscapeRenderer::createModel() {
     if (Root::getInstance() == nullptr || _node == nullptr || _scene == nullptr) {
         return nullptr;
     }
@@ -323,7 +368,7 @@ IntrusivePtr<scene::Model> LandscapeRenderer::createModel(uint32_t meshIndex) {
     model->setTransform(_node);
     model->setCastShadow(_castShadow);
     model->setReceiveShadow(_receiveShadow);
-    model->initSubModel(0, _meshes[meshIndex], _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
+    model->initSubModel(0, _mesh, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
     model->setEnabled(false);
     model->attachToScene(_scene);
     return model;
@@ -350,7 +395,7 @@ void LandscapeRenderer::updateMaterialProperties() {
     for (auto *material : surfaceMaterials()) {
         material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U ? 0.0F : 1.0F, 0, 0, 0});
         material->setPropertyVec4("terrainParams", terrainParams);
-        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, 0, 0, 0});
+        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, _vtLayout.pageSize(0), 0, 0});
         material->setPropertyVec4("rvtNormalParams", Vec4{_vtRenderer && _vtRenderer->isBakeNormalEnabled() ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
                                                        static_cast<float>(_data.tileResolution),
@@ -382,14 +427,13 @@ void LandscapeRenderer::updateMorphCameraProperty() {
     }
 }
 
-LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const Patch &patch) {
+LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const GridDraw &draw) {
     LandscapeSurfaceInstance surface;
 
-    const auto &node = patch.node;
+    const auto &node = draw.node;
     const auto region = _data.nodeRegion(node.address());
     surface.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
-    surface.quadrant = Vec4{patch.x / 16.0F, patch.z / 16.0F,
-                            static_cast<float>(1U << patch.meshIndex) / 16.0F, static_cast<float>(_selection.edgeMask(node.address()))};
+    surface.mapping = Vec4{static_cast<float>(draw.mapping), static_cast<float>(_selection.edgeMask(node.address())), 0, 0};
 
     const auto tile = _sourceResolver->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
@@ -400,26 +444,16 @@ LandscapeSurfaceInstance LandscapeRenderer::resolveSurface(const Patch &patch) {
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
     surface.tile = _sourceResolver->shaderParams(tile);
-    surface.vt = _vtRenderer->mapping(patch.page);
     return surface;
 }
 
-void LandscapeRenderer::updateInstanceData(scene::Model *model, const Patch &patch) {
+void LandscapeRenderer::updateInstanceData(scene::Model *model, const GridDraw &draw) {
     if (model) {
-        resolveSurface(patch).apply(model, _instanceAttributeScratch);
+        resolveSurface(draw).apply(model, _instanceAttributeScratch);
     }
 }
 
-LandscapeRegion LandscapeRenderer::patchRegion(const Patch &patch) const {
-    auto region = _data.nodeRegion(patch.node.address());
-    const float cell = region.size / 16.0F;
-    region.x += patch.x * cell;
-    region.z += patch.z * cell;
-    region.size = (1U << patch.meshIndex) * cell;
-    return region;
-}
-
-float LandscapeRenderer::patchDistance(const QuadNode &node, float x, float z, float size) const {
+float LandscapeRenderer::regionDistance(const QuadNode &node, float x, float z, float size) const {
     // Match the translation-only terrain placement used by quadtree selection.
     const Vec3 camera = _viewPosition - _node->getWorldPosition();
     const auto axisDistance = [](float p, float lo, float hi) {
@@ -431,45 +465,18 @@ float LandscapeRenderer::patchDistance(const QuadNode &node, float x, float z, f
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-void LandscapeRenderer::selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex, uint32_t bias,
-                                      ccstd::vector<Patch> &patches) {
-    const float nodeSize = _data.nodeSize(node.level);
-    const float cellSize = nodeSize / 16.0F;
-    const uint32_t cells = 1U << meshIndex;
-    const float size = cells * cellSize;
-    const float minX = node.ix * nodeSize + x * cellSize;
-    const float minZ = node.iz * nodeSize + z * cellSize;
-    const float distance = patchDistance(node, minX, minZ, size);
-    const uint32_t desired = std::min(_vtLayout.rootLevel(), _vtLayout.levelForDistance(distance) + bias);
-    if (meshIndex > 0 && _vtLayout.pageSize(desired) < size) {
-        const uint32_t half = cells / 2U;
-        for (uint32_t q = 0; q < 4; ++q) {
-            selectPatches(node, x + (q & 1U) * half, z + (q >> 1U) * half, meshIndex - 1U, bias, patches);
-        }
-        return;
-    }
-    // Stitching follows committed neighbors, including near-camera boundaries
-    // delayed by streaming. Page coverage must not depend on distance morphing.
-    const auto page = _vtLayout.coveringPatch(desired, {node.ix * nodeSize, node.iz * nodeSize}, cellSize, x, z, cells);
-    patches.push_back(Patch{node, x, z, meshIndex, page, {}});
-}
-
-void LandscapeRenderer::updateModel(Patch &patch) {
-    auto *model = patch.model.get();
-    updateInstanceData(model, patch);
+void LandscapeRenderer::updateModel(GridDraw &draw) {
+    auto *model = draw.model.get();
+    updateInstanceData(model, draw);
     model->setEnabled(true);
-    updateModelBounds(model, patch);
+    updateModelBounds(model, draw);
 }
 
-void LandscapeRenderer::updateModelBounds(scene::Model *model, const Patch &patch) {
-    const auto &node = patch.node;
-    const float cellSize = _data.nodeSize(node.level) / 16.0F;
-    const auto region = patchRegion(patch);
-    const float x = region.x;
-    const float z = region.z;
-    const float size = region.size;
-    model->createBoundingShape(Vec3{x - (patch.x & 1U) * cellSize, node.minY, z - (patch.z & 1U) * cellSize},
-                               Vec3{x + size, node.maxY, z + size});
+void LandscapeRenderer::updateModelBounds(scene::Model *model, const GridDraw &draw) {
+    const auto &node = draw.node;
+    const auto region = _data.nodeRegion(node.address());
+    model->createBoundingShape(Vec3{region.x, node.minY, region.z},
+                               Vec3{region.x + region.size, node.maxY, region.z + region.size});
     model->updateWorldBound();
 }
 
@@ -483,11 +490,10 @@ void LandscapeRenderer::preparePasses(const ccstd::vector<QuadNode> &geometryNod
     }
     const auto stamp = Root::getInstance()->getFrameCount();
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                patch.model->updateTransform(stamp);
-                patch.model->updateUBOs(stamp);
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->updateTransform(stamp);
+            draw.model->updateUBOs(stamp);
         }
     }
     _decals->preparePasses(stamp);
@@ -505,49 +511,55 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum,
             decalLift = std::max(decalLift, layer.heightScale);
         }
     }
-    geometry::AABB bounds;
-    _selection.cull(
-        [&](NodeAddress address) {
-            const auto draw = _draws.find(address.key());
-            const auto node = draw != _draws.end() ? draw->second.front().node : drawNode(address);
+    _selection.cull([&](NodeAddress address, bool leaf) {
+        if (!leaf) {
+            const auto node = drawNode(address);
             const auto region = _data.nodeRegion(address);
             // Include the bound source's height range (also for shared sources
             // below minTileLevel) and raised decals before pruning a subtree.
             const float top = node.maxY + decalLift;
-            bounds.setCenter(region.x + region.size * 0.5F + origin.x,
-                             (node.minY + top) * 0.5F + origin.y,
-                             region.z + region.size * 0.5F + origin.z);
-            bounds.setHalfExtents(region.size * 0.5F, (top - node.minY) * 0.5F, region.size * 0.5F);
+            const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x,
+                                        (node.minY + top) * 0.5F + origin.y,
+                                        region.z + region.size * 0.5F + origin.z,
+                                        region.size * 0.5F, (top - node.minY) * 0.5F, region.size * 0.5F};
             return bounds.aabbFrustum(frustum);
-        },
-        [&](NodeAddress address) {
-            const auto draw = _draws.find(address.key());
-            if (draw == _draws.end() || draw->second.empty()) {
-                return;
-            }
-            const auto &patches = draw->second;
-            for (const auto &patch : patches) {
-                const auto *model = patch.model.get();
-                if (model && model->isEnabled() && (!shadow || model->isCastShadow()) && model->getWorldBounds()->aabbFrustum(frustum)) {
-                    models.push_back(model);
+        }
+        const auto draw = _draws.find(address.key());
+        if (draw == _draws.end() || !draw->second.model) {
+            return false;
+        }
+        const auto *model = draw->second.model.get();
+        const auto &bounds = *model->getWorldBounds();
+        const bool visible = bounds.aabbFrustum(frustum);
+        if (visible && model->isEnabled() && (!shadow || model->isCastShadow())) {
+            models.push_back(model);
+        }
+        if (_debugData.decal3DEnabled) {
+            // Raised decals may enter the frustum while the terrain is outside.
+            // Only that case needs a second, expanded bounds test.
+            if (!visible) {
+                auto decalBounds = bounds;
+                decalBounds.center.y += decalLift * 0.5F;
+                decalBounds.halfExtents.y += decalLift * 0.5F;
+                if (!decalBounds.aabbFrustum(frustum)) {
+                    return false;
                 }
             }
-            _decals->collectPassModels(patches.front().node, frustum, shadow, models);
-        });
+            _decals->collectPassModels(draw->second.node, frustum, shadow, models);
+        }
+        return true;
+    });
 }
 
 void LandscapeRenderer::onGlobalPipelineStateChanged() {
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                patch.model->onGlobalPipelineStateChanged();
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->onGlobalPipelineStateChanged();
         }
     }
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) {
-            model->onGlobalPipelineStateChanged();
-        }
+    for (const auto &model : _pool) {
+        model->onGlobalPipelineStateChanged();
     }
     if (_decals) {
         _decals->onGlobalPipelineStateChanged();
@@ -578,120 +590,80 @@ bool LandscapeRenderer::colorRegion(NodeAddress node) const {
     return false;
 }
 
-void LandscapeRenderer::buildPatches(NodeAddress address, uint32_t bias, ccstd::vector<Patch> &patches) {
-    patches.clear();
-    // Visibility must not force a ready surface to sector-root resolution.
-    // Distance and admission capacity determine quality, including cached
-    // offscreen coverage that can become visible on the next camera turn.
-    const auto node = drawNode(address);
-    for (uint32_t q = 0; q < 4; ++q) {
-        selectPatches(node, (q & 1U) * 8U, (q >> 1U) * 8U, 3, bias, patches);
-    }
-}
-
-void LandscapeRenderer::updateReferences(uint64_t key, const ccstd::vector<Patch> &patches, bool add) {
-    const auto update = [add](auto &refs, uint64_t address) {
-        if (add) {
-            ++refs[address];
-        } else if (--refs.at(address) == 0) {
-            refs.erase(address);
+bool LandscapeRenderer::planResources(ResourcePlan &plan) const {
+    // Derive residency from the displayed and proposed draws. These are the
+    // owners; no separately maintained reference counts or deltas are needed.
+    struct Usage {
+        ccstd::unordered_set<uint64_t> sources;
+        ccstd::unordered_set<uint64_t> pages;
+    };
+    const auto collect = [this](uint64_t key, const GridDraw &draw, Usage &usage) {
+        const auto node = NodeAddress::fromKey(key);
+        usage.sources.insert(node.ancestor(std::max(node.level, _data.minTileLevel)).key());
+        for (const auto page : draw.material.pages) {
+            usage.pages.insert(page.key());
         }
     };
-    const auto node = NodeAddress::fromKey(key);
-    update(_heightRefs, node.ancestor(std::max(node.level, _data.minTileLevel)).key());
-    for (const auto &patch : patches) {
-        update(_pageRefs, patch.page.key());
+    ccstd::unordered_set<uint64_t> removed;
+    for (const auto node : _pending.selection.removed) {
+        removed.insert(node.key());
     }
-}
-
-bool LandscapeRenderer::planResources(bool reserve) {
-    auto &pages = _vtRenderer->pages();
-    ccstd::unordered_map<uint64_t, int> heightDelta, pageDelta;
-    for (const auto node : _change.removed) {
-        const auto it = _draws.find(node.key());
-        if (it == _draws.end()) {
-            continue;
-        }
-        --heightDelta[node.ancestor(std::max(node.level, _data.minTileLevel)).key()];
-        for (const auto &patch : it->second) {
-            --pageDelta[patch.page.key()];
+    Usage current;
+    Usage next;
+    // With no candidate, current is already the complete working set. Avoid
+    // collecting and merging an identical next set after a commit/publication.
+    const bool changing = !_pending.empty();
+    for (const auto &entry : _draws) {
+        collect(entry.first, entry.second, current);
+        if (changing && !removed.count(entry.first) && !_pending.draws.count(entry.first)) {
+            collect(entry.first, entry.second, next);
         }
     }
-    _workingPages.clear();
-    ccstd::vector<NodeAddress> baseline;
-    for (const auto &entry : _heightRefs) {
-        baseline.push_back(NodeAddress::fromKey(entry.first));
+    for (const auto &entry : _pending.draws) {
+        collect(entry.first, entry.second, next);
     }
-    for (const auto &entry : _pageRefs) {
-        const auto n = NodeAddress::fromKey(entry.first);
-        _workingPages.push_back({n.level, n.x, n.z});
-    }
-    for (const auto &entry : _pendingDraws) {
-        const auto node = NodeAddress::fromKey(entry.first);
-        const auto source = node.ancestor(std::max(node.level, _data.minTileLevel));
-        ++heightDelta[source.key()];
-        baseline.push_back(source);
-        for (const auto &patch : entry.second) {
-            ++pageDelta[patch.page.key()];
-            _workingPages.push_back(patch.page);
-        }
-    }
-    const auto countAfter = [](const auto &refs, const auto &delta) {
-        size_t count = refs.size();
-        for (const auto &entry : delta) {
-            const auto it = refs.find(entry.first);
-            const int before = it == refs.end() ? 0 : static_cast<int>(it->second);
-            if (before == 0 && entry.second > 0) {
-                ++count;
-            } else if (before > 0 && before + entry.second == 0) {
-                --count;
-            }
-        }
-        return count;
-    };
     ccstd::vector<NodeAddress> fixedSources;
     _vtRenderer->requiredSources(fixedSources);
-    ccstd::unordered_set<uint64_t> fixed;
-    size_t currentHeights = _heightRefs.size();
-    for (const auto n : fixedSources) {
-        if (fixed.insert(n.key()).second && !_heightRefs.count(n.key())) {
-            ++currentHeights;
+    for (const auto source : fixedSources) {
+        current.sources.insert(source.key());
+        if (changing) {
+            next.sources.insert(source.key());
         }
     }
-    size_t nextHeights = currentHeights;
-    for (const auto &entry : heightDelta) {
-        const auto it = _heightRefs.find(entry.first);
-        const int before = (it == _heightRefs.end() ? 0 : static_cast<int>(it->second)) + (fixed.count(entry.first) ? 1 : 0);
-        if (before == 0 && entry.second > 0) {
-            ++nextHeights;
-        } else if (before > 0 && before + entry.second == 0) {
-            --nextHeights;
-        }
-    }
-    const auto nextPages = countAfter(_pageRefs, pageDelta);
-    // Keep exchange space so a completely occupied displayed cut can coarsen
-    // after the camera moves. Both old and new bindings are pinned until commit.
-    const auto headroom = std::min(size_t{80}, static_cast<size_t>(_tilePages->layerCount()) / 4);
-    if (_initialized && ((nextHeights > currentHeights && nextHeights + headroom > _tilePages->layerCount()) ||
-                         (nextPages > _pageRefs.size() && nextPages + 4 > pages.capacity()))) {
+
+    const auto &pages = _vtRenderer->pages();
+    const auto sourceCapacity = _tilePages->layerCount();
+    // Leave room for a future replacement while old bindings are still drawn.
+    // A reduction may proceed even when the current usage exceeds this margin.
+    const auto headroom = std::min(size_t{80}, static_cast<size_t>(sourceCapacity) / 4);
+    if (_initialized && changing &&
+        ((next.sources.size() > current.sources.size() && next.sources.size() + headroom > sourceCapacity) ||
+         (next.pages.size() > current.pages.size() && next.pages.size() + 4 > pages.capacity()))) {
         return false;
     }
-    std::sort(_workingPages.begin(), _workingPages.end(), [](auto a, auto b) { return a.key() < b.key(); });
-    _workingPages.erase(std::unique(_workingPages.begin(), _workingPages.end(), [](auto a, auto b) { return a.key() == b.key(); }), _workingPages.end());
-    baseline.insert(baseline.end(), fixedSources.begin(), fixedSources.end());
-    if (!pages.canReserve(_workingPages) || !_tilePages->canReserve(baseline)) {
+
+    // Keep both cuts alive until the candidate is completely ready to draw.
+    current.sources.insert(next.sources.begin(), next.sources.end());
+    current.pages.insert(next.pages.begin(), next.pages.end());
+    plan.sources.clear();
+    for (const auto key : current.sources) {
+        plan.sources.push_back(NodeAddress::fromKey(key));
+    }
+    plan.pages.clear();
+    for (const auto key : current.pages) {
+        const auto address = NodeAddress::fromKey(key);
+        plan.pages.push_back({address.level, address.x, address.z});
+    }
+    std::sort(plan.pages.begin(), plan.pages.end(), [](auto a, auto b) { return a.key() < b.key(); });
+    if (!pages.canReserve(plan.pages) || !_tilePages->canReserve(plan.sources)) {
         return false;
     }
-    ccstd::unordered_set<uint64_t> baselineKeys;
-    baselineKeys.reserve(baseline.size());
-    _workingSources.clear();
-    for (const auto source : baseline) {
-        if (baselineKeys.insert(source.key()).second) {
-            _workingSources.push_back(source);
-        }
-    }
-    auto workingKeys = baselineKeys;
-    for (const auto page : _workingPages) {
+
+    // Geometry and cliff sources stay pinned. Composition inputs are temporary:
+    // each page must fit individually, but batches may share the remaining slots.
+    const auto &pinned = current.sources;
+    auto working = pinned;
+    for (const auto page : plan.pages) {
         if (!pages.needsComposition(page)) {
             continue;
         }
@@ -700,68 +672,113 @@ bool LandscapeRenderer::planResources(bool reserve) {
         if (!_tilePages->canReserve(inputs)) {
             return false;
         }
-        ccstd::unordered_set<uint64_t> uniqueInputs;
-        size_t extraBaseline = 0;
+        size_t extraPinned = 0;
         size_t extraWorking = 0;
         for (const auto source : inputs) {
-            if (!uniqueInputs.insert(source.key()).second) {
-                continue;
-            }
-            extraBaseline += baselineKeys.count(source.key()) == 0;
-            extraWorking += workingKeys.count(source.key()) == 0;
+            extraPinned += pinned.count(source.key()) == 0;
+            extraWorking += working.count(source.key()) == 0;
         }
-        if (baselineKeys.size() + extraBaseline > _tilePages->layerCount()) {
+        if (pinned.size() + extraPinned > sourceCapacity) {
             return false;
         }
-        if (workingKeys.size() + extraWorking <= _tilePages->layerCount()) {
-            for (const auto source : inputs) {
-                if (workingKeys.insert(source.key()).second) {
-                    _workingSources.push_back(source);
-                }
+        if (working.size() + extraWorking > sourceCapacity) {
+            continue;
+        }
+        for (const auto source : inputs) {
+            if (working.insert(source.key()).second) {
+                plan.sources.push_back(source);
             }
         }
     }
-    return !reserve || (pages.reserve(_workingPages) && _tilePages->reserve(_workingSources));
+    return true;
 }
 
-bool LandscapeRenderer::stage(const RenderSelection::Change &change, bool geometry, bool roots) {
-    _change = change;
-    _changingGeometry = geometry;
+bool LandscapeRenderer::reserveResources() {
+    ResourcePlan plan;
+    return planResources(plan) && reserveResources(plan);
+}
+
+bool LandscapeRenderer::reserveResources(const ResourcePlan &plan) {
+    // Invalidate only when attempting a reservation. Refused plans leave the
+    // current working set valid; successful reservations record its revision.
+    _reservedPageRevision.reset();
+    auto *oldMappings = _vtRenderer->gridMappings();
+    // Commit recycles removed nodes' mapping slots before models allocate new ones.
+    // Material-only updates leave the selection and slot count unchanged.
+    const auto nextCount = _draws.size() - _pending.selection.removed.size() + _pending.selection.added.size();
+    if (!_vtRenderer->ensureGridMappingCapacity(static_cast<uint32_t>(std::max(_draws.size(), nextCount)))) {
+        return false;
+    }
+    if (_vtRenderer->gridMappings() != oldMappings) {
+        bindRuntimeTextures();
+    }
+    // The complete plan is validated before either cache releases live slots.
+    if (!_vtRenderer->pages().reserve(plan.pages) || !_tilePages->reserve(plan.sources)) {
+        return false;
+    }
+    _reservedPageRevision = _vtRenderer->pages().revision();
+    return true;
+}
+
+bool LandscapeRenderer::stage(const RenderSelection::Change &change, ChangeKind kind) {
+    _pending.selection = change;
+    _pending.kind = kind;
+    const bool roots = kind == ChangeKind::INITIAL;
+    ResourcePlan plan;
     const auto maxBias = _vtLayout.rootLevel();
-    for (uint32_t bias = roots ? maxBias : 0; bias <= ((geometry || roots) ? maxBias : 0U); ++bias) {
-        _pendingDraws.clear();
-        bool changed = geometry || roots;
+    for (uint32_t bias = roots ? maxBias : 0; bias <= maxBias; ++bias) {
+        _pending.draws.clear();
         for (const auto node : change.added) {
-            auto &patches = _pendingDraws[node.key()];
-            buildPatches(node, bias, patches);
-            const auto old = _draws.find(node.key());
-            if (old == _draws.end() || old->second.size() != patches.size()) {
-                changed = true;
-            } else {
-                for (size_t i = 0; i < patches.size(); ++i) {
-                    const auto &a = old->second[i];
-                    const auto &b = patches[i];
-                    if (a.x != b.x || a.z != b.z || a.meshIndex != b.meshIndex || a.page.key() != b.page.key()) {
-                        changed = true;
-                    }
-                }
+            auto &draw = _pending.draws[node.key()];
+            draw.node = drawNode(node);
+            draw.material = _vtLayout.gridMapping(_data.nodeRegion(node), draw.node.minY, draw.node.maxY,
+                                            _viewPosition - _node->getWorldPosition(), bias);
+        }
+        if (planResources(plan)) {
+            // Consume this validated plan now, instead of rebuilding it in
+            // updateResources. Page publication still triggers replanning there.
+            if (!reserveResources(plan)) {
+                break;
             }
-        }
-        if (!changed) {
-            break;
-        }
-        if (planResources(false)) {
-            _reserved = false;
             return true;
         }
     }
-    clearPending();
+    // Refused candidates have not touched residency. Preserve its
+    // revision so updateResources does not rebuild the unchanged working set.
+    // An attempted reservation above explicitly invalidates it before mutation.
+    _pending = {};
+    return false;
+}
+
+bool LandscapeRenderer::stageMaterial(NodeAddress node) {
+    const auto it = _draws.find(node.key());
+    if (it == _draws.end()) {
+        return false;
+    }
+    const auto &draw = it->second;
+    auto material = _vtLayout.gridMapping(_data.nodeRegion(node), draw.node.minY, draw.node.maxY,
+                                         _viewPosition - _node->getWorldPosition(), 0);
+    if (material.cells == draw.material.cells && material.pages.size() == draw.material.pages.size() &&
+        std::equal(material.pages.begin(), material.pages.end(), draw.material.pages.begin(), [](const auto &a, const auto &b) {
+            return a.key() == b.key();
+        })) {
+        return false;
+    }
+    _pending.kind = ChangeKind::MATERIAL;
+    auto &replacement = _pending.draws[node.key()];
+    replacement.node = draw.node;
+    replacement.material = std::move(material);
+    if (reserveResources()) {
+        return true;
+    }
+    _pending = {};
     return false;
 }
 
 void LandscapeRenderer::resetPlanning() {
     _requests = _selection.requests();
-    _requestIndex = _materialIndex = 0;
+    _requestIndex = 0;
+    _materialIndex = 0;
     _materialNodes.clear();
     struct MaterialRequest {
         NodeAddress node;
@@ -773,7 +790,7 @@ void LandscapeRenderer::resetPlanning() {
     for (const auto key : _selection.leaves()) {
         const auto n = NodeAddress::fromKey(key);
         const auto region = _data.nodeRegion(n);
-        ordered.push_back({n, patchDistance(drawNode(n), region.x, region.z, region.size), colorRegion(n)});
+        ordered.push_back({n, regionDistance(drawNode(n), region.x, region.z, region.size), colorRegion(n)});
     }
     // Evaluate bounds/distance once per leaf, not once per sort comparison.
     std::sort(ordered.begin(), ordered.end(), [](const auto &a, const auto &b) {
@@ -789,24 +806,21 @@ void LandscapeRenderer::resetPlanning() {
     _settled = false;
 }
 
-bool LandscapeRenderer::planNext(uint32_t &attempts) {
-    while (attempts > 0) {
-        --attempts;
+void LandscapeRenderer::planNext() {
+    // Scan until a candidate is admitted or the current queue is exhausted.
+    for (;;) {
         RenderSelection::Change change;
         // Release geometry first, then alternate material and geometry work.
         // Newly visible materials must not wait for every geometry split.
         const bool geometryPending = _requestIndex < _requests.size();
         const bool materialPending = _materialIndex < _materialNodes.size();
         if (geometryPending && (!_requests[_requestIndex].split || !materialPending || !_preferMaterial)) {
-            if (_selection.plan(_requests[_requestIndex++], change) && stage(change, true)) {
-                return true;
+            if (_selection.plan(_requests[_requestIndex++], change) && stage(change, ChangeKind::GEOMETRY)) {
+                return;
             }
         } else if (materialPending) {
-            const auto node = _materialNodes[_materialIndex++];
-            change.removed.push_back(node);
-            change.added.push_back(node);
-            if (stage(change, false)) {
-                return true;
+            if (stageMaterial(_materialNodes[_materialIndex++])) {
+                return;
             }
         } else {
             if (_planningInvalid) {
@@ -814,42 +828,46 @@ bool LandscapeRenderer::planNext(uint32_t &attempts) {
             } else {
                 _settled = true;
             }
-            return false;
+            return;
         }
     }
-    return false;
 }
 
 void LandscapeRenderer::commitPending() {
-    for (const auto node : _change.removed) {
+    const bool geometry = _pending.kind == ChangeKind::GEOMETRY;
+    for (const auto node : _pending.selection.removed) {
         _dirtyNodes.insert(node.key());
-        if (_changingGeometry) {
+        if (geometry) {
             _selection.neighbors(node, [this](NodeAddress n, uint32_t) { _dirtyNodes.insert(n.key()); });
         }
         const auto it = _draws.find(node.key());
         if (it != _draws.end()) {
-            updateReferences(node.key(), it->second, false);
-            recycleModels(it->second);
+            recycleModel(it->second);
             _draws.erase(it);
         }
     }
-    if (_changingGeometry) {
-        _selection.commit(_change);
+    if (geometry) {
+        _selection.commit(_pending.selection);
     }
-    for (auto &entry : _pendingDraws) {
+    for (auto &entry : _pending.draws) {
         const auto node = NodeAddress::fromKey(entry.first);
         _dirtyNodes.insert(entry.first);
-        updateReferences(entry.first, entry.second, true);
-        _draws[entry.first] = std::move(entry.second);
-        if (_changingGeometry) {
+        if (_pending.kind == ChangeKind::MATERIAL) {
+            // Resources are ready: switch only the binding, retaining the model
+            // and its mapping slot throughout the material update.
+            _draws.at(entry.first).material = std::move(entry.second.material);
+        } else {
+            _draws[entry.first] = std::move(entry.second);
+        }
+        if (geometry) {
             _selection.neighbors(node, [this](NodeAddress n, uint32_t) { _dirtyNodes.insert(n.key()); });
         }
     }
     clearPending();
     const bool first = !_initialized;
     _initialized = true;
-    _preferMaterial = _changingGeometry;
-    if (_changingGeometry || first) {
+    _preferMaterial = geometry;
+    if (geometry || first) {
         resetPlanning();
     } else {
         // Material commits do not invalidate geometry candidates or the node
@@ -864,9 +882,8 @@ void LandscapeRenderer::commitPending() {
 }
 
 void LandscapeRenderer::clearPending() {
-    _pendingDraws.clear();
-    _change = {};
-    _reserved = false;
+    _pending = {};
+    _reservedPageRevision.reset();
 }
 
 // Generated resources are expected to load successfully. Stop the entire
@@ -879,24 +896,22 @@ void LandscapeRenderer::stopLoading() {
 
 bool LandscapeRenderer::updateResources(bool synchronous) {
     auto &pages = _vtRenderer->pages();
-    if (_change.empty() && pages.ready() && _reserved) {
+    if (_pending.empty() && pages.ready() && _reservedPageRevision) {
         return true;
     }
-    if (!_reserved || _preparedPageRevision != pages.revision()) {
-        if (!planResources(true)) {
-            const bool rejectedChange = !_change.empty();
+    if (!_reservedPageRevision || *_reservedPageRevision != pages.revision()) {
+        if (!reserveResources()) {
+            const bool rejectedChange = !_pending.empty();
             clearPending();
             // Capacity refusal cancels the complete candidate, including
             // any neighbor splits. Keep the committed cut and retry its
             // resources in both warmup and streaming. Do not turn a
             // refused detail upgrade into a permanent loading failure.
-            if (!rejectedChange || !_initialized || !planResources(true)) {
+            if (!rejectedChange || !_initialized || !reserveResources()) {
                 CC_LOG_WARNING("[Landscape] Resource reservation deferred; retaining committed bindings.");
                 return false;
             }
         }
-        _reserved = true;
-        _preparedPageRevision = pages.revision();
     }
     const auto sourceRevision = _tilePages->updateRevision();
     const auto pageRevision = pages.revision();
@@ -904,12 +919,12 @@ bool LandscapeRenderer::updateResources(bool synchronous) {
         stopLoading();
         return false;
     }
-    const auto composed = _vtRenderer->render(*_tilePages, *_sourceResolver, synchronous ? config::VT_PAGE_COUNT : _streamingBudget.pages);
+    const auto composed = _vtRenderer->render(*_tilePages, *_sourceResolver, synchronous ? config::VT_PAGE_COUNT : _remainingVTPages);
     if (!synchronous) {
-        _streamingBudget.pages -= composed;
+        _remainingVTPages -= composed;
     }
     if (_tilePages->ready() && pages.ready() && _vtRenderer->sourcesReady()) {
-        if (!_change.empty()) {
+        if (!_pending.empty()) {
             commitPending();
         }
     } else if (synchronous && sourceRevision == _tilePages->updateRevision() && pageRevision == pages.revision()) {
@@ -934,17 +949,40 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
     if (_ready && _debugData.freezeLod) {
         return;
     }
-    const auto nowMs = []() {
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-    const bool firstSync = _streamingBudget.begin(Root::getInstance()->getFrameCount(), nowMs());
-    if (_ready && firstSync) {
-        _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+    const auto frame = Root::getInstance()->getFrameCount();
+    if (!_streamingFrame || *_streamingFrame != frame) {
+        _streamingFrame = frame;
+        _remainingVTPages = config::VT_PAGE_UPDATE_BUDGET;
+        if (_ready) {
+            _tilePages->update(config::PAGE_UPLOAD_BUDGET);
+        }
     }
-    if (_ready && _settled && _change.empty() && pages.ready() &&
+    if (_ready && _settled && _pending.empty() && pages.ready() &&
         _syncCache.matches(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes)) {
         return;
     }
+    updateSelection(geometryNodes, surfaceNodes, positions);
+    if (!_initialized && _pending.empty()) {
+        RenderSelection::Change roots;
+        for (const auto key : _selection.leaves()) {
+            roots.added.push_back(NodeAddress::fromKey(key));
+        }
+        if (!stage(roots, ChangeKind::INITIAL)) {
+            _loadingFailed = true;
+            CC_LOG_ERROR("[Landscape] Initial coverage exceeds resource capacity.");
+            return;
+        }
+    }
+    streamResources();
+    if (!_dirtyNodes.empty()) {
+        syncTerrainModels();
+    }
+    _decals->updateView(_viewPosition);
+    _syncCache.store(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes);
+}
+
+void LandscapeRenderer::updateSelection(const ccstd::vector<QuadNode> &geometryNodes,
+                                        const ccstd::vector<QuadNode> &surfaceNodes, const SyncCache::Positions &positions) {
     const bool selectionChanged = !_syncCache.matchesSelection(geometryNodes, surfaceNodes);
     if (selectionChanged) {
         _selection.target(geometryNodes);
@@ -963,105 +1001,91 @@ void LandscapeRenderer::sync(const ccstd::vector<QuadNode> &geometryNodes, const
         }
     }
     if (selectionChanged || !_syncCache.matchesPosition(positions)) {
-        if (selectionChanged || (_change.empty() && (_settled || !_initialized))) {
+        if (selectionChanged || (_pending.empty() && (_settled || !_initialized))) {
             resetPlanning();
         } else {
             _planningInvalid = true;
         }
     }
-    if (!_initialized && _change.empty()) {
-        RenderSelection::Change roots;
-        for (const auto key : _selection.leaves()) {
-            roots.added.push_back(NodeAddress::fromKey(key));
-        }
-        if (!stage(roots, false, true)) {
-            _loadingFailed = true;
-            CC_LOG_ERROR("[Landscape] Initial coverage exceeds resource capacity.");
-            return;
-        }
-    }
+}
+
+void LandscapeRenderer::streamResources() {
+    auto &pages = _vtRenderer->pages();
     // Warmup and streaming use the same capacity admission and atomic commits.
     // Warmup loads synchronously until no more changes fit; it need not reach
-    // the requested detail. Runtime work additionally shares per-frame budgets.
+    // the requested detail. Runtime composition is limited to eight pages per
+    // frame; cached geometry/material transitions need no additional budget.
     const bool warmingUp = !_ready;
     do {
-        if (!warmingUp && !_streamingBudget.nextStep(nowMs())) {
-            break;
-        }
-        if (_change.empty() && pages.ready()) {
-            uint32_t warmupAttempts = 256;
-            planNext(warmingUp ? warmupAttempts : _streamingBudget.attempts);
+        if (_pending.empty() && pages.ready()) {
+            planNext();
         }
         if (!updateResources(warmingUp)) {
             break;
         }
-        if (_change.empty() && _settled && pages.ready()) {
+        if (_pending.empty() && _settled && pages.ready()) {
             if (!_ready) {
-                CC_LOG_INFO("[Landscape] Initial view ready: %zu draw nodes, %zu exact VT pages", _draws.size(), _pageRefs.size());
+                CC_LOG_INFO("[Landscape] Initial view ready: %zu draw nodes, %zu active VT pages", _draws.size(), pages.activeSlots().size());
             }
             _ready = true;
             _vtRenderer->setFrozen(_debugData.freezeLod);
         }
         // Never spin waiting for IO, uploads or a partially composed transaction.
-        // A ready commit can immediately hand the remaining budget to the next.
-    } while (warmingUp ? !_ready : (_change.empty() && !_settled && pages.ready() && _streamingBudget.attempts > 0));
-    if (!_dirtyNodes.empty()) {
-        syncTerrainModels();
-    }
-    syncDecals();
-    _syncCache.store(positions, _tilePages->updateRevision(), pages.revision(), geometryNodes, surfaceNodes);
+        // A ready commit can immediately continue with the next candidate.
+    } while (warmingUp ? !_ready : (_pending.empty() && !_settled && pages.ready()));
 }
 
-void LandscapeRenderer::recycleModels(ccstd::vector<Patch> &patches) {
-    for (auto &patch : patches) {
-        if (patch.model) {
-            patch.model->setEnabled(false);
-            _pool[patch.meshIndex].push_back(std::move(patch.model));
-        }
+void LandscapeRenderer::recycleModel(GridDraw &draw) {
+    if (draw.model) {
+        draw.model->setEnabled(false);
+        _pool.push_back(std::move(draw.model));
+    }
+    if (draw.mapping >= 0) {
+        _vtRenderer->releaseGridMapping(static_cast<uint32_t>(draw.mapping));
+        draw.mapping = -1;
     }
 }
 
 void LandscapeRenderer::syncTerrainModels() {
-    // Models live with the committed patches. Neighbors only refresh their stitch
-    // attributes; replaced patches acquire models from the matching grid pool.
+    // Every committed node uses the same full grid. Neighbors only refresh the
+    // stitch mask; material changes update the mapping without replacing models.
+    ccstd::vector<uint32_t> changedMappings;
+    changedMappings.reserve(_dirtyNodes.size());
+    // Release removed owners before assigning their blocks to new LOD nodes.
     for (const auto key : _dirtyNodes) {
-        const auto draw = _draws.find(key);
-        if (draw == _draws.end()) {
+        if (_draws.count(key) == 0) {
+            _decals->removeNode(key);
+        }
+    }
+    for (const auto key : _dirtyNodes) {
+        const auto it = _draws.find(key);
+        if (it == _draws.end()) {
             continue;
         }
-        for (auto &patch : draw->second) {
-            if (!patch.model) {
-                auto &pool = _pool[patch.meshIndex];
-                if (pool.empty()) {
-                    patch.model = createModel(patch.meshIndex);
-                } else {
-                    patch.model = std::move(pool.back());
-                    pool.pop_back();
-                }
-            }
-            if (patch.model) {
-                updateModel(patch);
+        auto &draw = it->second;
+        if (draw.mapping < 0) {
+            draw.mapping = static_cast<int>(_vtRenderer->allocateGridMapping());
+        }
+        const auto mapping = static_cast<uint32_t>(draw.mapping);
+        if (_vtRenderer->updateGridMapping(mapping, draw.material)) {
+            changedMappings.push_back(mapping);
+        }
+        if (!draw.model) {
+            if (_pool.empty()) {
+                draw.model = createModel();
+            } else {
+                draw.model = std::move(_pool.back());
+                _pool.pop_back();
             }
         }
+        if (draw.model) {
+            updateModel(draw);
+        }
+        const auto region = _data.nodeRegion(draw.node.address());
+        _decals->updateNode({key, region, draw.node.minY, draw.node.maxY, resolveSurface(draw)});
     }
+    _vtRenderer->uploadGridMappings(std::move(changedMappings));
     _dirtyNodes.clear();
-}
-
-void LandscapeRenderer::syncDecals() {
-    if (!_decals->beginSync(_viewPosition)) {
-        return;
-    }
-    for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            const auto region = patchRegion(patch);
-            const float cell = _data.nodeSize(patch.node.level) / 16.0F;
-            const uint32_t quadrant = patch.x / 8U + (patch.z / 8U) * 2U;
-            _decals->addPatch({patch.node.address().key(), static_cast<uint8_t>(1U << quadrant), region,
-                               Vec3{region.x - (patch.x & 1U) * cell, patch.node.minY, region.z - (patch.z & 1U) * cell},
-                               Vec3{region.x + region.size, patch.node.maxY, region.z + region.size}, resolveSurface(patch)});
-        }
-    }
-    _decals->endSync();
 }
 
 void LandscapeRenderer::setFreezeLod(bool frozen) {
@@ -1080,10 +1104,9 @@ void LandscapeRenderer::setFreezeLod(bool frozen) {
         setCliffEnabled(_debugData.cliffEnabled);
     }
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                updateModelBounds(patch.model, patch);
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            updateModelBounds(draw.model, draw);
         }
     }
 }
@@ -1099,16 +1122,13 @@ void LandscapeRenderer::setCastShadow(bool enabled) {
     }
     _castShadow = enabled;
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                patch.model->setCastShadow(enabled);
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->setCastShadow(enabled);
         }
     }
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) {
-            model->setCastShadow(enabled);
-        }
+    for (const auto &model : _pool) {
+        model->setCastShadow(enabled);
     }
     if (_decals) {
         _decals->setCastShadow(enabled);
@@ -1123,23 +1143,20 @@ void LandscapeRenderer::setReceiveShadow(bool enabled) {
     // Model refreshes CC_RECEIVE_SHADOW for every submodel. Include pooled
     // instances and decals so toggling works even while LOD is frozen.
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                patch.model->setReceiveShadow(enabled);
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->setReceiveShadow(enabled);
         }
     }
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) {
-            model->setReceiveShadow(enabled);
-        }
+    for (const auto &model : _pool) {
+        model->setReceiveShadow(enabled);
     }
     if (_decals) {
         _decals->setReceiveShadow(enabled);
     }
     // The receive variant adds an instanced shadow-bias attribute. Rebuild the
     // layouts and restore terrain attributes, including frozen active models.
-    setWireframe(_debugData.wireframe);
+    refreshTerrainMaterials();
 }
 
 void LandscapeRenderer::setWireframe(bool wireframe) {
@@ -1147,21 +1164,21 @@ void LandscapeRenderer::setWireframe(bool wireframe) {
     if (_decals) {
         _decals->setWireframe(wireframe);
     }
+    refreshTerrainMaterials();
+}
+
+void LandscapeRenderer::refreshTerrainMaterials() {
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            if (patch.model) {
-                patch.model->setSubModelMaterial(0, wireframe ? _materialWire.get() : _materialSolid.get());
-                updateInstanceData(patch.model, patch);
-            }
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
+            updateInstanceData(draw.model, draw);
         }
     }
-    for (const auto &pool : _pool) {
-        for (const auto &model : pool) {
-            model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
-        }
-        // Inactive models get fresh instance data when reused. Do not request
-        // height/VT pages here: doing so would pin invisible nodes in the caches.
+    for (const auto &model : _pool) {
+        model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
     }
+    // Inactive models get fresh instance data when reused.
 }
 
 void LandscapeRenderer::setViewPos(const Vec3 &position) {
@@ -1205,11 +1222,14 @@ void LandscapeRenderer::setUnlit(bool enabled) {
     }
     // Refresh cached submodel shaders and instance attributes, including pooled
     // models. This is also required while the LOD selection is frozen.
-    setWireframe(_debugData.wireframe);
+    refreshTerrainMaterials();
+    if (_decals) {
+        _decals->refreshMaterials();
+    }
 }
 
 bool LandscapeRenderer::valid() const {
-    return _scene != nullptr && _node != nullptr && _meshes[0] != nullptr &&
+    return _scene != nullptr && _node != nullptr && _mesh != nullptr &&
            _materialSolid != nullptr && _materialWire != nullptr &&
            _tilePages != nullptr && _tilePages->valid() && _asset != nullptr &&
            _materialLibrary != nullptr && _materialLibrary->valid() &&
@@ -1218,21 +1238,19 @@ bool LandscapeRenderer::valid() const {
 
 void LandscapeRenderer::destroy() {
     _ready = false;
+    _drawCalls = {};
     _loadingFailed = false;
     _syncCache.clear();
-    _streamingBudget = {};
+    _streamingFrame.reset();
+    _remainingVTPages = 0;
     _planningInvalid = false;
     _preferMaterial = true;
     clearPending();
-    _heightRefs.clear();
-    _pageRefs.clear();
     _dirtyNodes.clear();
     _colorPaths.clear();
     _colorSelected.clear();
     _requests.clear();
     _materialNodes.clear();
-    _workingSources.clear();
-    _workingPages.clear();
     _settled = false;
     _initialized = false;
 
@@ -1246,26 +1264,22 @@ void LandscapeRenderer::destroy() {
     };
 
     for (const auto &entry : _draws) {
-        for (const auto &patch : entry.second) {
-            removeModel(patch.model);
-        }
+        const auto &draw = entry.second;
+        removeModel(draw.model);
     }
     _draws.clear();
-    for (auto &pool : _pool) {
-        for (const auto &model : pool) {
-            removeModel(model);
-        }
-        pool.clear();
+    for (const auto &model : _pool) {
+        removeModel(model);
     }
+
+    _pool.clear();
     _instanceAttributeScratch = ccstd::monostate{};
     _vtRenderer.reset();
     _decals.reset();
 
     _tilePages.reset();
     _asset = nullptr;
-    for (auto &mesh : _meshes) {
-        mesh = nullptr;
-    }
+    _mesh = nullptr;
     _materialSolid = nullptr;
     _materialWire = nullptr;
     _materialLibrary.reset();

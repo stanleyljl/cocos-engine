@@ -322,6 +322,7 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     const uint32_t cascadesToDeduplicate = selectShadowPasses(sceneData);
     reportVisibilityDistanceStatus();
     finalizePassSelection(cascadesToDeduplicate);
+    _renderer->estimateDrawCalls(_passes.front().models);
 }
 
 uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
@@ -428,6 +429,10 @@ void Landscape::onGlobalPipelineStateChanged() {
     if (_renderer) {
         _renderer->onGlobalPipelineStateChanged();
     }
+}
+
+LandscapeDrawCalls Landscape::getDrawCalls(uint32_t frame) const {
+    return _renderer ? _renderer->getDrawCalls(frame) : LandscapeDrawCalls{};
 }
 
 bool Landscape::isReady() const {

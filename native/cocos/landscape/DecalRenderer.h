@@ -51,23 +51,21 @@ class MaterialLibrary;
 // Resolved terrain sources shared by terrain and displaced decal instances.
 struct LandscapeSurfaceInstance {
     Vec4 grid;
-    Vec4 quadrant;
     Vec4 tile;
-    Vec4 vt;
+    Vec4 mapping; // local table slot, committed edge mask, unused ZW
     void apply(scene::Model *model, TypedArray &scratch) const;
 };
 
 // Owns decal selection, VT composition inputs and displaced geometry.
-// LandscapeRenderer supplies resolved terrain patches; VTRenderer schedules
+// LandscapeRenderer supplies resolved terrain nodes; VTRenderer schedules
 // page composition. Neither residency nor quadtree selection belongs here.
 class DecalRenderer {
 public:
-    struct TerrainPatch {
+    struct TerrainNode {
         uint64_t nodeKey{0};
-        uint8_t quadrantMask{0};
         LandscapeRegion region;
-        Vec3 boundsMin;
-        Vec3 boundsMax;
+        float minY{0};
+        float maxY{0};
         LandscapeSurfaceInstance surface;
     };
 
@@ -85,11 +83,11 @@ public:
     uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
     void uploadPageDecals();
 
-    // Stream resolved patches without allocating a temporary per-frame vector.
-    // False means no eligible displaced decals; previous draws are disabled.
-    bool beginSync(const Vec3 &viewPosition);
-    void addPatch(const TerrainPatch &patch);
-    void endSync();
+    // Committed terrain changes update only the affected node's bindings.
+    void updateNode(const TerrainNode &node);
+    void removeNode(uint64_t nodeKey);
+    // Camera motion changes visibility/fade, never the fixed decal lattice.
+    void updateView(const Vec3 &viewPosition);
     void refreshInstances(const Vec3 &viewPosition);
     void preparePasses(uint32_t stamp);
     void collectPassModels(const QuadNode &node, const geometry::Frustum &frustum,
@@ -97,6 +95,8 @@ public:
     void onGlobalPipelineStateChanged();
     void setEnabled(bool enabled);
     void setWireframe(bool wireframe);
+    // Rebind the selected material and restore instance attributes after variant changes.
+    void refreshMaterials();
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
 
@@ -106,14 +106,24 @@ private:
         uint32_t decal{0};
         Vec4 grid;
     };
-    // Each terrain patch owns a contiguous range in the reusable draw array.
-    struct Patch {
-        TerrainPatch terrain;
-        size_t firstDraw;
-        size_t endDraw;
+    struct Instance {
+        Vec3 center;
+        float fade{0};
+        bool active{false};
+        int firstX{0};
+        int firstZ{0};
+        int columns{0};
+        ccstd::vector<Vec4> grids;
     };
-    void updateInstance(const Draw &draw, const TerrainPatch &patch);
-    void appendDraw(const TerrainPatch &patch, uint32_t decal, const Vec4 &grid);
+    // Draw ownership changes only when the committed terrain cut changes.
+    struct NodeDraws {
+        TerrainNode terrain;
+        ccstd::vector<Draw> draws;
+    };
+    void updateInstance(const Draw &draw, const TerrainNode &node);
+    void updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged);
+    void appendDecal(NodeDraws &node, uint32_t decal);
+    void recycle(Draw &draw);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -123,11 +133,9 @@ private:
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<gfx::Texture> _pageIndexTexture;
     ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
-    ccstd::vector<Vec3> _centers;
-    ccstd::unordered_map<uint64_t, ccstd::vector<Patch>> _patches;
-    ccstd::vector<Draw> _draws;
-    ccstd::vector<uint32_t> _candidates;
-    size_t _active{0};
+    ccstd::vector<Instance> _instances;
+    ccstd::unordered_map<uint64_t, NodeDraws> _nodes;
+    ccstd::vector<IntrusivePtr<scene::Model>> _pool;
     TypedArray _scratch;
     Vec3 _viewPosition;
     bool _enabled{true};

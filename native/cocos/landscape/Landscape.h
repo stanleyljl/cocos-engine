@@ -72,6 +72,12 @@ struct LandscapeDebugData {
     bool decal3DEnabled{true};
 };
 
+struct LandscapeDrawCalls {
+    // Estimated base-pass batches from visible landscape models this frame.
+    uint32_t terrainBase{0};
+    uint32_t decalsBase{0};
+};
+
 class Landscape : public RefCounted {
 public:
     Landscape();
@@ -101,6 +107,7 @@ public:
     inline bool isInitialized() const { return _renderer != nullptr; }
     bool isReady() const;
     TextureBase *getVTAtlas() const;
+    LandscapeDrawCalls getDrawCalls(uint32_t frame) const;
 
     // World-space, translation-only placement, matching landscape selection.
     // Query result buffer: position XYZ, normal XYZ, material ID, weight.

@@ -6,6 +6,7 @@
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeData.h"
 #include "math/Vec4.h"
+#include "math/Vec3.h"
 
 namespace cc::landscape {
 
@@ -17,6 +18,13 @@ struct VTPageAddress {
     uint32_t z{0};
 
     uint64_t key() const { return makeNodeKey(level, x, z); }
+};
+
+// A node owns unique page addresses and a compact index for each grid cell.
+// Residency and physical-slot lookup visit pages once, not all 256 cells.
+struct VTGridMapping {
+    std::array<uint8_t, 256> cells{};
+    ccstd::vector<VTPageAddress> pages;
 };
 
 // Resolved shader records for one material-page composition.
@@ -44,11 +52,10 @@ public:
         return {page.x * size, page.z * size, size};
     }
 
-    // Reserve every possible stitched position, independently of camera distance
-    // and the current edge mask. A neighbor may change LOD while this page stays
-    // bound; an odd edge vertex then snaps to the preceding even grid vertex.
-    VTPageAddress coveringPatch(uint32_t desiredLevel, LandscapePoint origin, float cellSize,
-                                uint32_t x, uint32_t z, uint32_t cells) const;
+    // Select material resolution independently of geometry, retaining the same
+    // distance bands and stitched coverage for every cell of the node.
+    VTGridMapping gridMapping(LandscapeRegion region, float minY, float maxY,
+                         const Vec3 &camera, uint32_t bias) const;
 
     // Local bounds must stay within one sector.
     // Include the complete stitched footprint, not just the original grid cell.
@@ -59,7 +66,7 @@ private:
     uint32_t _rootLevel{0};
 };
 
-// Exact-address physical storage. The renderer owns admission and explicit patch bindings.
+// Exact-address physical storage. The renderer owns admission and local grid mappings.
 // The working set includes BOTH displayed and candidate leaves until commit.
 class VirtualTexture {
 public:
@@ -72,9 +79,16 @@ public:
     struct Page {
         VTPageAddress address;
         State state{State::EMPTY};
-        uint64_t lastRequested{0};
+        uint64_t lastReserved{0};
+        bool needsComposition() const {
+            return state == State::DIRTY || state == State::STALE;
+        }
+        bool drawable() const {
+            return state == State::READY || state == State::STALE;
+        }
     };
     bool init(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
+    // Reservation inputs are unique addresses, collected by LandscapeRenderer.
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
     bool reserve(const ccstd::vector<VTPageAddress> &pages);
     const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
@@ -93,7 +107,7 @@ private:
     int allocate(VTPageAddress address);
     LandscapeData _data;
     VTPageLayout _layout;
-    uint64_t _frame{0};
+    uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     uint64_t _revision{0};
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _active;

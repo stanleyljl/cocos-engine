@@ -24,14 +24,14 @@
 #pragma once
 
 #include "core/Root.h"
-#include "landscape/BiomeMap.h"
-#include "landscape/Landscape.h"
 #include "landscape/VirtualTexture.h"
 
 namespace cc {
 class Material;
 class RenderTexture;
 class RenderingSubMesh;
+class TextureBase;
+class Texture2D;
 namespace landscape {
 class DecalRenderer;
 class LandscapeAsset;
@@ -57,11 +57,18 @@ public:
     gfx::Texture *albedo() const;
     gfx::Texture *normalRoughnessAO() const;
     gfx::Sampler *sampler() const { return _sampler; }
-    Vec4 mapping(VTPageAddress address) const;
+    // Flattened 16 x 16 local tables: RG8 = physical slot, actual VT level.
+    gfx::Texture *gridMappings() const { return _gridMappings.get(); }
+    bool ensureGridMappingCapacity(uint32_t count);
+    uint32_t allocateGridMapping();
+    void releaseGridMapping(uint32_t slot);
+    // Update the CPU mirror; the caller batches only the changed slots.
+    bool updateGridMapping(uint32_t slot, const VTGridMapping &mapping);
+    void uploadGridMappings(ccstd::vector<uint32_t> slots);
     void requiredSources(ccstd::vector<NodeAddress> &sources) const;
     bool valid() const;
-    bool sourcesReady() const { return (!_debugData.cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
-    bool isBakeNormalEnabled() const { return _debugData.bakeNormalEnabled; }
+    bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
+    bool isBakeNormalEnabled() const { return _bakeNormalEnabled; }
     // Returns the actual composed page count for the shared frame budget.
     uint32_t render(TilePagePool &tiles, TilePageResolver &resolver, uint32_t maxUpdates);
     void setFrozen(bool frozen);
@@ -98,6 +105,7 @@ private:
     bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
     bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
     void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
+    void applyGlobalColorMap();
     bool initPageDrawResources(gfx::Device *device);
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
@@ -113,6 +121,10 @@ private:
     };
     static_assert(sizeof(PageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
 
+    void collectPageBatch(TilePageResolver &resolver, uint32_t maxUpdates);
+    void submitPageBatch();
+    void recordPageBatch(const PageInstance *instances, uint32_t instanceCount);
+
     // Each mip has its own descriptors: recording a later mip must not overwrite
     // the preceding pass's source texture bindings.
     struct MipPass {
@@ -126,7 +138,9 @@ private:
     };
 
     // Applied compose state; deferred requests remain in LandscapeRenderer.
-    LandscapeDebugData _debugData;
+    bool _frozen{false};
+    bool _bakeNormalEnabled{true};
+    bool _cliffEnabled{true};
     struct CliffReference {
         bool ready{false};
         uint32_t level{0};
@@ -138,6 +152,11 @@ private:
         ccstd::vector<Vec4> sources;
     } _cliff;
     VirtualTexture _pages;
+    IntrusivePtr<gfx::Texture> _gridMappings;
+    ccstd::vector<uint8_t> _gridMappingData;
+    ccstd::vector<uint32_t> _freeGridMappings;
+    uint32_t _gridMappingSize{0};
+    uint32_t _gridMappingCount{0};
     IntrusivePtr<RenderTexture> _atlas;
     // Compression uses _atlas as reusable single-page RGBA scratch storage.
     bool _compress{false};
@@ -166,7 +185,12 @@ private:
     ccstd::vector<PageInstance> _batchInstances;
     bool _needsClear{true};
     bool _pendingInvalidation{false};
-    BiomeMap _biomeMap;
+    // RGB is raw UNORM gain (128 = neutral); alpha masks regional influence.
+    IntrusivePtr<Texture2D> _globalColorMap;
+    IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
+    gfx::Sampler *_globalColorSampler{nullptr}; // device-owned
+    float _globalColorStrength{0.1F};
+    Vec4 _globalColorParams; // inverse landscape width/depth, effective strength, unused
 };
 } // namespace landscape
 } // namespace cc

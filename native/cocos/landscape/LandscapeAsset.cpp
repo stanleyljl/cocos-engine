@@ -347,7 +347,6 @@ void LandscapeAsset::resetAsyncState() {
         _async->cancelled.store(true);
     }
     _async.reset();
-    _pendingTiles.clear();
 }
 
 bool LandscapeAsset::load(const ccstd::string &manifestPath) {
@@ -450,9 +449,6 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Fo
         _async = std::make_shared<AsyncState>();
     }
     const uint64_t key = makeNodeKey(level, x, z);
-    if (!_pendingTiles.insert(key).second) {
-        return false;
-    }
     const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
     // load() anchors all files to the resolved manifest. Only build paths here;
@@ -542,7 +538,6 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
     }
     tile = std::move(_async->ready.front());
     _async->ready.pop_front();
-    _pendingTiles.erase(tile.key);
     return true;
 }
 

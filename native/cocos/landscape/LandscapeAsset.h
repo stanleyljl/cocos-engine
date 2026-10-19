@@ -35,7 +35,6 @@
 #include "core/TypedArray.h"
 #include "base/std/container/string.h"
 #include "base/std/container/unordered_map.h"
-#include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeData.h"
 #include "landscape/LandscapeQuery.h"
@@ -97,6 +96,7 @@ public:
     // Call on the main thread: builds absolute paths from the resolved manifest;
     // background I/O bypasses FileUtils' unsynchronized relative-path cache.
     // Only complete height/splat/normal sets are available through takeReadyTile().
+    // TilePagePool owns request deduplication and the in-flight limit.
     bool requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat);
     bool takeReadyTile(TileData &tile);
     // Generated tiles are valid. An unexpected I/O/decode error stops streaming
@@ -154,7 +154,6 @@ private:
     float _decalFarDistance{40.0F};
     NodeIndexLayout _nodeIndexLayout;
     ccstd::vector<HeightRange> _heightRanges;
-    ccstd::unordered_set<uint64_t> _pendingTiles;
     std::shared_ptr<AsyncState> _async;
 };
 

@@ -24,6 +24,7 @@
 
 #pragma once
 #include <array>
+#include <utility>
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
@@ -52,54 +53,63 @@ public:
         uint32_t capacity{0};
         ccstd::unordered_map<uint64_t, Slot> slots;
         ccstd::vector<NodeAddress> working;
+        // The coordinator supplies unique addresses; only validate range/capacity here.
         bool canReserve(const ccstd::vector<NodeAddress> &sources) const {
-            ccstd::unordered_set<uint64_t> unique;
-            for (const auto n : sources) {
-                if (n.level < data.minTileLevel || n.level > data.maxLevel || n.x >= data.nodesX(n.level) || n.z >= data.nodesZ(n.level)) {
+            if (sources.size() > capacity) {
+                return false;
+            }
+            for (const auto source : sources) {
+                if (!validSource(source)) {
                     return false;
                 }
-                unique.insert(n.key());
             }
-            return unique.size() <= capacity;
+            return true;
         }
         bool reserve(const ccstd::vector<NodeAddress> &sources) {
             if (!canReserve(sources)) {
                 return false;
             }
-            ccstd::unordered_set<uint64_t> wanted;
-            working.clear();
-            for (const auto n : sources) {
-                if (wanted.insert(n.key()).second) {
-                    working.push_back(n);
-                }
-            }
-            for (auto it = slots.begin(); it != slots.end();) {
-                if (!wanted.count(it->first)) {
-                    it = slots.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            // Build the replacement before changing live ownership. Existing
+            // sources retain their layer and readiness; new ones get free layers.
+            ccstd::unordered_map<uint64_t, Slot> next;
             ccstd::vector<bool> used(capacity, false);
-            for (const auto &entry : slots) {
-                used[entry.second.layer] = true;
+            for (const auto source : sources) {
+                const auto previous = slots.find(source.key());
+                const Slot slot = previous == slots.end() ? Slot{capacity, false} : previous->second;
+                if (!next.emplace(source.key(), slot).second) {
+                    return false;
+                }
+                if (slot.layer < capacity) {
+                    used[slot.layer] = true;
+                }
             }
             uint32_t layer = 0;
-            for (const auto n : working) {
-                if (!slots.count(n.key())) {
-                    while (used[layer]) {
-                        ++layer;
-                    }
-                    slots.emplace(n.key(), Slot{layer, false});
-                    used[layer] = true;
+            for (const auto source : sources) {
+                auto &slot = next.at(source.key());
+                if (slot.layer < capacity) {
+                    continue;
                 }
+                while (used[layer]) {
+                    ++layer;
+                }
+                slot.layer = layer;
+                used[layer] = true;
             }
+            slots = std::move(next);
+            working = sources;
             return true;
         }
         int resident(NodeAddress source) const {
             const auto it = slots.find(source.key());
             return it != slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
         }
+
+    private:
+        bool validSource(NodeAddress source) const {
+            return source.level >= data.minTileLevel && source.level <= data.maxLevel &&
+                   source.x < data.nodesX(source.level) && source.z < data.nodesZ(source.level);
+        }
+
     };
 
     TilePagePool();
@@ -109,6 +119,7 @@ public:
     bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();
     bool valid() const { return _heightArray && _splatArray && _normalArray; }
+    // Reservation inputs are unique addresses, collected by LandscapeRenderer.
     bool canReserve(const ccstd::vector<NodeAddress> &sources) const;
     bool reserve(const ccstd::vector<NodeAddress> &sources);
     bool loadReserved(bool synchronous = false);
@@ -140,6 +151,7 @@ private:
     gfx::Sampler *_splatSampler{nullptr};
     bool _heightUnorm{false};
     Reservations _reservations;
+    // Includes decoded tiles until update() consumes them, even if no longer reserved.
     ccstd::unordered_set<uint64_t> _inFlight;
     uint64_t _updateRevision{0};
 };
@@ -154,6 +166,7 @@ public:
     TilePageResolver(TilePagePool &pool, const LandscapeData &data);
     Tile resolve(NodeAddress node) const;
     Vec4 shaderParams(const Tile &tile) const;
+    // Append unique source addresses in sampling order.
     void pageSources(VTPageAddress page, bool bakeNormals, ccstd::vector<NodeAddress> &output) const;
     bool resolvePage(VTPageAddress page, bool bakeNormals, VTPageInputs &output) const;
 

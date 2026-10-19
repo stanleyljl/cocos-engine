@@ -306,11 +306,17 @@ try {
   for(let z=0;z<17;z++)for(let x=0;x<17;x++){const h=Math.round((.2+.1*Math.sin(x*.8)*Math.cos(z*.4))*65535),at=(z*17+x)*4;heights.set([h>>8,h&255,0,255],at);}
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,17,17,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
   gl.activeTexture(gl.TEXTURE8);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,0,0,255]));
-  const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],quadrant=[0,0,.5,0],grid=[0,0,8,8],nodeSize=16,fade=1}={})=>{
+  const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],mapping=[0,0,0,0],grid=[0,0,8,8],nodeSize=16,fade=1}={})=>{
     const p=probePrograms[decal];gl.useProgram(p);
     const u=(n,...v)=>gl.uniform4f(gl.getUniformLocation(p,n),...v);
     const a=(n,...v)=>{const l=gl.getAttribLocation(p,n);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...v);}};
-    a('a_gridInst',0,0,nodeSize,0);a('a_quadrantInst',...quadrant);a('a_tileInst',0,0,16,0);a('a_normalParentInst',0,0,16,0);a('a_vtInst',0,0,16,0);a('a_decalRegion',0,0,16,0);a('a_decalGrid',...grid);a('a_decalFade',scale,fade,0,0);
+    a('a_gridInst',0,0,nodeSize,0);
+    a('a_mappingInst',...mapping);
+    a('a_tileInst',0,0,16,0);
+    a('a_normalParentInst',0,0,16,0);
+    a('a_decalRegion',0,0,16,0);
+    a('a_decalGrid',...grid);
+    a('a_decalFade',scale,fade,0,0);
     u('heightParams',1,17,0,0);u('terrainParams',10,0,0,0);u('morphCameraPos',...camera,0);u('decalControl',enabled,0,0,0);u('lodMorph[0]',...range,0,0);
     gl.uniform2f(gl.getUniformLocation(p,'testUV'),...uv);gl.uniform1i(gl.getUniformLocation(p,'heightmap'),7);gl.uniform1i(gl.getUniformLocation(p,'decalHeightMap'),8);
     gl.uniform1i(gl.getUniformLocation(p,'holeSplatmap'),15);
@@ -322,7 +328,7 @@ try {
   // then locating the rendered triangle on the CPU at a fixed XZ coordinate.
   // This is deliberately independent of the decal shader's 2x2 block search.
   const terrainMesh=options=>Array.from({length:17*17},(_,i)=>
-    probe([i%17/16,Math.floor(i/17)/16],{...options,decal:0,quadrant:[0,0,1,0]}));
+    probe([i%17/16,Math.floor(i/17)/16],{...options,decal:0,mapping:[0,0,0,0]}));
   const onTerrain=(mesh,xz)=>{
     for(let z=0;z<16;z++)for(let x=0;x<16;x++){
       const i=z*17+x;
@@ -367,12 +373,12 @@ try {
   }
   // The fine side of a 2:1 edge collapses odd vertices onto the coarse lattice.
   for(let j=0;j<=16;j++){
-    const fine=probe([1,j/16],{decal:0,quadrant:[0,0,1,2]});
-    const coarse=probe([.5,Math.floor(j/2)/16],{decal:0,nodeSize:32,quadrant:[0,0,1,0]});
+    const fine=probe([1,j/16],{decal:0,mapping:[0,2,0,0]});
+    const coarse=probe([.5,Math.floor(j/2)/16],{decal:0,nodeSize:32,mapping:[0,0,0,0]});
     approx(fine.slice(0,3),coarse.slice(0,3),'fine-to-coarse stitched edge is continuous');
   }
   for(const uv of sampleUVs){
-    approx(probe(uv,{quadrant:[.5,.5,.25,0]}),probe(uv),'VT patch ownership cannot retessellate a fixed grid');
+    approx(probe(uv,{mapping:[37,0,0,0]}),probe(uv),'VT mapping changes cannot retessellate a fixed grid');
   }
   // A high-frequency decal exposes the former bug: moving terrain vertices
   // used to sweep over peaks in this map and visibly change the stone shape.
@@ -425,8 +431,8 @@ try {
       });
       const attributes={a_position:[...uv,0,1],a_normal:[0,1,0,0],a_tangent:[1,0,0,1],
         a_matWorld0:[1,0,0,0],a_matWorld1:[0,1,0,0],a_matWorld2:[0,0,1,0],
-        a_gridInst:[0,0,16,0],a_quadrantInst:[0,0,1,0],a_tileInst:[0,0,16,0],
-        a_normalParentInst:[0,0,16,0],a_vtInst:[0,0,16,0],a_decalRegion:[0,0,16,0],
+        a_gridInst:[0,0,16,0],a_mappingInst:[0,0,0,0],a_tileInst:[0,0,16,0],
+        a_normalParentInst:[0,0,16,0],a_decalRegion:[0,0,16,0],
         a_decalGrid:[0,0,8,8],a_decalFade:[.6,1,0,0],a_localShadowBiasAndProbeId:[0,0,0,0]};
       for(const [name,value]of Object.entries(attributes)){
         const l=gl.getAttribLocation(p,name);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...value);}
@@ -439,7 +445,7 @@ try {
     };
     for(const range of [[100,200],[2,12],[0,.001]])for(const camera of [[-2,4,-2],[6,3,4]])for(const uv of sampleUVs.slice(0,5)){
       const reference=execute(programs[0],uv,camera,camera,range);
-      approx(reference,probe(uv,{decal,scale:.6,range,camera,quadrant:[0,0,1,0]}).slice(0,3),'full entry preserves displaced geometry');
+      approx(reference,probe(uv,{decal,scale:.6,range,camera,mapping:[0,0,0,0]}).slice(0,3),'full entry preserves displaced geometry');
       for(const lightCamera of [[-100,200,-70],[500,800,400]]){
         approx(execute(programs[1],uv,camera,lightCamera,range),reference,'shadow entry reuses main-camera geometry');
       }

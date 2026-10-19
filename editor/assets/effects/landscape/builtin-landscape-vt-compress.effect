@@ -183,8 +183,8 @@ CCProgram vt-astc-encode %{
       vec4 delta = reconstructed - pixels[i];
       error += dot(delta, delta);
       if (dual) {
-        int shared = separate == 0 ? 1 : 0;
-        weights[2 * i] = uint(weight[shared] * 2.0 + 0.5);
+        int sharedChannel = separate == 0 ? 1 : 0;
+        weights[2 * i] = uint(weight[sharedChannel] * 2.0 + 0.5);
         weights[2 * i + 1] = uint(weight[separate] * 2.0 + 0.5);
       } else {
         weights[i] = scramble[int(weight.x * 5.0 + 0.5)];

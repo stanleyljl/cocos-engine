@@ -36,7 +36,7 @@ try {
     gl.bindVertexArray(gl.createVertexArray()); gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(grid), gl.STATIC_DRAW);
     const location = gl.getAttribLocation(p, 'position'); gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
-    for (const [name, value] of Object.entries({ a_gridInst: [0,0,16,0], a_quadrantInst: [0,0,1,0], a_tileInst: [0,0,16,0], a_vtInst: [0,0,16,0] })) {
+    for (const [name, value] of Object.entries({ a_gridInst: [0,0,16,0], a_mappingInst: [0,0,0,0], a_tileInst: [0,0,16,0] })) {
         const at = gl.getAttribLocation(p, name); if (at >= 0) gl.vertexAttrib4f(at, ...value);
     }
     const uniform = (name, ...v) => gl.uniform4f(gl.getUniformLocation(p, name), ...v);

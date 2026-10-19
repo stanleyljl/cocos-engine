@@ -1637,8 +1637,6 @@ cocos_source_files(
                  cocos/landscape/TilePagePool.cpp
                  cocos/landscape/MaterialLibrary.h
                  cocos/landscape/MaterialLibrary.cpp
-                 cocos/landscape/BiomeMap.h
-                 cocos/landscape/BiomeMap.cpp
                  cocos/landscape/VirtualTexture.h
                  cocos/landscape/VirtualTexture.cpp
                  cocos/landscape/VTRenderer.h

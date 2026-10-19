@@ -7,7 +7,9 @@
 # Collaboration rules
 
 - Run performance tests, profiling, and benchmarks only with Release builds. Do not use Debug builds for performance measurements or optimization conclusions; Debug builds may still be used for functional debugging and compilation checks.
+- By default, validate only Windows Release builds. Validate Android only when the user explicitly requests it.
 - Engine code maintainability is a hard requirement for every change, including performance optimizations. Follow established engine flows and keep module responsibilities clear. Avoid one-off special cases, cross-module interfaces, or extra state for local optimizations unless their necessity is demonstrated and the maintenance cost is justified. When a fix requires substantial complexity, explain the evidence and tradeoffs before implementing it.
+- Before modifying shared/common modules, explain the reason, scope, and impact to the user and wait for their explicit decision. Do not extend a local feature or optimization into shared modules without approval.
 - Only modify code and ensure it compiles.
 - Do not automatically commit or push code unless the user explicitly requests it.
 - Prefer SSH when connecting to remote Git repositories. For HTTPS-configured remotes, use a per-command SSH URL rewrite without changing the remote configuration.

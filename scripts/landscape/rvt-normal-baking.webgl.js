@@ -380,7 +380,7 @@ try {
   const fs=unlit=>[
     'precision highp float;precision highp int;precision highp sampler2DArray;',
     '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
-    'uniform sampler2D vtAlbedo,vtNormalRoughnessAO;uniform sampler2DArray terrainNormalMap;',
+    'uniform sampler2D vtPageMap,vtAlbedo,vtNormalRoughnessAO;uniform sampler2DArray terrainNormalMap;',
     'uniform vec4 mainColor,terrainParams,sectorParams,morphCameraPos,vtLayout,rvtNormalParams,v_vtParams,lodMorph[9];',
     'uniform float v_normalMorph;const float v_lod=0.0;',
     'const vec2 v_normalUV=vec2(0.5);const float v_normalLayer=0.0;void discardLandscapeHole(){}',
@@ -398,11 +398,19 @@ try {
     gl.activeTexture(gl.TEXTURE0+8+i);const t=gl.createTexture();baseTextures.push(t);gl.bindTexture(gl.TEXTURE_2D,t);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
   }
+  gl.activeTexture(gl.TEXTURE10);
+  const pageMap=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,pageMap);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RG8,256,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array(512));
   const baseRender=(baked,morph,n,unlit=0)=>{
     const program=basePrograms[unlit];gl.useProgram(program);
     const pos=gl.getAttribLocation(program,'a_position');gl.enableVertexAttribArray(pos);gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
     const u=(name,...values)=>gl.uniform4f(gl.getUniformLocation(program,name),...values);
     u('mainColor',1,1,1,1);u('vtLayout',1,1,0,0);u('v_vtParams',0,0,1,0);u('rvtNormalParams',baked?1:0,0,0,0);
+    u('sectorParams',1,1,0,0);
+    gl.uniform1i(gl.getUniformLocation(program,'vtPageMap'),10);
     gl.uniform1f(gl.getUniformLocation(program,'v_normalMorph'),morph);
     gl.uniform1i(gl.getUniformLocation(program,'terrainNormalMap'),4);
     gl.uniform1i(gl.getUniformLocation(program,'vtAlbedo'),8);gl.uniform1i(gl.getUniformLocation(program,'vtNormalRoughnessAO'),9);
@@ -426,5 +434,64 @@ try {
     close(baseRender(false,morph,[0,0,1]).slice(4,7),enc(decode(xz)),'OFF uses the committed normal tile');
   }
   if(gl.getError()!==gl.NO_ERROR)throw new Error('WebGL Base Pass error');
+  // Execute the production lookup, including slot 255, row addressing, growth
+  // and exact node boundaries. Read coordinates directly to avoid filtering noise.
+  const coordinates=shaderFunctions.slice(0,shaderFunctions.indexOf('void sampleVirtualTexture'));
+  const lookup=link(vs,[
+    'precision highp float;precision highp int;',
+    'uniform sampler2D vtPageMap;uniform vec4 v_vtParams,sectorParams,vtLayout;',
+    'uniform vec2 point;layout(location=0)out vec4 color;',
+    coordinates,
+    'void main(){vec2 uv;vec2 dx;vec2 dy;virtualTextureCoordinates(point,vec2(0.01,0),vec2(0,0.01),uv,dx,dy);color=vec4(uv,dx);}'
+  ].join('\n'));
+  if(!gl.getExtension('EXT_color_buffer_float'))throw Error('Float lookup readback unavailable');
+  const lookupTarget=gl.createTexture();
+  gl.activeTexture(gl.TEXTURE11);
+  gl.bindTexture(gl.TEXTURE_2D,lookupTarget);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,null);
+  const lookupFramebuffer=gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,lookupFramebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,lookupTarget,0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Lookup framebuffer incomplete');
+  gl.useProgram(lookup);
+  const lookupPosition=gl.getAttribLocation(lookup,'a_position');
+  gl.enableVertexAttribArray(lookupPosition);
+  gl.vertexAttribPointer(lookupPosition,2,gl.FLOAT,false,0,0);
+  gl.uniform1i(gl.getUniformLocation(lookup,'vtPageMap'),10);
+  gl.uniform4f(gl.getUniformLocation(lookup,'v_vtParams'),32,48,16,3);
+  gl.uniform4f(gl.getUniformLocation(lookup,'sectorParams'),2048,1,0,0);
+  gl.uniform4f(gl.getUniformLocation(lookup,'vtLayout'),4352,272,8,4);
+  const mappingBytes=new Uint8Array(4*256*2);
+  for(let cell=0;cell<256;cell++){
+    mappingBytes[(3*256+cell)*2]=cell;
+    mappingBytes[(3*256+cell)*2+1]=cell%5;
+  }
+  for(const width of [256,512]){
+    gl.activeTexture(gl.TEXTURE10);
+    gl.bindTexture(gl.TEXTURE_2D,pageMap);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RG8,width,1024/width,0,gl.RG,gl.UNSIGNED_BYTE,mappingBytes);
+    for(const x of [0,0.999,1,7.25,15.75,16]){
+      for(const z of [0,1,8.125,15.75,16]){
+        gl.uniform2f(gl.getUniformLocation(lookup,'point'),32+x,48+z);
+        gl.drawArrays(gl.TRIANGLES,0,6);
+        const actual=new Float32Array(4);
+        gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,actual);
+        const cx=Math.min(15,Math.floor(x));
+        const cz=Math.min(15,Math.floor(z));
+        const physical=cz*16+cx;
+        const pageSize=2**(physical%5);
+        const originX=Math.floor((32+cx+0.5)/pageSize)*pageSize;
+        const originZ=Math.floor((48+cz+0.5)/pageSize)*pageSize;
+        const expected=[(cx*272+8+(32+x-originX)/pageSize*256)/4352,
+          (cz*272+8+(48+z-originZ)/pageSize*256)/4352];
+        for(let axis=0;axis<2;axis++){
+          if(Math.abs(actual[axis]-expected[axis])>1e-6)throw Error('Local VT lookup mismatch '+[width,x,z,axis,actual[axis],expected[axis]]);
+          checks++;
+        }
+      }
+    }
+  }
+  if(gl.getError()!==gl.NO_ERROR)throw Error('WebGL local mapping error');
   result.textContent='PASS: compose, mip, Base Pass and shadow GLSL ES 3 variants compiled and linked; '+checks+' pixel checks passed.';
 } catch(e) { result.textContent='FAIL: '+e.stack; }

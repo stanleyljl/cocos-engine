@@ -74,9 +74,6 @@ constexpr uint32_t VT_PAGE_RES = VT_PAGE_INTERIOR + 2 * VT_PAGE_BORDER;
 constexpr uint32_t VT_ATLAS_SIZE = VT_PAGE_RES * 16;
 // Shared by all resource transactions and camera passes in one frame.
 constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
-constexpr uint32_t STREAMING_STEP_BUDGET = 8;
-constexpr uint32_t STREAMING_ADMISSION_BUDGET = 16;
-constexpr double   STREAMING_TIME_BUDGET_MS = 2.0;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 static_assert(MAX_SECTOR_COUNT <= VT_PAGE_COUNT, "VT must hold every sector root");

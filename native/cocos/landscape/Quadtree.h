@@ -130,7 +130,7 @@ public:
     }
     const ccstd::unordered_set<uint64_t> &leaves() const { return _leaves; }
     // Index each target's path once: request construction is O(targets * depth),
-    // instead of comparing every committed leaf against every target patch.
+    // instead of comparing every committed leaf against every target node.
     void target(const ccstd::vector<QuadNode> &nodes) {
         _refine.clear();
         for (const auto &n : nodes) {
@@ -253,28 +253,26 @@ public:
     }
     // Visibility belongs to the committed cut, not to target selections. Coarse
     // reconstruction can be visible even when all desired fine bounds are culled.
-    // The predicate must conservatively bound the region and all its descendants.
-    template <class Intersects, class Visit>
-    void cull(const Intersects &intersects, const Visit &visit) const {
+    // Visit each node once. Return false to prune an internal node; leaves
+    // collect their models directly, using the committed model bounds.
+    template <class Visit>
+    void cull(const Visit &visit) const {
         for (uint32_t z = 0; z < _data.sectorsZ; ++z) {
             for (uint32_t x = 0; x < _data.sectorsX; ++x) {
-                cullNode({_data.maxLevel, x, z}, intersects, visit);
+                cullNode({_data.maxLevel, x, z}, visit);
             }
         }
     }
 
 private:
-    template <class Intersects, class Visit>
-    void cullNode(NodeAddress node, const Intersects &intersects, const Visit &visit) const {
-        if (!intersects(node)) {
-            return;
-        }
-        if (_leaves.count(node.key())) {
-            visit(node);
+    template <class Visit>
+    void cullNode(NodeAddress node, const Visit &visit) const {
+        const bool leaf = _leaves.count(node.key()) != 0;
+        if (!visit(node, leaf) || leaf) {
             return;
         }
         for (uint32_t q = 0; q < 4; ++q) {
-            cullNode({node.level - 1, node.x * 2 + (q & 1), node.z * 2 + (q >> 1)}, intersects, visit);
+            cullNode({node.level - 1, node.x * 2 + (q & 1), node.z * 2 + (q >> 1)}, visit);
         }
     }
 

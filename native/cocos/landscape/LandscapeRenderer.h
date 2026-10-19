@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
 
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
@@ -66,8 +67,8 @@ class VTRenderer;
 /**
  * Coordinates the frame plan, source residency and terrain models.
  * The quadtree owns visibility/LOD; VirtualTexture owns material-page residency;
- * TilePageResolver owns source lookup. Four shared grids split selected node
- * quadrants into material-page patches without adding triangles.
+ * TilePageResolver owns source lookup. Each committed node draws one shared
+ * 16 x 16 grid and selects material pages through a local mapping texture.
  */
 class LandscapeRenderer {
 public:
@@ -95,44 +96,15 @@ public:
     void setGlobalColorMap(Texture2D *texture);
     void setViewPos(const Vec3 &position);
     TextureBase *vtAtlas() const;
+    LandscapeDrawCalls getDrawCalls(uint32_t frame) const;
+    void estimateDrawCalls(const ccstd::vector<const scene::Model *> &models);
 
 private:
     friend struct LandscapePagingTestAccess;
     uint32_t _holeMode{0};
 
-    // A camera/pass change must not replenish any per-frame streaming budget.
-    // The time limit is checked between indivisible steps; allow the first step
-    // to make progress even if source uploads/selection have used the time slice.
-    struct StreamingBudget {
-        bool begin(uint64_t frame, double nowMs) {
-            if (valid && stamp == frame) {
-                return false;
-            }
-            valid = true;
-            stamp = frame;
-            deadlineMs = nowMs + config::STREAMING_TIME_BUDGET_MS;
-            pages = config::VT_PAGE_UPDATE_BUDGET;
-            attempts = config::STREAMING_ADMISSION_BUDGET;
-            steps = config::STREAMING_STEP_BUDGET;
-            return true;
-        }
-        bool nextStep(double nowMs) {
-            if (steps == 0 || (steps != config::STREAMING_STEP_BUDGET && nowMs >= deadlineMs)) {
-                return false;
-            }
-            --steps;
-            return true;
-        }
-        uint32_t pages{0};
-        uint32_t attempts{0};
-        uint32_t steps{0};
-        uint64_t stamp{0};
-        double deadlineMs{0};
-        bool valid{false};
-    };
-
     // Skip CPU reconstruction only when both selection and streamed content are
-    // unchanged. Publishing completed pages must refresh direct instance mappings,
+    // unchanged. Publishing completed pages must refresh local grid mappings,
     // even when the camera is stationary.
     class SyncCache {
     public:
@@ -196,6 +168,9 @@ private:
     };
 
     void sync(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void updateSelection(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes,
+                         const SyncCache::Positions &positions);
+    void streamResources();
     void setLodColor(bool enabled);
     void setShowRanges(bool enabled);
     void setWireframe(bool wireframe);
@@ -206,49 +181,67 @@ private:
     void setBakeNormalEnabled(bool enabled);
     void setCliffEnabled(bool enabled);
 
-    struct Patch {
+    struct GridDraw {
         QuadNode node;
-        uint32_t x{0}; // cell offset inside the original 16 x 16 node
-        uint32_t z{0};
-        uint32_t meshIndex{0}; // 1, 2, 4 or 8 cells per side
-        VTPageAddress page;
-        // Only committed patches own models; pending patches contain the plan alone.
+        VTGridMapping material;
+        int mapping{-1};
+        // Pending draws contain only the plan; committed draws own GPU instances.
         IntrusivePtr<scene::Model> model;
+    };
+
+    enum class ChangeKind {
+        INITIAL,
+        GEOMETRY,
+        MATERIAL,
+    };
+    // Geometry candidates replace selected nodes; material candidates only
+    // replace bindings on existing nodes and leave selection empty.
+    // Discarding it never changes the displayed models or resource references.
+    struct PendingChange {
+        RenderSelection::Change selection;
+        ccstd::unordered_map<uint64_t, GridDraw> draws;
+        ChangeKind kind{ChangeKind::INITIAL};
+        bool empty() const {
+            return selection.empty() && draws.empty();
+        }
+    };
+    struct ResourcePlan {
+        // Deduplicated here, before either resource pool validates or reserves them.
+        ccstd::vector<NodeAddress> sources;
+        ccstd::vector<VTPageAddress> pages;
     };
 
     // Frame stages: selection -> residency/source publication -> models -> decals.
     QuadNode drawNode(NodeAddress node) const;
-    void buildPatches(NodeAddress node, uint32_t bias, ccstd::vector<Patch> &patches);
-    bool stage(const RenderSelection::Change &change, bool geometry, bool roots = false);
-    bool planResources(bool reserve);
+    bool stage(const RenderSelection::Change &change, ChangeKind kind);
+    bool stageMaterial(NodeAddress node);
+    bool planResources(ResourcePlan &plan) const;
+    bool reserveResources();
+    bool reserveResources(const ResourcePlan &plan);
     void resetPlanning();
-    bool planNext(uint32_t &attempts);
+    void planNext();
     void commitPending();
     void clearPending();
     bool updateResources(bool synchronous);
-    void updateReferences(uint64_t key, const ccstd::vector<Patch> &patches, bool add);
     bool colorRegion(NodeAddress node) const;
     void stopLoading();
     void syncTerrainModels();
     void bindRuntimeTextures();
-    void syncDecals();
-    void recycleModels(ccstd::vector<Patch> &patches);
-    IntrusivePtr<scene::Model> createModel(uint32_t meshIndex);
+    void recycleModel(GridDraw &draw);
+    IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
+    void refreshTerrainMaterials();
     void updateMorphCameraProperty();
-    LandscapeSurfaceInstance resolveSurface(const Patch &patch);
+    LandscapeSurfaceInstance resolveSurface(const GridDraw &draw);
     std::array<Material *, 4> surfaceMaterials() const;
-    void updateInstanceData(scene::Model *model, const Patch &patch);
-    void updateModel(Patch &patch);
-    void updateModelBounds(scene::Model *model, const Patch &patch);
-    void selectPatches(const QuadNode &node, uint32_t x, uint32_t z, uint32_t meshIndex, uint32_t bias,
-                       ccstd::vector<Patch> &patches);
-    LandscapeRegion patchRegion(const Patch &patch) const;
-    float patchDistance(const QuadNode &node, float x, float z, float size) const;
+    void updateInstanceData(scene::Model *model, const GridDraw &draw);
+    void updateModel(GridDraw &draw);
+    void updateModelBounds(scene::Model *model, const GridDraw &draw);
+    float regionDistance(const QuadNode &node, float x, float z, float size) const;
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
-    std::array<IntrusivePtr<RenderingSubMesh>, 4> _meshes;
+    IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
     std::unique_ptr<DecalRenderer> _decals;
@@ -257,32 +250,27 @@ private:
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
 
-    std::array<ccstd::vector<IntrusivePtr<scene::Model>>, 4> _pool;
+    ccstd::vector<IntrusivePtr<scene::Model>> _pool;
     VTPageLayout _vtLayout;
     SyncCache _syncCache;
-    StreamingBudget _streamingBudget;
+    // All cameras share one VT composition allowance per frame.
+    std::optional<uint32_t> _streamingFrame;
+    uint32_t _remainingVTPages{0};
     RenderSelection _selection;
-    RenderSelection::Change _change;
-    ccstd::unordered_map<uint64_t, ccstd::vector<Patch>> _draws;
-    ccstd::unordered_map<uint64_t, ccstd::vector<Patch>> _pendingDraws;
-    ccstd::unordered_map<uint64_t, uint32_t> _heightRefs;
-    ccstd::unordered_map<uint64_t, uint32_t> _pageRefs;
+    PendingChange _pending;
+    ccstd::unordered_map<uint64_t, GridDraw> _draws;
     ccstd::unordered_set<uint64_t> _dirtyNodes;
     ccstd::unordered_set<uint64_t> _colorPaths;
     ccstd::unordered_set<uint64_t> _colorSelected;
     ccstd::vector<RenderSelection::Request> _requests;
     ccstd::vector<NodeAddress> _materialNodes;
-    ccstd::vector<NodeAddress> _workingSources;
-    ccstd::vector<VTPageAddress> _workingPages;
     size_t _requestIndex{0};
     size_t _materialIndex{0};
-    bool _reserved{false};
     bool _settled{false};
     bool _initialized{false};
-    bool _changingGeometry{false};
     bool _planningInvalid{false};
     bool _preferMaterial{true};
-    uint64_t _preparedPageRevision{0};
+    std::optional<uint64_t> _reservedPageRevision;
     std::unique_ptr<TilePageResolver> _sourceResolver;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
@@ -299,6 +287,8 @@ private:
     bool _receiveShadow{true};
     bool _ready{false};
     bool _loadingFailed{false};
+    uint32_t _drawCallFrame{0};
+    LandscapeDrawCalls _drawCalls;
 };
 
 } // namespace landscape

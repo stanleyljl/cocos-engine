@@ -10,13 +10,14 @@ CCEffect %{
         holeParams: { value: [0, 0, 0, 0] }
         holeSplatmap: { sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         terrainParams: { value: [3000, 0, 0, 0] }
-        sectorParams: { value: [1, 0, 0, 0] }
+        sectorParams: { value: [1, 1, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4352, 272, 8, 4] }
         decalControl: { value: [1, 0, 0, 0] }
         decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         rvtNormalParams: { value: [1, 0, 0, 0] }
+        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -62,7 +63,7 @@ CCProgram landscape-uniforms %{
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
-    vec4 sectorParams; // sector size, unused YZW
+    vec4 sectorParams; // sector size, finest VT page size, unused ZW
     vec4 morphCameraPos;
     vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
@@ -124,11 +125,8 @@ CCProgram landscape-vertex %{
   #endif
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_quadrantInst; // UV offset XY, patch UV size Z, coarse-neighbor edge mask W
+    in vec4 a_mappingInst; // local table slot, coarse-neighbor edge mask, unused ZW
     in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
-    #if !LANDSCAPE_SHADOW_PASS
-      in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
-    #endif
     in vec4 a_decalRegion; // minimum XZ, world size, height texture layer
     in vec4 a_decalGrid; // fixed XZ origin, width and depth; independent of LOD
     in vec4 a_decalFade; // height scale, whole-decal distance fade, unused ZW
@@ -223,12 +221,12 @@ CCProgram landscape-vertex %{
     v_normalUV = vec2(0.5);
     v_normalLayer = 0.0;
     #if USE_INSTANCING
-      v_vtParams = a_vtInst;
+      v_vtParams = vec4(a_gridInst.xyz, a_mappingInst.x);
     #endif
   #endif
   #endif
   #if USE_INSTANCING
-    vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
+    vec2 parentUV = In.position.xy;
     localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
     #if !LANDSCAPE_SHADOW_PASS
       v_lod = a_gridInst.w;

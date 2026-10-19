@@ -36,15 +36,14 @@ class Device;
 namespace landscape {
 
 /**
- * Shared grids with 1, 2, 4 or 8 cells per side. Material-page patches retain
- * the original CDLOD cell spacing and triangles while batching by grid size.
- * The shader restores parent-node coordinates before applying morph.
+ * Shared normalized grids for complete terrain nodes and fixed decal blocks.
+ * Terrain geometry uses 16 cells per side; material resolution comes from VT.
  */
 class GridMesh {
 public:
     // Creates the shared grid RenderingSubMesh (RG32F XZ position, triangle list).
     // Returns a new object; the caller takes ownership (e.g. via IntrusivePtr).
-    static RenderingSubMesh *create(gfx::Device *device, uint32_t cells = 8);
+    static RenderingSubMesh *create(gfx::Device *device, uint32_t cells = 16);
     // An RG32F [0,1] XZ quad (4 vertices, 6 indices) for VT page rendering.
     static RenderingSubMesh *createVTQuad(gfx::Device *device);
 };
