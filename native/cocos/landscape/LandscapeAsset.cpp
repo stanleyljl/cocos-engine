@@ -234,7 +234,9 @@ bool LandscapeAsset::Manifest::readMaterials() {
                 !value.HasMember("name") || !value["name"].IsString() ||
                 !value.HasMember("albedoHeight") || !value["albedoHeight"].IsString() ||
                 !value.HasMember("normalRoughnessAO") || !value["normalRoughnessAO"].IsString() ||
-                !readFloat(value, "pixelsPerMeter", layer.pixelsPerMeter) || layer.pixelsPerMeter <= 0.0F) {
+                !readFloat(value, "pixelsPerMeter", layer.pixelsPerMeter) || layer.pixelsPerMeter <= 0.0F ||
+                !readFloat(value, "globalColorInfluence", layer.globalColorInfluence) ||
+                layer.globalColorInfluence < 0.0F || layer.globalColorInfluence > 1.0F) {
                 CC_LOG_WARNING("[Landscape] invalid material layer %u in '%s'", i, manifestPath.c_str());
                 return false;
             }

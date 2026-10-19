@@ -11,17 +11,23 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { spawnSync } = require('node:child_process');
 
-const configured = process.env.LANDSCAPE_EFFECT_JSON && process.env.LANDSCAPE_BASE_EFFECT_JSON && process.env.CHROME_PATH;
+const configured = process.env.LANDSCAPE_EFFECT_JSON && process.env.LANDSCAPE_BASE_EFFECT_JSON
+    && process.env.LANDSCAPE_DECAL_EFFECT_JSON && process.env.CHROME_PATH;
 test('RVT decal material and conforming near mesh on WebGL2', {
-    skip: configured ? false : 'Set LANDSCAPE_EFFECT_JSON, LANDSCAPE_BASE_EFFECT_JSON and CHROME_PATH to run the GPU checks',
+    skip: configured ? false : 'Set LANDSCAPE_EFFECT_JSON, LANDSCAPE_BASE_EFFECT_JSON, LANDSCAPE_DECAL_EFFECT_JSON and CHROME_PATH to run the GPU checks',
 }, () => {
     const effect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_EFFECT_JSON, 'utf8'));
     assert.equal(effect.shaders.length, 2, 'Compile both compose and mip techniques');
     assert.doesNotMatch(effect.shaders[0].glsl3.frag, /v_source.w < 0.0/, 'VT contains only normal terrain composition');
     const baseEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
-    const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/builtin-landscape.effect'), 'utf8');
-    const vertexChunk = source.split('CCProgram landscape-vertex %{')[1].split('}%')[0]
-        .replace('#include <landscape-hole-sampling>', source.split('CCProgram landscape-hole-sampling %{')[1].split('}%')[0]);
+    const decalEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_DECAL_EFFECT_JSON, 'utf8'));
+    const vertexChunks = ['builtin-landscape', 'builtin-landscape-decal'].map(name => {
+        const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/landscape', `${name}.effect`), 'utf8');
+        return source.split('CCProgram landscape-vertex %{')[1].split('}%')[0]
+            .replace('#include <landscape-hole-sampling>', source.split('CCProgram landscape-hole-sampling %{')[1].split('}%')[0])
+            .replace('#include <landscape/terrain-height>', fs.readFileSync(path.join(__dirname,
+                '../../editor/assets/chunks/landscape/terrain-height.chunk'), 'utf8'));
+    });
     const harness = fs.readFileSync(path.join(__dirname, 'decal-rendering.webgl.js'), 'utf8');
     new (require('node:vm').Script)(harness); // Report syntax errors before launching Chrome.
     const prefix = path.join(os.tmpdir(), 'landscape-decal-test-');
@@ -30,8 +36,9 @@ test('RVT decal material and conforming near mesh on WebGL2', {
         const html = path.join(directory, 'test.html');
         fs.writeFileSync(html, '<pre id="result">RUNNING</pre><script>const effect='
             + JSON.stringify(effect).replace(/</g, '\\u003c') + ';const baseEffect='
-            + JSON.stringify(baseEffect).replace(/</g, '\\u003c') + ';const vertexChunk='
-            + JSON.stringify(vertexChunk).replace(/</g, '\\u003c') + ';\n' + harness + '</script>');
+            + JSON.stringify(baseEffect).replace(/</g, '\\u003c') + ';const decalEffect='
+            + JSON.stringify(decalEffect).replace(/</g, '\\u003c') + ';const vertexChunks='
+            + JSON.stringify(vertexChunks).replace(/</g, '\\u003c') + ';\n' + harness + '</script>');
         const run = spawnSync(process.env.CHROME_PATH, [
             '--headless', '--no-sandbox', '--disable-gpu-sandbox', '--use-angle=swiftshader',
             '--enable-unsafe-swiftshader', '--no-first-run', '--user-data-dir=' + path.join(directory, 'profile'),

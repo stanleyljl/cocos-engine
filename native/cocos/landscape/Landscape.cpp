@@ -534,7 +534,7 @@ void Landscape::drawDebugBounds() {
 #endif
 }
 
-RenderTexture *Landscape::getVTAtlas() const {
+TextureBase *Landscape::getVTAtlas() const {
     return _renderer ? _renderer->vtAtlas() : nullptr;
 }
 

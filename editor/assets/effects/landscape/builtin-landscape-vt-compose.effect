@@ -23,7 +23,7 @@ CCEffect %{
         cliffMaterialParams: { value: [0, 1, 0, 0] }
         cliffSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
         terrainHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
-        materialParams: { value: [0.1, 0.5, 0.5, 0.5] }
+        materialParams: { value: [0.1, 1, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
         decalRegions: { value: [0, 0, 1, 0] }
@@ -76,7 +76,11 @@ CCProgram vt-mip-vs %{
   #endif
   vec4 vert() {
     float count = mipLayout.x / mipLayout.y;
-    v_slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    #if LANDSCAPE_VT_COMPACT
+      v_slot = vec2(0.0);
+    #else
+      v_slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    #endif
     v_pageUV = a_position;
     vec2 clip = (v_slot + a_position) / count * 2.0 - 1.0;
     clip.y *= mipLayout.w;
@@ -100,7 +104,7 @@ CCProgram vt-mip-fs %{
       return normalize(vec3(nra.r, albedo.a, nra.g) * 2.0 - 1.0);
     }
     void main() {
-      // Halve the complete slot: 512+8+8 -> 256+4+4 -> 128+2+2. Integer fetches
+      // Halve the complete slot: 256+8+8 -> 128+4+4 -> 64+2+2. Integer fetches
       // cannot cross into an unrelated physical slot, even at its outer edge.
       int size = int(mipLayout.y);
       int sourceLod = int(mipLayout.z);
@@ -134,7 +138,7 @@ CCProgram vt-compose-uniforms %{
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
     vec4 sourceParams; // tile resolution, bake terrain normals, unused ZW
-    vec4 materialParams[32]; // repeats/m, mean linear material RGB
+    vec4 materialParams[32]; // repeats/m, biome influence, unused, unused
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
     vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
@@ -167,7 +171,11 @@ CCProgram vt-compose-vs %{
 
   vec4 vert() {
     float count = vtLayout.x / vtLayout.y;
-    vec2 slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    #if LANDSCAPE_VT_COMPACT
+      vec2 slot = vec2(0.0);
+    #else
+      vec2 slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    #endif
     vec2 atlasUv = (slot * vtLayout.y + a_position * vtLayout.y) / vtLayout.x;
     // The border evaluates real neighboring coordinates rather than duplicating
     // edge pixels. Interior uv=0/1 lies on the corresponding node boundary.
@@ -212,18 +220,10 @@ CCProgram vt-compose-fs %{
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
 
-  vec3 applyBiomeColor(vec3 albedo, vec3 meanColor, float strength) {
-    // The map supplies the target mean, rather than a darkening multiplier.
-    // Remap [0, mean, 1] to [0, target, 1] independently in linear RGB. This
-    // preserves texture variation on both sides of the mean without clipping
-    // bright details when the target is lighter than the original material.
-    vec2 uv = v_localXZ * globalColorParams.xy;
-    vec3 target = SRGBToLinear(texture(globalColorMap, uv).rgb);
-    vec3 detail = albedo - meanColor;
-    vec3 belowMean = target / max(meanColor, vec3(0.000001));
-    vec3 aboveMean = (vec3(1.0) - target) / max(vec3(1.0) - meanColor, vec3(0.000001));
-    vec3 recolored = target + detail * mix(belowMean, aboveMean, step(vec3(0.0), detail));
-    return mix(albedo, recolored, strength);
+  vec3 applyBiomeColor(vec3 albedo, vec3 modulation, float influence) {
+    // Modulation is a signed linear gain, not a target albedo. Apply each
+    // material's influence before blending so protected layers retain their color.
+    return clamp(albedo * (vec3(1.0) + modulation * influence), 0.0, 1.0);
   }
 
   float heightBlend(float weight, float height0, float height1) {
@@ -468,7 +468,15 @@ CCProgram vt-compose-fs %{
     surface.normal = vec3(0.0);
     surface.roughness = 0.0;
     surface.ao = 0.0;
-    vec3 meanColor = vec3(0.0);
+    // RGB stores raw UNORM modulation data: byte 128 is exactly neutral.
+    // Do not decode sRGB. Alpha is regional coverage, independent of material influence.
+    // Source rows follow +Z, matching height/splat tiles and VT page borders.
+    vec3 modulation = vec3(0.0);
+    float biomeStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
+    if (biomeStrength > 0.0) {
+      vec4 biome = texture(globalColorMap, v_localXZ * globalColorParams.xy);
+      modulation = (biome.rgb * (255.0 / 128.0) - vec3(1.0)) * (biome.a * biomeStrength);
+    }
     for (int projection = 0; projection < 3; ++projection) {
       float axisWeight = axisWeights[projection];
       if (axisWeight <= 0.0) {
@@ -504,8 +512,8 @@ CCProgram vt-compose-fs %{
           vec3 coord = vec3(frame.uv * scale, float(layers[i]));
           vec4 ah = albedoHeights[i];
           vec4 nra = textureGrad(normalRoughnessAOMap, coord, frame.dx * scale, frame.dy * scale);
-          surface.albedo += SRGBToLinear(ah.rgb) * (weights[i] * axisWeight);
-          meanColor += materialParams[layers[i]].yzw * (weights[i] * axisWeight);
+          vec3 albedo = applyBiomeColor(SRGBToLinear(ah.rgb), modulation, materialParams[layers[i]].y);
+          surface.albedo += albedo * (weights[i] * axisWeight);
           vec3 detail = decodeNormal(nra.rg);
           vec3 localNormal = frame.tangent * detail.x + frame.bitangent * detail.y + shadingNormal * detail.z;
           surface.normal += localNormal * (weights[i] * axisWeight);
@@ -518,12 +526,6 @@ CCProgram vt-compose-fs %{
     // when cached normals are disabled. Only the final output encoding depends on that setting.
     surface.normal = normalize(vec3(dot(surface.normal, frameTangent), dot(surface.normal, frameBitangent),
                                     dot(surface.normal, shadingNormal)));
-    // Source image rows run along +Z, just like height/splat tiles. This map
-    // covers the whole landscape once, including all VT pages and their borders.
-    float globalColorStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
-    if (globalColorStrength > 0.0) {
-      surface.albedo = applyBiomeColor(surface.albedo, meanColor, globalColorStrength);
-    }
     applyDecals(surface);
     if (sourceParams.y > 0.5) {
       surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +

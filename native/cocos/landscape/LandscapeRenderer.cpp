@@ -35,7 +35,6 @@
 #include "core/Root.h"
 #include "core/TypedArray.h"
 #include "core/assets/Material.h"
-#include "core/assets/RenderTexture.h"
 #include "core/assets/RenderingSubMesh.h"
 #include "core/geometry/AABB.h"
 #include "core/scene-graph/Node.h"
@@ -45,102 +44,41 @@
 #include "landscape/VTRenderer.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXBuffer.h"
-#include "renderer/gfx-base/GFXCommandBuffer.h"
-#include "renderer/gfx-base/GFXInputAssembler.h"
-#include "renderer/gfx-base/GFXPipelineState.h"
-#include "renderer/gfx-base/GFXQueue.h"
-#include "renderer/gfx-base/GFXRenderPass.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
-#include "renderer/gfx-base/GFXFramebuffer.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "renderer/gfx-base/states/GFXSampler.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
-#include "scene/RenderWindow.h"
 
 namespace cc {
 namespace landscape {
 
 namespace {
-// Verify the current device instead of assuming non-finite position behavior
-// from an API/vendor name. Both triangles share the marked vertex. A control
-// draw also detects failed rendering/readback, which must select fragment holes.
-bool probeVertexHoleCulling(gfx::Device *device) {
-    struct ProbeResources {
-        IntrusivePtr<Material> material{ccnew Material()};
-        IntrusivePtr<RenderTexture> target{ccnew RenderTexture()};
-        ~ProbeResources() {
-            target->destroy();
-            material->destroy();
-        }
-    } resources;
-    auto &material = resources.material;
+Material *createLandscapeMaterial(bool wireframe, bool heightUnorm) {
+    auto *material = ccnew Material();
     IMaterialInfo info;
-    info.effectName = ccstd::string{"builtin-landscape"};
-    info.technique = 1;
+    info.effectName = ccstd::string{"landscape/builtin-landscape"};
+    MacroRecord defines;
+    defines["USE_INSTANCING"] = true;
+    defines["LANDSCAPE_DEBUG_UNLIT"] = false;
+    defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
+    // Compile debug edges out of the normal material entirely.
+    defines["LANDSCAPE_WIREFRAME"] = wireframe;
+    info.defines = IMaterialInfo::DefinesType{defines};
+
+    if (wireframe) {
+        RasterizerStateInfo rasterizer;
+        rasterizer.cullMode = gfx::CullMode::NONE;
+        PassOverrides overrides;
+        overrides.rasterizerState = rasterizer;
+        info.states = IMaterialInfo::PassOverridesType{overrides};
+    }
+
     material->initialize(info);
-    if (!material->getPasses() || material->getPasses()->empty()) {
-        return false;
-    }
-    auto *pass = material->getPasses()->front().get();
-    if (!pass->getHandle("probeParams")) {
-        return false;
-    }
-    auto *shader = pass->getShaderVariant();
-    if (!shader) {
-        return false;
-    }
-    IntrusivePtr<RenderingSubMesh> mesh = GridMesh::createVTQuad(device);
-    if (!mesh) return false;
-    gfx::InputAssemblerInfo input;
-    input.attributes = mesh->getAttributes();
-    input.vertexBuffers = mesh->getVertexBuffers();
-    input.indexBuffer = mesh->getIndexBuffer();
-    IntrusivePtr<gfx::InputAssembler> ia = device->createInputAssembler(input);
-    IRenderTextureCreateInfo targetInfo;
-    targetInfo.name = "landscape-hole-probe";
-    targetInfo.width = targetInfo.height = 8;
-    gfx::ColorAttachment color;
-    color.format = gfx::Format::RGBA8;
-    color.loadOp = gfx::LoadOp::CLEAR;
-    color.storeOp = gfx::StoreOp::STORE;
-    color.barrier = device->getGeneralBarrier({gfx::AccessFlagBit::NONE, gfx::AccessFlagBit::TRANSFER_READ});
-    gfx::RenderPassInfo renderInfo;
-    renderInfo.colorAttachments = {color};
-    targetInfo.passInfo = renderInfo;
-    auto &target = resources.target;
-    target->initialize(targetInfo);
-    if (!target->getWindow() || !target->getWindow()->getFramebuffer()) return false;
-    auto *framebuffer = target->getWindow()->getFramebuffer();
-    IntrusivePtr<gfx::PipelineState> pipeline = device->createPipelineState({shader, pass->getPipelineLayout(), framebuffer->getRenderPass(),
-        {input.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(), *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
-    IntrusivePtr<gfx::CommandBuffer> commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
-    if (!ia || !pipeline || !commands) {
-        return false;
-    }
-    for (uint32_t test = 0; test < 2; ++test) {
-        material->setPropertyVec4("probeParams", Vec4{static_cast<float>(test), 0, 0, 0});
-        pass->update();
-        commands->begin();
-        const gfx::Color clear{0, 0, 0, 0};
-        commands->beginRenderPass(framebuffer->getRenderPass(), framebuffer, {0, 0, 8, 8}, &clear, 1.0F, 0);
-        commands->bindPipelineState(pipeline);
-        commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), pass->getDescriptorSet());
-        commands->bindInputAssembler(ia);
-        commands->draw(ia->getDrawInfo());
-        commands->endRenderPass();
-        commands->end();
-        gfx::CommandBuffer *command = commands.get();
-        device->flushCommands(&command, 1);
-        device->getQueue()->submit(&command, 1);
-        const auto pixels = target->readPixels(0, 0, 8, 8);
-        if (pixels.size() != 8U * 8U * 4U || !std::all_of(pixels.begin(), pixels.end(), [test](uint8_t v) { return v == (test == 0 ? 255 : 0); })) {
-            return false;
-        }
-    }
-    return true;
+    return material;
 }
+
 } // namespace
 
 LandscapeRenderer::LandscapeRenderer() = default;
@@ -163,8 +101,8 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
         _meshes[i] = GridMesh::create(device, 1U << i);
     }
     const bool heightUnorm = TilePagePool::supportsHeightUnorm(device);
-    _materialSolid = createLandscapeMaterial(false, false, heightUnorm);
-    _materialWire = createLandscapeMaterial(true, false, heightUnorm);
+    _materialSolid = createLandscapeMaterial(false, heightUnorm);
+    _materialWire = createLandscapeMaterial(true, heightUnorm);
     _decals = std::make_unique<DecalRenderer>();
     const bool decalsReady = _decals->init(node, scene, heightUnorm);
     if (std::any_of(_meshes.begin(), _meshes.end(), [](const auto &mesh) { return mesh == nullptr; }) ||
@@ -180,8 +118,6 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene) {
         return false;
     }
     _instanceAttributeScratch = Float32Array(4);
-    _vertexHoleCullingSupported = probeVertexHoleCulling(device);
-    CC_LOG_INFO("[Landscape] hole culling: %s", _vertexHoleCullingSupported ? "vertex NaN verified" : "fragment fallback");
     _decals->setEnabled(_debugData.decal3DEnabled);
     _decals->setWireframe(_debugData.wireframe);
     _decals->setCastShadow(_castShadow);
@@ -412,10 +348,9 @@ void LandscapeRenderer::updateMaterialProperties() {
     }
 
     for (auto *material : surfaceMaterials()) {
-        material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U && _vertexHoleCullingSupported ? 0.0F : 1.0F, 0, 0, 0});
+        material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U ? 0.0F : 1.0F, 0, 0, 0});
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, 0, 0, 0});
-        material->setPropertyVec4("decalControl", Vec4{_debugData.decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("rvtNormalParams", Vec4{_vtRenderer && _vtRenderer->isBakeNormalEnabled() ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4("heightParams", Vec4{_heightSampleSpacing,
                                                        static_cast<float>(_data.tileResolution),
@@ -424,6 +359,9 @@ void LandscapeRenderer::updateMaterialProperties() {
         material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
                                                    static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
                                                    static_cast<float>(config::VT_FILTER_MARGIN)});
+    }
+    for (auto *material : _decals->materials()) {
+        material->setPropertyVec4("decalControl", Vec4{_debugData.decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
     }
     updateMorphCameraProperty();
 }
@@ -1239,7 +1177,7 @@ void LandscapeRenderer::setViewPos(const Vec3 &position) {
     updateMorphCameraProperty();
 }
 
-RenderTexture *LandscapeRenderer::vtAtlas() const {
+TextureBase *LandscapeRenderer::vtAtlas() const {
     return _vtRenderer ? _vtRenderer->atlas() : nullptr;
 }
 

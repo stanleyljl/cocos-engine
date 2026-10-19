@@ -12,7 +12,7 @@ try {
   };
   const programs = effect.shaders.map(s => {
     const p = gl.createProgram();
-    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n';
+    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n#define LANDSCAPE_VT_COMPACT 0\n';
     gl.attachShader(p, compile(gl.VERTEX_SHADER, prefix + s.glsl3.vert));
     gl.attachShader(p, compile(gl.FRAGMENT_SHADER, prefix + s.glsl3.frag)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
@@ -69,7 +69,9 @@ try {
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
-    for(let i=0;i<32;i++) constants.set([scale,...(colors[i%8].slice(0,3).map(v=>(v/255)**2))],8+i*4);
+    for (let i = 0; i < 32; i++) {
+      constants.set([scale, 1, 0, 0], 8 + i * 4);
+    }
     constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
@@ -90,11 +92,11 @@ try {
   const quadrants = [[255,0,0,255],[0,255,0,255],[0,0,255,255],[255,255,255,255]];
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(quadrants.flat()));
   constants[136]=1/8;constants[137]=1/4;constants[138]=1;
-  // A constant material equals its mean; full biome influence yields the target color.
+  // Each quadrant supplies raw modulation gain, not a target color.
   for(let z=0;z<2;z++)for(let x=0;x<2;x++){
     const tint=quadrants[z*2+x];
     close(render(repeat([0,0,0]),{x:2+x*4,y:1+z*2,span:.01}).slice(0,3),
-      tint.slice(0,3).map(v=>255*(v/255)**2),'global color at local quadrant '+x+','+z,2);
+      tint.slice(0,3).map((v,c)=>Math.min(255,255*(colors[0][c]/255)**2*v/128)),'global color at local quadrant '+x+','+z,2);
   }
   gl.activeTexture(gl.TEXTURE3);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
@@ -377,7 +379,7 @@ try {
   const vs='precision highp float;in vec2 a_position;void main(){gl_Position=vec4(a_position*2.0-1.0,0.0,1.0);}';
   const fs=unlit=>[
     'precision highp float;precision highp int;precision highp sampler2DArray;',
-    '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_DECAL_MESH 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
+    '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
     'uniform sampler2D vtAlbedo,vtNormalRoughnessAO;uniform sampler2DArray terrainNormalMap;',
     'uniform vec4 mainColor,terrainParams,sectorParams,morphCameraPos,vtLayout,rvtNormalParams,v_vtParams,lodMorph[9];',
     'uniform float v_normalMorph;const float v_lod=0.0;',

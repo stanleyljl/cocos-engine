@@ -22,13 +22,13 @@ module.exports = {
                         tooltip: '地形调试及渲染开关，包含线框、LOD、虚拟纹理和贴花显示选项。',
                     },
                     holeMode: {
-                        tooltip: 'Fast 模式在顶点阶段移除三角形；HighQuality 模式在片元阶段裁剪。两者均跟随源数据 LOD。不支持顶点剔除时使用 HighQuality 模式。',
+                        tooltip: 'Fast 模式通过顶点 NaN 剔除三角形；HighQuality 模式在片元阶段裁剪。两者均跟随源数据 LOD。默认使用 Fast，需要时可手动选择 HighQuality。',
                     },
                     globalColorMap: {
-                        tooltip: '覆盖整个地形的生态底色图，应使用不含光照和烘焙阴影的颜色图。调整材质平均色并保留纹理细节，可以提亮、压暗或改变色调；未指定时使用原图层颜色。',
+                        tooltip: '覆盖整个地形的颜色调制图。RGB 为线性 UNORM 数据：字节值 128 不改变颜色，低于 128 压暗，高于 128 提亮。Alpha 控制区域影响程度。不要直接使用漫反射图片或 sRGB 纹理；未指定时保留原材质颜色。',
                     },
                     globalColorStrength: {
-                        tooltip: '生态底色影响程度：0 使用原图层颜色，1 将材质平均色调整为生态底色，同时保留纹理细节。默认 0.1；未指定全局图时不生效。',
+                        tooltip: '全局调制强度，与图像 Alpha 及各材质的 globalColorInfluence 相乘。0 关闭调制，默认 0.1。',
                     },
                 },
             },

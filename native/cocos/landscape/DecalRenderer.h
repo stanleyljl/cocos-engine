@@ -48,10 +48,7 @@ class RenderScene;
 namespace landscape {
 class MaterialLibrary;
 
-// The terrain and displaced decals use the same shader and resolved sources.
-// These helpers keep that shader contract in one place; they never request pages.
-Material *createLandscapeMaterial(bool wireframe, bool decal, bool heightUnorm);
-
+// Resolved terrain sources shared by terrain and displaced decal instances.
 struct LandscapeSurfaceInstance {
     Vec4 grid;
     Vec4 quadrant;
@@ -124,7 +121,7 @@ private:
     IntrusivePtr<Material> _solid;
     IntrusivePtr<Material> _wire;
     IntrusivePtr<RenderingSubMesh> _mesh;
-    IntrusivePtr<gfx::Texture> _pageIndices;
+    IntrusivePtr<gfx::Texture> _pageIndexTexture;
     ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
     ccstd::vector<Vec3> _centers;
     ccstd::unordered_map<uint64_t, ccstd::vector<Patch>> _patches;

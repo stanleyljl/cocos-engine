@@ -53,7 +53,7 @@ public:
     gfx::Texture *whiteTexture() const { return _whiteTexture; }
     gfx::Sampler *repeatSampler() const { return _repeatSampler; }
     gfx::Sampler *clampSampler() const { return _clampSampler; }
-    // Shared shader layout: repeats/m in X, mean linear material RGB in YZW.
+    // Shared shader layout: repeats/m in X, biome influence in Y; ZW are unused.
     const ccstd::vector<Vec4> &materialParams() const { return _materialParams; }
 
 private:

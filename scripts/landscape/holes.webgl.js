@@ -13,15 +13,15 @@ try {
         gl.linkProgram(p); check(gl.getProgramParameter(p, gl.LINK_STATUS), gl.getProgramInfoLog(p)); return p;
     };
     let variants = 0;
-    for (const shader of fixture.effect.shaders) for (const decal of [0, 1]) for (const wire of [0, 1]) for (const unorm of [0, 1]) {
-        const defines = { USE_INSTANCING: 1, LANDSCAPE_DECAL_MESH: decal, LANDSCAPE_WIREFRAME: wire,
+    for (const shader of [...fixture.effect.shaders, ...fixture.decalEffect.shaders]) for (const wire of [0, 1]) for (const unorm of [0, 1]) {
+        const defines = { USE_INSTANCING: 1, LANDSCAPE_WIREFRAME: wire,
             LANDSCAPE_HEIGHT_UNORM: unorm, CC_RECEIVE_SHADOW: 1, CC_USE_FOG: 4 };
         const prefix = 'precision highp sampler2DArray;\n#define CC_DEVICE_SUPPORT_FLOAT_TEXTURE 0\n#define CC_PLATFORM_ANDROID_AND_WEBGL 0\n#define CC_ENABLE_WEBGL_HIGHP_STRUCT_VALUES 0\n'
             + shader.defines.map(d => '#define ' + d.name + ' ' + (defines[d.name] ?? d.default ?? d.range?.[0] ?? 0)).join('\n') + '\n';
         gl.deleteProgram(link(prefix + shader.glsl3.vert, prefix + shader.glsl3.frag)); variants++;
     }
     const common = 'precision highp float;precision highp int;precision highp sampler2DArray;\nuniform vec4 heightParams,holeParams;\n';
-    const vertex = common + '#define USE_INSTANCING 1\n#define LANDSCAPE_DECAL_MESH 0\n#define LANDSCAPE_SHADOW_PASS 0\n#define LANDSCAPE_WIREFRAME 0\n#define LANDSCAPE_HEIGHT_UNORM 0\n'
+    const vertex = common + '#define USE_INSTANCING 1\n#define LANDSCAPE_SHADOW_PASS 0\n#define LANDSCAPE_WIREFRAME 0\n#define LANDSCAPE_HEIGHT_UNORM 0\n'
         + 'uniform vec4 terrainParams,morphCameraPos,decalControl,lodMorph[9];\n'
         + 'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};\n'
         + fixture.vertex + '\nin vec2 position;void main(){SurfacesStandardVertexIntermediate v;v.position=vec3(position,0);'

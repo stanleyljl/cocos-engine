@@ -465,6 +465,29 @@ void CommandBufferValidator::resolveTexture(Texture *srcTexture, Texture *dstTex
     _actor->resolveTexture(actorSrcTexture, actorDstTexture, regions, count);
 }
 
+void CommandBufferValidator::copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
+    CC_ASSERT(isInited() && !_insideRenderPass);
+    CC_ASSERT(buffer && static_cast<BufferValidator *>(buffer)->isInited());
+    CC_ASSERT(texture && static_cast<TextureValidator *>(texture)->isInited());
+    const auto &info = texture->getInfo();
+    CC_ASSERT(info.type == TextureType::TEX2D && !texture->isTextureView());
+    CC_ASSERT(hasFlag(buffer->getUsage(), BufferUsageBit::TRANSFER_SRC));
+    CC_ASSERT(hasFlag(info.usage, TextureUsageBit::TRANSFER_DST));
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+        CC_ASSERT(region.buffStride == 0 && region.buffTexHeight == 0);
+        CC_ASSERT(region.texSubres.baseArrayLayer == 0 && region.texSubres.layerCount == 1);
+        CC_ASSERT(region.texSubres.mipLevel < info.levelCount);
+        CC_ASSERT(region.texOffset.z == 0 && region.texExtent.depth == 1);
+        CC_ASSERT(region.texOffset.x >= 0 && region.texOffset.y >= 0);
+        CC_ASSERT(region.texOffset.x + region.texExtent.width <= std::max(1U, info.width >> region.texSubres.mipLevel));
+        CC_ASSERT(region.texOffset.y + region.texExtent.height <= std::max(1U, info.height >> region.texSubres.mipLevel));
+        CC_ASSERT(region.buffOffset + formatSize(info.format, region.texExtent.width, region.texExtent.height, 1) <= buffer->getSize());
+    }
+    _actor->copyBufferToTexture(static_cast<BufferValidator *>(buffer)->getActor(),
+                               static_cast<TextureValidator *>(texture)->getActor(), regions, count);
+}
+
 void CommandBufferValidator::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
     CC_ASSERT(isInited());
     CC_ASSERT(srcTexture && static_cast<TextureValidator *>(srcTexture)->isInited());

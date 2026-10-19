@@ -215,7 +215,8 @@ def main():
             old = previous.get(name, {})
             packed_layers[index] = {"name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
-                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER)}
+                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER),
+                                      "globalColorInfluence": old.get("globalColorInfluence", 1.0)}
             report.append({"id": index, "name": name, "sourceArchive": archive.name,
                            "sources": source_names, "statistics": stats, "sha256": hashes})
             print(f"{index:02d} {name}: {ah_name}, {nra_name}", flush=True)

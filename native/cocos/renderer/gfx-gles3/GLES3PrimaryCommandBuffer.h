@@ -46,6 +46,7 @@ public:
     void setViewport(const Viewport &vp) override;
     void setScissor(const Rect &rect) override;
     void updateBuffer(Buffer *buff, const void *data, uint32_t size) override;
+    void copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) override;
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) override;
     void execute(CommandBuffer *const *cmdBuffs, uint32_t count) override;
     void dispatch(const DispatchInfo &info) override;

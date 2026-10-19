@@ -22,13 +22,13 @@ module.exports = {
                         tooltip: 'Terrain debug and rendering switches, including wireframe, LOD, virtual texture and decal display options.',
                     },
                     holeMode: {
-                        tooltip: 'Fast removes triangles at vertices; HighQuality clips fragments. Both follow source LOD. Unsupported vertex culling uses HighQuality.',
+                        tooltip: 'Fast uses vertex NaN culling; HighQuality clips fragments. Both follow source LOD. Fast is the default; select HighQuality manually when needed.',
                     },
                     globalColorMap: {
-                        tooltip: 'Biome base color covering the entire terrain. Use an unlit color map without baked shadows. Replaces the average material color while preserving texture detail; can lighten, darken or recolor the terrain. Without a map, the original layer colors are used.',
+                        tooltip: 'Terrain-wide color modulation map. RGB is linear UNORM data: byte 128 is neutral, lower values darken, higher values lighten. Alpha controls regional influence. Do not use a diffuse image or sRGB texture directly. Without a map, original material colors are retained.',
                     },
                     globalColorStrength: {
-                        tooltip: 'Biome color influence: 0 uses the original layer colors; 1 maps the average material color to the biome color while retaining texture detail. Defaults to 0.1. Has no effect without a global map.',
+                        tooltip: "Global modulation strength, multiplied by map Alpha and each material's globalColorInfluence. Zero disables modulation. Defaults to 0.1.",
                     },
                 },
             },

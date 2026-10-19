@@ -113,7 +113,8 @@ function scanMaterialLibrary (assetDir, manifestPath) {
             fail(`Invalid packed material library: ${manifestPath}`);
         }
         for (const [index, layer] of library.layers.entries()) {
-            if (typeof layer.pixelsPerMeter !== 'number' || layer.pixelsPerMeter <= 0) {
+            if (typeof layer.pixelsPerMeter !== 'number' || layer.pixelsPerMeter <= 0
+                || typeof layer.globalColorInfluence !== 'number' || layer.globalColorInfluence < 0 || layer.globalColorInfluence > 1) {
                 fail(`Invalid packed material layer ${index}`);
             }
             for (const property of ['albedoHeight', 'normalRoughnessAO']) {

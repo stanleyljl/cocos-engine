@@ -38,7 +38,7 @@
 namespace cc {
 
 class Node;
-class RenderTexture;
+class TextureBase;
 class Texture2D;
 namespace geometry {
 class Frustum;
@@ -100,7 +100,7 @@ public:
 
     inline bool isInitialized() const { return _renderer != nullptr; }
     bool isReady() const;
-    RenderTexture *getVTAtlas() const;
+    TextureBase *getVTAtlas() const;
 
     // World-space, translation-only placement, matching landscape selection.
     // Query result buffer: position XYZ, normal XYZ, material ID, weight.

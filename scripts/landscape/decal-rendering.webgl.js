@@ -11,7 +11,7 @@ try {
   };
   const programs = effect.shaders.map(s => {
     const p = gl.createProgram();
-    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n';
+    const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n#define LANDSCAPE_VT_COMPACT 0\n';
     gl.attachShader(p, compile(gl.VERTEX_SHADER, prefix + s.glsl3.vert));
     gl.attachShader(p, compile(gl.FRAGMENT_SHADER, prefix + s.glsl3.frag)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
@@ -63,13 +63,15 @@ try {
   if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete framebuffer');
   gl.viewport(0,0,1,1);
   const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
-  const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0,meanColor=null}={})=>{
+  const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0,influence=1}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2192],0,0);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
-    for(let i=0;i<32;i++) constants.set([scale,...(meanColor || colors[i%8].slice(0,3).map(v=>(v/255)**2))],8+i*4);
+    for (let i = 0; i < 32; i++) {
+      constants.set([scale, Array.isArray(influence) ? influence[i % influence.length] : influence, 0, 0], 8 + i * 4);
+    }
     constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
@@ -133,56 +135,58 @@ try {
   close(render(diagonal,{x:.49999,y:.5}),render(diagonal,{x:.50001,y:.5}),'diagonal continuity');
 
 
-  // Exercise biome recoloring through the actual VT composition shader.
-  const setBiomeColor = (color, strength) => {
+  // Exercise modulation and coverage through the actual VT composition shader.
+  const setBiomeColor = (color, strength, alpha = 255) => {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, biomeTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([...color, 255]));
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([...color, alpha]));
     constants[138] = strength;
   };
   const biomeBase = render(repeat([0, 0, 0]));
-  const targetColor = [210, 120, 80];
-  const targetLinear = targetColor.map(v => 255 * (v / 255) ** 2);
-  setBiomeColor(targetColor, 0);
-  close(render(repeat([0, 0, 0])), biomeBase, 'zero biome strength preserves all channels', 0);
-  setBiomeColor(targetColor, 1);
+  const modulation = [160, 112, 96];
+  setBiomeColor(modulation, 0);
+  close(render(repeat([0, 0, 0])), biomeBase, 'zero strength preserves all channels', 0);
+  setBiomeColor([128, 128, 128], 1);
+  close(render(repeat([0, 0, 0])), biomeBase, 'neutral UNORM data preserves all channels', 0);
+  setBiomeColor(modulation, 1, 0);
+  close(render(repeat([0, 0, 0])), biomeBase, 'zero alpha preserves all channels', 0);
+  setBiomeColor(modulation, 1);
+  close(render(repeat([0, 0, 0]), {influence: 0}), biomeBase, 'protected material preserves all channels', 0);
   for (const id of [0, 2, 7]) {
     const shaded = render(repeat([id, id, 0]));
-    close(shaded.slice(0, 3), targetLinear, 'biome sets target mean for material ' + id);
-    close(shaded.slice(3), expected(repeat([id, id, 0])).slice(3), 'biome preserves normal roughness AO ' + id);
+    const base = expected(repeat([id, id, 0]));
+    const target = base.slice(0, 3).map((v, c) => Math.min(255, v * modulation[c] / 128));
+    close(shaded.slice(0, 3), target, 'material modulation ' + id);
+    close(shaded.slice(3), base.slice(3), 'modulation preserves normal roughness AO ' + id);
   }
-  close(render(pairs, {strength: 0}).slice(0, 3), targetLinear, 'mixed material means use the same blend weights');
   close(render(left, {x: 1, y: .37}), render(right, {x: 0, y: .37}), 'biome shared tile edge');
   close(render(diagonal, {x: .49999, y: .5}), render(diagonal, {x: .50001, y: .5}), 'biome diagonal continuity');
-  setBiomeColor(targetColor, 0.5);
-  close(render(repeat([0, 0, 0])).slice(0, 3), targetLinear.map((v, i) => (v + biomeBase[i]) / 2), 'partial biome influence');
-  setBiomeColor([180, 180, 180], 1);
-  const ramp = [32, 64, 128, 192, 240];
-  let previous = -1;
-  for (const value of ramp) {
+  setBiomeColor(modulation, 0.5, 128);
+  close(render(repeat([0, 0, 0]), {influence: 0.5}).slice(0, 3),
+    biomeBase.slice(0, 3).map((v, c) => v * (1 + (modulation[c] / 128 - 1) * 0.5 * 128 / 255 * 0.5)),
+    'global strength, alpha and material influence multiply');
+  // Check per-material masking before blending (an averaged mask would tint the protected layer).
+  setBiomeColor(modulation, 1);
+  const blend = 15 / 31;
+  const mixedTarget = [0, 1, 2].map(c => 255 * (
+    (colors[0][c] / 255) ** 2 * (1 - blend)
+    + Math.min(1, (colors[1][c] / 255) ** 2 * modulation[c] / 128) * blend));
+  close(render(repeat([0, 1, 15]), {strength: 0, influence: [0, 1]}).slice(0, 3), mixedTarget,
+    'protected and modulated material blend');
+  for (const value of [0, 32, 128, 240, 255]) {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
     gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([value, value, value, 0]));
-    const pixel = render(repeat([0, 0, 0]), {meanColor: [0.25, 0.25, 0.25]})[0];
-    if (!(pixel > previous && pixel > 0 && pixel < 255)) {
-      throw new Error('Biome detail must remain ordered without black/white clipping: ' + pixel);
+    for (const tint of [0, 128, 255]) {
+      setBiomeColor([tint, tint, tint], 1);
+      const target = Math.min(255, value * value / 255 * tint / 128);
+      close(render(repeat([0, 0, 0])).slice(0, 3), [target, target, target], 'bounded gain at color endpoints');
     }
-    previous = pixel;
-    checks++;
-  }
-  for (const value of [0, 255]) {
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
-    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([value, value, value, 0]));
-    const mean = (value / 255) ** 2;
-    close(render(repeat([0, 0, 0]), {meanColor: [mean, mean, mean]}).slice(0, 3), [180 * 180 / 255, 180 * 180 / 255, 180 * 180 / 255], 'black/white material mean stays defined');
-    const nearEndpoint = ((value === 0 ? 1 : 254) / 255) ** 2;
-    close(render(repeat([0, 0, 0]), {meanColor: [nearEndpoint, nearEndpoint, nearEndpoint]}).slice(0, 3), [value, value, value], 'near-black/white material preserves detail endpoints');
   }
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, ah);
   gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(colors[0]));
-  setBiomeColor([255, 255, 255], 0);
+  setBiomeColor([128, 128, 128], 0);
 
   const plain=render(repeat([0,0,0]));
   constants.set([0,0,1,0],144);constants[2192]=1;
@@ -262,8 +266,8 @@ try {
   const gl1=document.createElement('canvas').getContext('webgl');
   if(!gl1)throw Error('WebGL1 import-compatibility context unavailable');
   gl1.getExtension('OES_standard_derivatives');
-  for(const shader of baseEffect.shaders)for(const decal of [0,1]){
-    const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DECAL_MESH:decal}).replace('precision highp sampler2DArray;\n','');
+  for(const shader of [...baseEffect.shaders, ...decalEffect.shaders]){
+    const prefix=shaderPrefix(shader,{USE_INSTANCING:1}).replace('precision highp sampler2DArray;\n','');
     const program=gl1.createProgram();
     for(const [stage,source]of [[gl1.VERTEX_SHADER,shader.glsl1.vert],[gl1.FRAGMENT_SHADER,shader.glsl1.frag]]){
       const s=gl1.createShader(stage);gl1.shaderSource(s,prefix+source);gl1.compileShader(s);
@@ -274,19 +278,19 @@ try {
     if(!gl1.getProgramParameter(program,gl1.LINK_STATUS))throw Error('GLSL100: '+gl1.getProgramInfoLog(program));
     gl1.deleteProgram(program);
   }
-  for(const shader of baseEffect.shaders)for(const unlit of [0,1])for(const decal of [0,1])for(const shadow of [0,1,2]){
-    const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DEBUG_UNLIT:unlit,LANDSCAPE_DECAL_MESH:decal,
+  for(const shader of [...baseEffect.shaders, ...decalEffect.shaders])for(const unlit of [0,1])for(const shadow of [0,1,2]){
+    const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DEBUG_UNLIT:unlit,
       CC_RECEIVE_SHADOW:shadow?1:0,CC_SHADOW_TYPE:2,CC_DIR_LIGHT_SHADOW_TYPE:shadow,CC_SUPPORT_CASCADED_SHADOW_MAP:1});
     link(prefix+shader.glsl3.vert+'\n',prefix+shader.glsl3.frag+'\n');
   }
   const probeSource=decal=>[
     'precision highp float;precision highp sampler2DArray;',
-    '#define USE_INSTANCING 1','#define LANDSCAPE_DECAL_MESH '+decal,
+    '#define USE_INSTANCING 1',
     '#define LANDSCAPE_SHADOW_PASS 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_HEIGHT_UNORM 0',
     '#define CCGetWorldMatrix(m) m = mat4(1.0)',
     'uniform vec4 heightParams,holeParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
     'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};',
-    vertexChunk,
+    vertexChunks[decal],
     'uniform vec2 testUV;out vec4 probe;',
     'void main(){SurfacesStandardVertexIntermediate v;v.position=vec3(testUV,0);probe=vec4(SurfacesVertexModifyLocalPos(v),0.0);gl_Position=vec4(0,0,0,1);}'
   ].join('\n');
@@ -392,8 +396,8 @@ try {
   // camera: neither the shadow entry nor cc_cameraPos may change CDLOD morph.
   const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
   for(const decal of [0,1]){
-    const programs=baseEffect.shaders.slice(0,2).map(shader=>{
-      const prefix=shaderPrefix(shader,{USE_INSTANCING:1,LANDSCAPE_DECAL_MESH:decal,CC_RECEIVE_SHADOW:1,CC_USE_FOG:4});
+    const programs=(decal ? decalEffect : baseEffect).shaders.slice(0,2).map(shader=>{
+      const prefix=shaderPrefix(shader,{USE_INSTANCING:1,CC_RECEIVE_SHADOW:1,CC_USE_FOG:4});
       const vs=prefix+shader.glsl3.vert.replace(/void main\(\)/,'void terrainEntry()')
         +'\nout vec4 probe;void main(){terrainEntry();probe=vec4(VSOutput_worldPos,1.0);}';
       const p=link(vs,'precision highp float;out vec4 c;void main(){c=vec4(1);}',true);

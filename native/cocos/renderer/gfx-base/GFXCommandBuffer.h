@@ -64,6 +64,11 @@ public:
     virtual void draw(const DrawInfo &info) = 0;
     virtual void updateBuffer(Buffer *buff, const void *data, uint32_t size) = 0;
     virtual void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) = 0;
+    // Regions describe tightly packed 2D data,
+    // including compressed blocks. buffStride/buffTexHeight must be zero.
+    virtual void copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
+        CC_ABORT();
+    }
     virtual void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) = 0;
     virtual void copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) = 0;
     virtual void resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) = 0;

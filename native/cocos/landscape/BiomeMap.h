@@ -38,6 +38,7 @@ namespace landscape {
 
 // World-aligned biome inputs shared by terrain shading. Color is the first
 // input; spatial storage and shader bindings stay separate from VT residency.
+// RGB is raw UNORM gain data (128 = neutral); Alpha masks regional influence.
 class BiomeMap {
 public:
     BiomeMap();

@@ -19,7 +19,7 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
     assert.equal(effect.shaders.length, 2, 'Compile both compose and mip techniques');
     assert.doesNotMatch(effect.shaders[0].glsl3.frag, /v_source.w < 0.0/, 'VT contains only normal terrain composition');
     const compiledBase = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
-    const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/builtin-landscape.effect'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/chunks/landscape/rvt-surface.chunk'), 'utf8');
     const extract = name => {
         const start = source.indexOf(name + '(');
         assert.ok(start >= 0);
@@ -40,7 +40,7 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
         'applyTerrainNormalFrame',
         'lodPalette',
         'SurfacesFragmentModifySharedData',
-    ].map(extract).join('\n');
+    ].map(extract).join('\n').replace('#include <landscape-surface-discard>', 'discardLandscapeHole();');
     const harness = fs.readFileSync(path.join(__dirname, 'rvt-normal-baking.webgl.js'), 'utf8');
     const prefix = path.join(os.tmpdir(), 'landscape-rvt-normal-test-');
     const directory = fs.mkdtempSync(prefix);

@@ -54,6 +54,7 @@ public:
         ccstd::string albedoHeight;
         ccstd::string normalRoughnessAO;
         float pixelsPerMeter{128.0F}; // source texture pixels per logical unit
+        float globalColorInfluence{1.0F}; // biome modulation strength for this material
     };
 
     struct DecalLayer {

@@ -42,14 +42,13 @@
 namespace cc {
 namespace landscape {
 
-Material *createLandscapeMaterial(bool wireframe, bool decal, bool heightUnorm) {
+static Material *createDecalMaterial(bool wireframe, bool heightUnorm) {
     auto *material = ccnew Material();
     IMaterialInfo info;
-    info.effectName = ccstd::string{"builtin-landscape"};
+    info.effectName = ccstd::string{"landscape/builtin-landscape-decal"};
     MacroRecord defines;
     defines["USE_INSTANCING"] = true;
     defines["LANDSCAPE_DEBUG_UNLIT"] = false;
-    defines["LANDSCAPE_DECAL_MESH"] = decal;
     defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
     // Compile debug edges out of the normal material entirely.
     defines["LANDSCAPE_WIREFRAME"] = wireframe;
@@ -95,8 +94,8 @@ DecalRenderer::~DecalRenderer() {
 bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm) {
     _node = node;
     _scene = scene;
-    _solid = createLandscapeMaterial(false, true, heightUnorm);
-    _wire = createLandscapeMaterial(true, true, heightUnorm);
+    _solid = createDecalMaterial(false, heightUnorm);
+    _wire = createDecalMaterial(true, heightUnorm);
     _mesh = GridMesh::create(Root::getInstance()->getDevice(), 16);
     _scratch = Float32Array(4);
     _candidates.reserve(config::DECAL_INSTANCE_MAX);
@@ -130,9 +129,9 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
     // RG and BA each store a 16-bit instance index, low byte first.
     info.width = config::DECAL_INSTANCE_MAX / 2;
     info.height = config::VT_PAGE_COUNT;
-    _pageIndices = device->createTexture(info);
+    _pageIndexTexture = device->createTexture(info);
     _pageIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX * 2, 0);
-    return _pageIndices != nullptr;
+    return _pageIndexTexture != nullptr;
 }
 
 bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrary &materials) {
@@ -150,7 +149,7 @@ bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrar
     };
     bind("decalAlbedoMap", materials.decalAlbedo());
     bind("decalNormalMap", materials.decalNormal());
-    bind("decalIndexMap", _pageIndices);
+    bind("decalIndexMap", _pageIndexTexture);
     ccstd::vector<Vec4> regions(config::DECAL_INSTANCE_MAX);
     const auto &decals = _asset->decals();
     for (size_t i = 0; i < decals.size(); ++i) {
@@ -192,7 +191,7 @@ void DecalRenderer::uploadPageDecals() {
     gfx::BufferTextureCopy copy;
     copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, config::VT_PAGE_COUNT, 1};
     const uint8_t *bytes[]{_pageIndexData.data()};
-    Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndices, &copy, 1);
+    Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndexTexture, &copy, 1);
 }
 
 void DecalRenderer::updateInstance(const Draw &draw, const TerrainPatch &patch) {

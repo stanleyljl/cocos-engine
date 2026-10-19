@@ -717,6 +717,22 @@ void CCMTLCommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t s
     [encoder endEncoding];
 }
 
+void CCMTLCommandBuffer::copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
+    auto *source = static_cast<CCMTLBuffer *>(buffer);
+    auto *destination = static_cast<CCMTLTexture *>(texture);
+    id<MTLBlitCommandEncoder> encoder = [getMTLCommandBuffer() blitCommandEncoder];
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+        const auto rowBytes = formatSize(texture->getFormat(), region.texExtent.width, 1, 1);
+        [encoder copyFromBuffer:source->mtlBuffer() sourceOffset:source->currentOffset() + region.buffOffset
+              sourceBytesPerRow:rowBytes sourceBytesPerImage:0
+                     sourceSize:MTLSizeMake(region.texExtent.width, region.texExtent.height, 1)
+                      toTexture:destination->getMTLTexture() destinationSlice:0 destinationLevel:region.texSubres.mipLevel
+              destinationOrigin:MTLOriginMake(region.texOffset.x, region.texOffset.y, 0)];
+    }
+    [encoder endEncoding];
+}
+
 void CCMTLCommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
     if (!texture) {
         CC_LOG_ERROR("CCMTLCommandBuffer::copyBufferToTexture: texture is nullptr");

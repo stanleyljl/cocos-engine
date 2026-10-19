@@ -30,7 +30,6 @@
 #include "base/Log.h"
 #include "base/Macros.h"
 #include "landscape/LandscapeConfig.h"
-#include "math/Vec3.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -198,7 +197,7 @@ void uploadMipLevel(gfx::Device *device, gfx::Texture *texture, uint32_t layer,
     device->copyBuffersToTexture(buffers, texture, &region, 1U);
 }
 
-Vec3 uploadAlbedoHeight(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
+void uploadAlbedoHeight(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
                         uint32_t layer, ccstd::vector<uint8_t> pixels) {
     ccstd::vector<uint8_t> nextMip;
     uint32_t size = resolution;
@@ -210,12 +209,7 @@ Vec3 uploadAlbedoHeight(gfx::Device *device, gfx::Texture *texture, uint32_t res
             size = std::max(1U, size / 2U);
         }
     }
-    // The existing final 1x1 mip is the material's mean color. Reuse it for
-    // biome recoloring without another image decode or shader texture sample.
-    // Match the shader's SRGBToLinear approximation (gamma squared), including
-    // when a distant page samples this same mip as its material detail.
-    const Vec3 mean{pixels[0] / 255.0F, pixels[1] / 255.0F, pixels[2] / 255.0F};
-    return Vec3{mean.x * mean.x, mean.y * mean.y, mean.z * mean.z};
+
 }
 
 void uploadNormalRoughnessAO(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
@@ -287,8 +281,8 @@ bool MaterialLibrary::initMaterialLayers(gfx::Device *device, const LandscapeAss
         }
         // Repeats per logical unit depend on the source texture, not the VT page resolution.
         const float uvScale = layer.pixelsPerMeter / static_cast<float>(resolution);
-        const Vec3 mean = uploadAlbedoHeight(device, _albedoHeight, resolution, layer.id, std::move(albedoHeightPixels));
-        _materialParams[layer.id] = Vec4{uvScale, mean.x, mean.y, mean.z};
+        uploadAlbedoHeight(device, _albedoHeight, resolution, layer.id, std::move(albedoHeightPixels));
+        _materialParams[layer.id] = Vec4{uvScale, layer.globalColorInfluence, 0.0F, 0.0F};
         uploadNormalRoughnessAO(device, _normalRoughnessAO, resolution, layer.id, std::move(normalRoughnessAOPixels));
     }
     return true;

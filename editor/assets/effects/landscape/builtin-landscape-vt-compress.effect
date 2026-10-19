@@ -1,0 +1,279 @@
+// Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
+// Encode VT pages as ASTC 4x4 blocks in a GPU buffer.
+CCEffect %{
+  techniques:
+  - name: compress-astc
+    passes:
+    - compute: vt-astc-cs
+      pass: vt-compress-cs
+}%
+
+CCProgram vt-astc-encode %{
+  // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
+  // ASTC LDR 4x4, one partition, direct RGBA endpoints (CEM 12).
+  // Candidate modes: six weights + 8-bit endpoints, or two independent planes
+  // of three weights + 7-bit endpoints. The decoded squared error chooses the mode.
+  // BISE trit mapping from Arm astcenc (Copyright 2011-2024 Arm Limited),
+  // licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
+  // https://github.com/ARM-software/astc-encoder/blob/main/Source/astcenc_integer_sequence.cpp
+  const uint ASTC_TRITS[243] = uint[243](
+      0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u, 16u, 17u, 18u, 20u, 21u, 22u, 24u, 25u, 26u,
+      3u, 7u, 15u, 19u, 23u, 27u, 12u, 13u, 14u, 32u, 33u, 34u, 36u, 37u, 38u, 40u, 41u, 42u,
+      48u, 49u, 50u, 52u, 53u, 54u, 56u, 57u, 58u, 35u, 39u, 47u, 51u, 55u, 59u, 44u, 45u, 46u,
+      64u, 65u, 66u, 68u, 69u, 70u, 72u, 73u, 74u, 80u, 81u, 82u, 84u, 85u, 86u, 88u, 89u, 90u,
+      67u, 71u, 79u, 83u, 87u, 91u, 76u, 77u, 78u, 128u, 129u, 130u, 132u, 133u, 134u, 136u, 137u, 138u,
+      144u, 145u, 146u, 148u, 149u, 150u, 152u, 153u, 154u, 131u, 135u, 143u, 147u, 151u, 155u, 140u, 141u, 142u,
+      160u, 161u, 162u, 164u, 165u, 166u, 168u, 169u, 170u, 176u, 177u, 178u, 180u, 181u, 182u, 184u, 185u, 186u,
+      163u, 167u, 175u, 179u, 183u, 187u, 172u, 173u, 174u, 192u, 193u, 194u, 196u, 197u, 198u, 200u, 201u, 202u,
+      208u, 209u, 210u, 212u, 213u, 214u, 216u, 217u, 218u, 195u, 199u, 207u, 211u, 215u, 219u, 204u, 205u, 206u,
+      96u, 97u, 98u, 100u, 101u, 102u, 104u, 105u, 106u, 112u, 113u, 114u, 116u, 117u, 118u, 120u, 121u, 122u,
+      99u, 103u, 111u, 115u, 119u, 123u, 108u, 109u, 110u, 224u, 225u, 226u, 228u, 229u, 230u, 232u, 233u, 234u,
+      240u, 241u, 242u, 244u, 245u, 246u, 248u, 249u, 250u, 227u, 231u, 239u, 243u, 247u, 251u, 236u, 237u, 238u,
+      28u, 29u, 30u, 60u, 61u, 62u, 92u, 93u, 94u, 156u, 157u, 158u, 188u, 189u, 190u, 220u, 221u, 222u,
+      31u, 63u, 127u, 159u, 191u, 255u, 252u, 253u, 254u
+  );
+
+  void astcBits(inout uvec4 block, uint value, int offset, int count) {
+    int word = offset / 32;
+    int shift = offset % 32;
+    block[word] |= value << uint(shift);
+    if (shift + count > 32) {
+      block[word + 1] |= value >> uint(32 - shift);
+    }
+  }
+
+  // ASTC weight streams run backward from bit 127, including bit order.
+  void astcWeightBits(inout uvec4 block, uint value, inout int offset, int count) {
+    for (int i = 0; i < count; ++i) {
+      --offset;
+      astcBits(block, (value >> uint(i)) & 1u, offset, 1);
+    }
+  }
+
+  float astcWeight(float projection, bool dual) {
+    if (dual) {
+      return floor(clamp(projection, 0.0, 1.0) * 2.0 + 0.5) * 0.5;
+    }
+    int q = int(floor(clamp(projection, 0.0, 1.0) * 5.0 + 0.5));
+    const float decoded[6] = float[6](0.0, 12.0, 25.0, 39.0, 52.0, 64.0);
+    return decoded[q] / 64.0;
+  }
+
+  vec4 astcProjection(vec4 pixel, vec4 lo, vec4 hi, int separate) {
+    vec4 direction = hi - lo;
+    vec4 difference = pixel - lo;
+    vec4 mask = vec4(1.0);
+    if (separate >= 0) {
+      mask[separate] = 0.0;
+    }
+    float weight = dot(difference * mask, direction) / max(dot(direction * mask, direction), 1e-10);
+    vec4 result = vec4(astcWeight(weight, separate >= 0));
+    if (separate >= 0) {
+      float independent = abs(direction[separate]) > 1e-6 ? difference[separate] / direction[separate] : 0.0;
+      result[separate] = astcWeight(independent, true);
+    }
+    return result;
+  }
+
+  void astcFit(vec4 pixels[16], int separate, out vec4 lo, out vec4 hi) {
+    vec4 mean = vec4(0.0);
+    vec4 minimum = pixels[0];
+    vec4 maximum = pixels[0];
+    for (int i = 0; i < 16; ++i) {
+      mean += pixels[i];
+      minimum = min(minimum, pixels[i]);
+      maximum = max(maximum, pixels[i]);
+    }
+    mean /= 16.0;
+    vec4 axis = maximum - minimum;
+    if (separate >= 0) {
+      axis[separate] = 0.0;
+    }
+    // A few covariance iterations also handle negatively correlated channels.
+    for (int iteration = 0; iteration < 3; ++iteration) {
+      vec4 nextAxis = vec4(0.0);
+      for (int i = 0; i < 16; ++i) {
+        vec4 delta = pixels[i] - mean;
+        if (separate >= 0) {
+          delta[separate] = 0.0;
+        }
+        nextAxis += delta * dot(delta, axis);
+      }
+      if (dot(nextAxis, nextAxis) > 1e-12) {
+        axis = normalize(nextAxis);
+      }
+    }
+    float lowProjection = 1e10;
+    float highProjection = -1e10;
+    for (int i = 0; i < 16; ++i) {
+      float projection = dot(pixels[i] - mean, axis);
+      lowProjection = min(lowProjection, projection);
+      highProjection = max(highProjection, projection);
+    }
+    lo = mean + axis * lowProjection / max(dot(axis, axis), 1e-10);
+    hi = mean + axis * highProjection / max(dot(axis, axis), 1e-10);
+    if (separate >= 0) {
+      lo[separate] = minimum[separate];
+      hi[separate] = maximum[separate];
+    }
+    for (int iteration = 0; iteration < 2; ++iteration) {
+      vec4 aa = vec4(0.0);
+      vec4 ab = vec4(0.0);
+      vec4 bb = vec4(0.0);
+      vec4 ax = vec4(0.0);
+      vec4 bx = vec4(0.0);
+      for (int i = 0; i < 16; ++i) {
+        vec4 b = astcProjection(pixels[i], lo, hi, separate);
+        vec4 a = 1.0 - b;
+        aa += a * a;
+        ab += a * b;
+        bb += b * b;
+        ax += a * pixels[i];
+        bx += b * pixels[i];
+      }
+      for (int c = 0; c < 4; ++c) {
+        float determinant = aa[c] * bb[c] - ab[c] * ab[c];
+        if (determinant > 1e-6) {
+          lo[c] = clamp((ax[c] * bb[c] - bx[c] * ab[c]) / determinant, 0.0, 1.0);
+          hi[c] = clamp((bx[c] * aa[c] - ax[c] * ab[c]) / determinant, 0.0, 1.0);
+        }
+      }
+    }
+  }
+
+  uvec4 astcCandidate(vec4 pixels[16], int separate, out float error) {
+    bool dual = separate >= 0;
+    vec4 lo;
+    vec4 hi;
+    astcFit(pixels, separate, lo, hi);
+    uint maximum = dual ? 127u : 255u;
+    uvec4 qlo = uvec4(floor(clamp(lo, 0.0, 1.0) * float(maximum) + 0.5));
+    uvec4 qhi = uvec4(floor(clamp(hi, 0.0, 1.0) * float(maximum) + 0.5));
+    uvec4 elo = dual ? (qlo << 1u) | (qlo >> 6u) : qlo;
+    uvec4 ehi = dual ? (qhi << 1u) | (qhi >> 6u) : qhi;
+    // CEM 12 selects blue contraction if RGB endpoint sums are reversed.
+    // Swap all channels to select ordinary direct RGBA interpolation instead.
+    if (elo.r + elo.g + elo.b > ehi.r + ehi.g + ehi.b) {
+      uvec4 swapValue = qlo;
+      qlo = qhi;
+      qhi = swapValue;
+      swapValue = elo;
+      elo = ehi;
+      ehi = swapValue;
+    }
+    lo = vec4(elo) / 255.0;
+    hi = vec4(ehi) / 255.0;
+    // 0x43: 4x4, QUANT_6; 0x451: 4x4 dual-plane, QUANT_3.
+    uvec4 block = uvec4((dual ? 0x451u : 0x43u) | (12u << 13u), 0u, 0u, 0u);
+    int endpointBits = dual ? 7 : 8;
+    for (int c = 0; c < 4; ++c) {
+      astcBits(block, qlo[c], 17 + c * 2 * endpointBits, endpointBits);
+      astcBits(block, qhi[c], 17 + (c * 2 + 1) * endpointBits, endpointBits);
+    }
+    if (dual) {
+      astcBits(block, uint(separate), 74, 2);
+    }
+    uint weights[32];
+    error = 0.0;
+    const uint scramble[6] = uint[6](0u, 2u, 4u, 5u, 3u, 1u);
+    for (int i = 0; i < 16; ++i) {
+      vec4 weight = astcProjection(pixels[i], lo, hi, separate);
+      // Evaluate the quantized endpoints and actual ASTC weight values.
+      vec4 reconstructed = mix(lo, hi, weight);
+      vec4 delta = reconstructed - pixels[i];
+      error += dot(delta, delta);
+      if (dual) {
+        int shared = separate == 0 ? 1 : 0;
+        weights[2 * i] = uint(weight[shared] * 2.0 + 0.5);
+        weights[2 * i + 1] = uint(weight[separate] * 2.0 + 0.5);
+      } else {
+        weights[i] = scramble[int(weight.x * 5.0 + 0.5)];
+      }
+    }
+    int count = dual ? 32 : 16;
+    int lowBits = dual ? 0 : 1;
+    int bitOffset = 128;
+    const int lengths[5] = int[5](2, 2, 1, 2, 1);
+    const int shifts[5] = int[5](0, 2, 4, 5, 7);
+    for (int first = 0; first < count; first += 5) {
+      uint index = 0u;
+      uint multiplier = 1u;
+      for (int j = 0; j < 5; ++j) {
+        if (first + j < count) {
+          index += (weights[first + j] >> uint(lowBits)) * multiplier;
+        }
+        multiplier *= 3u;
+      }
+      uint trits = ASTC_TRITS[index];
+      for (int j = 0; j < 5; ++j) {
+        if (first + j < count) {
+          uint value = (weights[first + j] & uint(lowBits)) |
+              (((trits >> uint(shifts[j])) & ((1u << uint(lengths[j])) - 1u)) << uint(lowBits));
+          astcWeightBits(block, value, bitOffset, lowBits + lengths[j]);
+        }
+      }
+    }
+    return block;
+  }
+
+  uvec4 encodeASTC(vec4 pixels[16]) {
+    float bestError;
+    uvec4 best = astcCandidate(pixels, -1, bestError);
+    for (int component = 0; component < 4; ++component) {
+      float error;
+      uvec4 candidate = astcCandidate(pixels, component, error);
+      if (error < bestError) {
+        best = candidate;
+        bestError = error;
+      }
+    }
+    return best;
+  }
+}%
+
+// One invocation encodes one 4x4 block from each atlas channel group.
+CCProgram vt-compress-main %{
+  layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+  #pragma rate CompressionConstants pass
+  layout(std140) uniform CompressionConstants {
+    vec4 compressionParams; // source mip level, unused YZW
+  };
+  #pragma rate sourceAlbedo pass
+  uniform sampler2D sourceAlbedo;
+  #pragma rate sourceNormal pass
+  uniform sampler2D sourceNormal;
+  #pragma rate CompressedBlocks pass
+  #pragma glBinding(0)
+  layout(std430) writeonly buffer CompressedBlocks {
+    uvec4 blocks[];
+  };
+  void main() {
+    int level = int(compressionParams.x);
+    ivec2 blockSize = textureSize(sourceAlbedo, level) / 4;
+    ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(block, blockSize))) {
+      return;
+    }
+    ivec2 origin = block * 4;
+    vec4 colors[16];
+    vec4 normals[16];
+    for (int i = 0; i < 16; ++i) {
+      ivec2 pixel = origin + ivec2(i % 4, i / 4);
+      colors[i] = texelFetch(sourceAlbedo, pixel, level);
+      normals[i] = texelFetch(sourceNormal, pixel, level);
+    }
+    int index = block.y * blockSize.x + block.x;
+    blocks[index] = encodeVTBlock(colors);
+    blocks[blockSize.x * blockSize.y + index] = encodeVTBlock(normals);
+  }
+}%
+
+CCProgram vt-astc-cs %{
+  precision highp float;
+  precision highp int;
+  #include <vt-astc-encode>
+  uvec4 encodeVTBlock(vec4 pixels[16]) {
+    return encodeASTC(pixels);
+  }
+  #include <vt-compress-main>
+}%

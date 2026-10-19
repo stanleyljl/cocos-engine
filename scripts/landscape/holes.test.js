@@ -8,14 +8,18 @@ const { spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 test('Landscape hole shaders: color, shadow, decals, LOD masks and NaN probe', {
-    skip: process.env.LANDSCAPE_BASE_EFFECT_JSON && process.env.CHROME_PATH ? false : 'Compile Effect and set LANDSCAPE_BASE_EFFECT_JSON and CHROME_PATH',
+    skip: process.env.LANDSCAPE_BASE_EFFECT_JSON && process.env.LANDSCAPE_DECAL_EFFECT_JSON && process.env.CHROME_PATH
+        ? false : 'Compile Effects and set LANDSCAPE_BASE_EFFECT_JSON, LANDSCAPE_DECAL_EFFECT_JSON and CHROME_PATH',
 }, () => {
-    const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/builtin-landscape.effect'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/effects/landscape/builtin-landscape.effect'), 'utf8');
     const chunk = name => source.split(`CCProgram ${name} %{`)[1].split('}%')[0];
     const sampling = chunk('landscape-hole-sampling');
     const fixture = {
         effect: JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8')),
-        vertex: chunk('landscape-vertex').replace('#include <landscape-hole-sampling>', sampling),
+        decalEffect: JSON.parse(fs.readFileSync(process.env.LANDSCAPE_DECAL_EFFECT_JSON, 'utf8')),
+        vertex: chunk('landscape-vertex').replace('#include <landscape-hole-sampling>', sampling)
+            .replace('#include <landscape/terrain-height>', fs.readFileSync(path.join(__dirname,
+                '../../editor/assets/chunks/landscape/terrain-height.chunk'), 'utf8')),
         fragment: chunk('landscape-hole-fragment').replace('#include <landscape-hole-sampling>', sampling),
     };
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'landscape-holes-'));

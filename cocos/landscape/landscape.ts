@@ -461,7 +461,7 @@ export class Landscape extends Component {
         this._lodQualityScale = value;
     }
 
-    /** Optional non-repeating biome base color covering the landscape, without baked lighting. */
+    /** Terrain-wide modulation data: RGB byte 128 is neutral; Alpha masks influence. Use a linear UNORM texture. */
     @editable
     @type(Texture2D)
     @displayOrder(1)
@@ -479,7 +479,7 @@ export class Landscape extends Component {
         }
     }
 
-    /** Blend toward the biome base color while preserving the tiled materials' light/dark detail. */
+    /** Global modulation strength, multiplied by map Alpha and per-material influence. */
     @editable
     @displayOrder(10)
     @range([0, 1, 0.01])

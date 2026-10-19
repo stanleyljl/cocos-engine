@@ -47,7 +47,6 @@
 namespace cc {
 
 class Node;
-class RenderTexture;
 class Material;
 class RenderingSubMesh;
 
@@ -95,12 +94,11 @@ public:
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
     void setViewPos(const Vec3 &position);
-    RenderTexture *vtAtlas() const;
+    TextureBase *vtAtlas() const;
 
 private:
     friend struct LandscapePagingTestAccess;
     uint32_t _holeMode{0};
-    bool _vertexHoleCullingSupported{false};
 
     // A camera/pass change must not replenish any per-frame streaming budget.
     // The time limit is checked between indivisible steps; allow the first step

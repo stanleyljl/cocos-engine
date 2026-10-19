@@ -143,6 +143,47 @@ void GLES3PrimaryCommandBuffer::updateBuffer(Buffer *buff, const void *data, uin
     }
 }
 
+void GLES3PrimaryCommandBuffer::copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
+    auto *source = static_cast<GLES3Buffer *>(buffer)->gpuBuffer();
+    auto *destination = static_cast<GLES3Texture *>(texture)->gpuTexture();
+    GLint previousBuffer = 0;
+    GLint previousTexture = 0;
+    GLint alignment = 0;
+    GLint rowLength = 0;
+    GLint skipRows = 0;
+    GLint skipPixels = 0;
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &previousBuffer);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength);
+    glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
+    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPixels);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, source->glBuffer);
+    glBindTexture(GL_TEXTURE_2D, destination->glTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+        const auto *offset = reinterpret_cast<const void *>(static_cast<uintptr_t>(source->glOffset) + region.buffOffset);
+        if (GFX_FORMAT_INFOS[static_cast<uint32_t>(texture->getFormat())].isCompressed) {
+            const auto size = formatSize(texture->getFormat(), region.texExtent.width, region.texExtent.height, 1);
+            glCompressedTexSubImage2D(GL_TEXTURE_2D, region.texSubres.mipLevel, region.texOffset.x, region.texOffset.y,
+                                      region.texExtent.width, region.texExtent.height, destination->glInternalFmt, size, offset);
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, region.texSubres.mipLevel, region.texOffset.x, region.texOffset.y,
+                           region.texExtent.width, region.texExtent.height, destination->glFormat, destination->glType, offset);
+        }
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPixels);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, previousBuffer);
+    glBindTexture(GL_TEXTURE_2D, previousTexture);
+}
+
 void GLES3PrimaryCommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
     GLES3GPUTexture *gpuTexture = static_cast<GLES3Texture *>(texture)->gpuTexture();
     if (gpuTexture) {

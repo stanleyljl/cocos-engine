@@ -1,0 +1,189 @@
+// Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
+#if LANDSCAPE_WIREFRAME
+  in vec3 v_wireBarycentric;
+#endif
+#if __VERSION__ >= 300
+  uniform sampler2D vtAlbedo;
+  uniform sampler2D vtNormalRoughnessAO;
+  flat in vec4 v_vtParams;
+  #if !LANDSCAPE_DEBUG_UNLIT
+    uniform highp sampler2DArray terrainNormalMap;
+    in vec2 v_normalUV;
+    flat in float v_normalLayer;
+  #endif
+#endif
+#if __VERSION__ >= 300
+  flat in float v_lod;
+#else
+  in float v_lod;
+#endif
+
+#if __VERSION__ >= 300
+void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY,
+                               out vec2 atlasUV, out vec2 atlasDX, out vec2 atlasDY) {
+  // Each patch carries one resident mapping covering its complete stitched footprint.
+  vec2 pageUV = clamp((localXZ - v_vtParams.xy) / v_vtParams.z, vec2(0.0), vec2(1.0));
+  float slotsPerSide = vtLayout.x / vtLayout.y;
+  vec2 slot = vec2(mod(v_vtParams.w, slotsPerSide), floor(v_vtParams.w / slotsPerSide));
+  atlasUV = (slot * vtLayout.y + vtLayout.z + pageUV * (vtLayout.y - 2.0 * vtLayout.z)) / vtLayout.x;
+  float gradientScale = (vtLayout.y - 2.0 * vtLayout.z) / (vtLayout.x * v_vtParams.z);
+  atlasDX = localDX * gradientScale;
+  atlasDY = localDY * gradientScale;
+
+  // CLAMP protects the atlas, not a physical slot. Bound the footprint at
+  // page edges and retain one coarsest-mip texel for bilinear support.
+  vec2 room = vtLayout.z + min(pageUV, vec2(1.0) - pageUV) * (vtLayout.y - 2.0 * vtLayout.z) - vtLayout.w;
+  vec2 span = (abs(atlasDX) + abs(atlasDY)) * vtLayout.x;
+  vec2 scaleLimit = 2.0 * max(room, vec2(0.0)) / max(span, vec2(1e-6));
+  float footprintScale = min(1.0, min(scaleLimit.x, scaleLimit.y));
+  atlasDX *= footprintScale;
+  atlasDY *= footprintScale;
+}
+
+void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY,
+                          out vec4 cachedAlbedo, out vec4 normalRoughnessAO) {
+  vec2 atlasUV;
+  vec2 atlasDX;
+  vec2 atlasDY;
+  virtualTextureCoordinates(localXZ, localDX, localDY, atlasUV, atlasDX, atlasDY);
+  cachedAlbedo = textureGrad(vtAlbedo, atlasUV, atlasDX, atlasDY);
+  #if LANDSCAPE_DEBUG_UNLIT
+    normalRoughnessAO = vec4(0.5, 0.5, 1.0, 1.0);
+  #else
+    normalRoughnessAO = textureGrad(vtNormalRoughnessAO, atlasUV, atlasDX, atlasDY);
+  #endif
+}
+#endif
+
+#if !LANDSCAPE_DEBUG_UNLIT
+#if __VERSION__ >= 300
+vec3 decodeTerrainNormal() {
+  vec2 xz = texture(terrainNormalMap, vec3(v_normalUV, v_normalLayer)).rg * 2.0 - 1.0;
+  return normalize(vec3(xz.x, sqrt(max(1.0 - dot(xz, xz), 0.0)), xz.y));
+}
+#endif
+
+vec3 applyTerrainNormalFrame(vec3 detailNormal, vec3 terrainNormal) {
+  vec3 candidate = vec3(terrainNormal.y, -terrainNormal.x, 0.0);
+  vec3 tangent = dot(candidate, candidate) > 1e-10 ? normalize(candidate) : vec3(1.0, 0.0, 0.0);
+  return normalize(tangent * detailNormal.x + cross(terrainNormal, tangent) * detailNormal.y +
+                   terrainNormal * detailNormal.z);
+}
+#endif
+
+vec3 lodPalette(int lod) {
+  if (lod == 0) {
+    return vec3(1.00, 0.15, 0.15);
+  }
+  if (lod == 1) {
+    return vec3(0.15, 0.90, 0.20);
+  }
+  if (lod == 2) {
+    return vec3(0.20, 0.45, 1.00);
+  }
+  if (lod == 3) {
+    return vec3(1.00, 0.90, 0.10);
+  }
+  if (lod == 4) {
+    return vec3(1.00, 0.15, 0.90);
+  }
+  if (lod == 5) {
+    return vec3(0.10, 0.90, 0.95);
+  }
+  if (lod == 6) {
+    return vec3(0.65, 0.35, 0.85);
+  }
+  if (lod == 7) {
+    return vec3(0.95, 0.55, 0.20);
+  }
+  return vec3(0.90, 0.90, 0.90);
+}
+
+#if LANDSCAPE_DEBUG_UNLIT
+  #include <surfaces/data-structures/unlit>
+#else
+  #include <surfaces/data-structures/standard>
+#endif
+#define CC_SURFACES_FRAGMENT_MODIFY_SHARED_DATA
+void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
+  #if LANDSCAPE_WIREFRAME
+    // Evaluate derivatives before any discard. Width is in screen pixels.
+    vec3 wireDistance = v_wireBarycentric / max(fwidth(v_wireBarycentric), vec3(1e-6));
+  #endif
+  #if __VERSION__ >= 300
+    // Evaluate derivatives before surface and hole discard.
+    vec2 localXZ = vec2(FSInput_texcoord.x, -FSInput_texcoord.y);
+    vec2 localDX = dFdx(localXZ);
+    vec2 localDY = dFdy(localXZ);
+  #endif
+  #include <landscape-surface-discard>
+  vec4 cachedAlbedo = vec4(0.0);
+  vec4 normalRoughnessAO = vec4(0.5, 0.5, 1.0, 1.0);
+#if !LANDSCAPE_DEBUG_UNLIT
+  vec3 detailNormal = vec3(0.0, 0.0, 1.0);
+  vec3 terrainNormal = vec3(0.0, 1.0, 0.0);
+#endif
+#if __VERSION__ >= 300
+  sampleVirtualTexture(localXZ, localDX, localDY, cachedAlbedo, normalRoughnessAO);
+  #if !LANDSCAPE_DEBUG_UNLIT
+    detailNormal = normalize(vec3(normalRoughnessAO.r, cachedAlbedo.a, normalRoughnessAO.g) * 2.0 - 1.0);
+    if (rvtNormalParams.x < 0.5) {
+      // The exact source of the committed height node supplies its base normal.
+      terrainNormal = decodeTerrainNormal();
+    }
+  #endif
+#endif
+  surfaceData.baseColor = vec4(cachedAlbedo.rgb * mainColor.rgb, 1.0);
+#if !LANDSCAPE_DEBUG_UNLIT
+  // RVT normals use NRA.RG for XZ and albedo.A for Y; opacity stays 1.
+  vec3 normal = normalize(FSInput_worldNormal);
+  vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
+  vec3 localNormal = detailNormal;
+  if (rvtNormalParams.x < 0.5) {
+    localNormal = applyTerrainNormalFrame(detailNormal, terrainNormal);
+  }
+  // The surface frame is (+X, -Z, +Y); transform the composed local normal
+  // through it so node transforms retain the existing world-space behavior.
+  surfaceData.worldNormal = normalize(CalculateNormalFromTangentSpace(vec3(localNormal.x, -localNormal.z, localNormal.y), 1.0,
+    normal, tangent, FSInput_mirrorNormal));
+  surfaceData.roughness = normalRoughnessAO.b;
+  surfaceData.ao = normalRoughnessAO.a;
+  surfaceData.metallic = 0.0;
+  surfaceData.specularIntensity = 0.5;
+  surfaceData.emissive = vec3(0.0);
+#endif
+
+  if (terrainParams.z > 0.5) {
+    surfaceData.baseColor.rgb = lodPalette(int(v_lod));
+  }
+  if (terrainParams.w > 0.5) {
+    float d = distance(morphCameraPos.xyz, FSInput_worldPos);
+    float width = fwidth(d) * 1.5;
+    for (int i = 0; i < LANDSCAPE_MAX_LOD_LEVELS; ++i) {
+      if (lodMorph[i].y <= lodMorph[i].x) {
+        continue; // Unused resource levels.
+      }
+      if (abs(d - lodMorph[i].x) < width) {
+        surfaceData.baseColor.rgb = mix(lodPalette(i), vec3(0.95), 0.62);
+      }
+      if (abs(d - lodMorph[i].y) < width) {
+        surfaceData.baseColor.rgb = lodPalette(i) * 0.45;
+      }
+    }
+    // Use local terrain coordinates so seams follow the rendered surface,
+    // including edge stitching and node transforms. Differentiate before wrapping.
+    vec2 sectorUV = vec2(FSInput_texcoord.x, -FSInput_texcoord.y) / max(sectorParams.x, 1e-6);
+    vec2 seamDistance = abs(fract(sectorUV + 0.5) - 0.5);
+    vec2 seamWidth = max(fwidth(sectorUV) * 1.5, vec2(1e-6));
+    if (any(lessThan(seamDistance, seamWidth))) {
+      surfaceData.baseColor.rgb = vec3(1.0, 0.3, 0.0);
+    }
+  }
+  #if LANDSCAPE_WIREFRAME
+    // Keep texture/derivative evaluation above in uniform control flow.
+    // Shared edges receive an inward strip from each adjacent triangle.
+    if (min(min(wireDistance.x, wireDistance.y), wireDistance.z) > 0.4) {
+      discard;
+    }
+  #endif
+}

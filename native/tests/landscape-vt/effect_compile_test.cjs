@@ -29,15 +29,30 @@ async function main() {
         }
         return {};
     };
-    for (const name of ['builtin-landscape', 'builtin-landscape-vt-compose']) {
-        const source = fs.readFileSync(path.join(engine, 'editor/assets/effects', `${name}.effect`), 'utf8');
-        const effect = compiler.buildEffect(name, source);
+    const dependencies = JSON.parse(fs.readFileSync(path.join(engine, 'cc.config.json'), 'utf8'))
+        .features.landscape.dependentAssets;
+    const effectNames = new Set();
+    for (const name of ['builtin-landscape', 'builtin-landscape-decal', 'builtin-landscape-vt-compose', 'builtin-landscape-vt-compress']) {
+        const source = fs.readFileSync(path.join(engine, 'editor/assets/effects/landscape', `${name}.effect`), 'utf8');
+        const effect = compiler.buildEffect(`landscape/${name}`, source);
         if (!effect || !effect.shaders.length) throw new Error(`No shaders produced for ${name}`);
+        effectNames.add(effect.name);
+        const meta = JSON.parse(fs.readFileSync(path.join(engine,
+            'editor/assets/effects/landscape', `${name}.effect.meta`), 'utf8'));
+        if (!dependencies.includes(meta.uuid)) throw new Error(`${name} is missing from Landscape build dependencies`);
         if (process.env.LANDSCAPE_EFFECT_OUTPUT) {
             fs.mkdirSync(process.env.LANDSCAPE_EFFECT_OUTPUT, { recursive: true });
             fs.writeFileSync(path.join(process.env.LANDSCAPE_EFFECT_OUTPUT, `${name}.json`), JSON.stringify(effect));
         }
         console.log(`PASS: ${name}, ${effect.shaders.length} shader programs`);
     }
+    // Moving builtin effects changes their runtime names, even when UUIDs stay fixed.
+    for (const file of ['LandscapeRenderer.cpp', 'VTRenderer.cpp', 'DecalRenderer.cpp']) {
+        const source = fs.readFileSync(path.join(engine, 'native/cocos/landscape', file), 'utf8');
+        for (const match of source.matchAll(/"(landscape\/builtin-landscape[^"\s]*)"/g)) {
+            if (!effectNames.has(match[1])) throw new Error(`${file} references missing effect ${match[1]}`);
+        }
+    }
+    console.log('PASS: native effect names and builtin build dependencies');
 }
 main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });

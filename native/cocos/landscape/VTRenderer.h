@@ -30,6 +30,7 @@
 
 namespace cc {
 class Material;
+class RenderTexture;
 class RenderingSubMesh;
 namespace landscape {
 class DecalRenderer;
@@ -52,7 +53,7 @@ public:
     void destroy();
     VirtualTexture &pages() { return _pages; }
     const VirtualTexture &pages() const { return _pages; }
-    RenderTexture *atlas() const { return _atlas.get(); }
+    TextureBase *atlas() const;
     gfx::Texture *albedo() const;
     gfx::Texture *normalRoughnessAO() const;
     gfx::Sampler *sampler() const { return _sampler; }
@@ -85,6 +86,10 @@ private:
     }
 
     bool initAtlas(gfx::Device *device);
+    bool initCompression(gfx::Device *device);
+    void compressPage(uint32_t slot);
+    void transitionAtlas(bool writing);
+    uint32_t renderSize() const { return _compress ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE; }
     gfx::Framebuffer *framebuffer() const;
     gfx::RenderPass *renderPass() const;
     void syncCliffSources(TilePagePool &tiles);
@@ -97,7 +102,7 @@ private:
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
     void recordPagePass(Material *material, gfx::PipelineState *pipelineState,
-                        gfx::Framebuffer *framebuffer, uint32_t atlasSize);
+                        gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
     void invalidateComposedPages();
 
     // Exactly the three vec4 attributes consumed by the compose/mip shaders.
@@ -134,6 +139,17 @@ private:
     } _cliff;
     VirtualTexture _pages;
     IntrusivePtr<RenderTexture> _atlas;
+    // Compression uses _atlas as reusable single-page RGBA scratch storage.
+    bool _compress{false};
+    std::array<IntrusivePtr<Texture2D>, 2> _compressedAtlas;
+    IntrusivePtr<gfx::Buffer> _compressedBlocks;
+    IntrusivePtr<gfx::Shader> _compressShader;
+    IntrusivePtr<gfx::DescriptorSetLayout> _compressLayout;
+    IntrusivePtr<gfx::DescriptorSetLayout> _emptyLayout;
+    IntrusivePtr<gfx::PipelineLayout> _compressPipelineLayout;
+    std::array<IntrusivePtr<gfx::Buffer>, config::VT_MIP_LEVELS> _compressUniforms;
+    std::array<IntrusivePtr<gfx::DescriptorSet>, config::VT_MIP_LEVELS> _compressSets;
+    IntrusivePtr<gfx::PipelineState> _compressPipeline;
     gfx::Sampler *_sampler{nullptr}; // device-owned
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _material;

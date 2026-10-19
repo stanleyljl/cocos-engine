@@ -563,6 +563,23 @@ void CCVKCommandBuffer::updateBuffer(Buffer *buffer, const void *data, uint32_t 
     cmdFuncCCVKUpdateBuffer(CCVKDevice::getInstance(), gpuBuffer, data, size, _gpuCommandBuffer);
 }
 
+void CCVKCommandBuffer::copyBufferToTexture(Buffer *buffer, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
+    auto *source = static_cast<CCVKBuffer *>(buffer)->gpuBufferView();
+    auto *destination = static_cast<CCVKTexture *>(texture)->gpuTexture();
+    const auto frame = CCVKDevice::getInstance()->gpuDevice()->curBackBufferIndex;
+    ccstd::vector<VkBufferImageCopy> copies(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+        auto &copy = copies[i];
+        copy.bufferOffset = source->getStartOffset(frame) + region.buffOffset;
+        copy.imageSubresource = {destination->aspectMask, region.texSubres.mipLevel, 0, 1};
+        copy.imageOffset = {region.texOffset.x, region.texOffset.y, 0};
+        copy.imageExtent = {region.texExtent.width, region.texExtent.height, 1};
+    }
+    vkCmdCopyBufferToImage(_gpuCommandBuffer->vkCommandBuffer, source->gpuBuffer->vkBuffer,
+                          destination->vkImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, copies.data());
+}
+
 void CCVKCommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
     cmdFuncCCVKCopyBuffersToTexture(CCVKDevice::getInstance(), buffers, static_cast<CCVKTexture *>(texture)->gpuTexture(), regions, count, _gpuCommandBuffer);
 }

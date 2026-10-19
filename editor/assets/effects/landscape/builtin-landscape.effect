@@ -1,0 +1,314 @@
+// Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
+CCEffect %{
+  techniques:
+  - name: opaque
+    passes:
+    - vert: landscape-vs
+      frag: landscape-fs
+      properties:
+        mainColor: { value: [1, 1, 1, 1], linear: true, editor: { type: color } }
+        holeParams: { value: [0, 0, 0, 0] }
+        holeSplatmap: { sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
+        terrainParams: { value: [3000, 0, 0, 0] }
+        sectorParams: { value: [1, 0, 0, 0] }
+        morphCameraPos: { value: [0, 0, 0, 0] }
+        heightParams: { value: [1, 129, 0, 0] }
+        vtLayout: { value: [4352, 272, 8, 4] }
+        rvtNormalParams: { value: [1, 0, 0, 0] }
+        vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        # Runtime texture arrays are bound by LandscapeRenderer before the
+        # material is used by a model. Leaving value unset makes Pass use its
+        # existing non-null default during validated material initialization.
+        heightmap: { sampler: { minFilter: linear, magFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
+        terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
+        lodMorph: { value: [0, 0, 0, 0] }
+    - vert: landscape-vs
+      frag: landscape-fs
+      phase: forward-add
+      propertyIndex: 0
+      embeddedMacros: { CC_FORWARD_ADD: true }
+      depthStencilState:
+        depthFunc: equal
+        depthTest: true
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: one
+          blendDst: one
+          blendSrcAlpha: zero
+          blendDstAlpha: one
+    - vert: landscape-shadow-vs
+      frag: landscape-shadow-fs
+      phase: shadow-caster
+      propertyIndex: 0
+      rasterizerState:
+        # Heightfields are open surfaces: front-face culling loses sun-facing terrain.
+        cullMode: none
+    - vert: landscape-vs
+      frag: landscape-fs
+      phase: deferred-forward
+      propertyIndex: 0
+      embeddedMacros: { CC_FORCE_FORWARD_SHADING: true }
+}%
+
+CCProgram landscape-uniforms %{
+  // L0-L8; maximum sector size = 4096 m at 1 m finest-grid spacing.
+  // Must match config::MAX_LOD_LEVELS in LandscapeConfig.h.
+  #define LANDSCAPE_MAX_LOD_LEVELS 9
+  uniform Constants {
+    vec4 mainColor;
+    vec4 terrainParams; // height scale/bias, LOD color flag, range flag
+    vec4 sectorParams; // sector size, unused YZW
+    vec4 morphCameraPos;
+    vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
+    vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
+    vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
+    // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
+    vec4 lodMorph[9];
+    vec4 holeParams; // 0 = vertex NaN, 1 = fragment discard
+  };
+}%
+
+CCProgram landscape-macros %{
+  #ifndef LANDSCAPE_SHADOW_PASS
+    #define LANDSCAPE_SHADOW_PASS 0
+  #endif
+  // VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
+  #pragma define-meta LANDSCAPE_DEBUG_UNLIT
+  #pragma define-meta LANDSCAPE_WIREFRAME
+  #pragma define-meta LANDSCAPE_HEIGHT_UNORM
+  #define CC_SURFACES_USE_TANGENT_SPACE 1
+  #include <surfaces/effect-macros/terrain>
+}%
+
+CCProgram landscape-hole-sampling %{
+  #if __VERSION__ >= 300
+    uniform highp usampler2DArray holeSplatmap;
+    bool landscapeHole(vec2 localXZ, vec4 region, bool vertexSample) {
+      vec2 grid = clamp((localXZ - region.xy) / region.z, vec2(0.0), vec2(1.0)) * (heightParams.y - 1.0);
+      // Vertices use aligned point samples. Fragments/physics use the cell's minimum corner.
+      ivec2 p = vertexSample ? ivec2(floor(grid + 0.5)) : min(ivec2(floor(grid)), ivec2(int(heightParams.y) - 2));
+      return (texelFetch(holeSplatmap, ivec3(p, int(region.w + 0.5)), 0).r & 32768u) != 0u;
+    }
+  #endif
+}%
+
+CCProgram landscape-hole-fragment %{
+  #include <landscape-hole-sampling>
+  #if __VERSION__ >= 300
+    in highp vec2 v_holeXZ;
+    flat in highp vec4 v_holeRegion;
+  #endif
+  void discardLandscapeHole() {
+    #if __VERSION__ >= 300
+      if (holeParams.x > 0.5 && landscapeHole(v_holeXZ, v_holeRegion, false)) {
+        discard;
+      }
+    #endif
+  }
+}%
+
+CCProgram landscape-vertex %{
+  #include <landscape-hole-sampling>
+  #if __VERSION__ >= 300
+    out highp vec2 v_holeXZ;
+    flat out highp vec4 v_holeRegion;
+  #endif
+  #if LANDSCAPE_WIREFRAME && !LANDSCAPE_SHADOW_PASS
+    out vec3 v_wireBarycentric;
+  #endif
+  #if USE_INSTANCING
+    in vec4 a_gridInst; // parent local XZ origin, node size, LOD
+    in vec4 a_quadrantInst; // UV offset XY, patch UV size Z, coarse-neighbor edge mask W
+    in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
+    #if !LANDSCAPE_SHADOW_PASS
+      in vec4 a_vtInst; // resident VT region XZ origin, size, physical slot
+    #endif
+  #endif
+  #if __VERSION__ >= 300
+    uniform highp sampler2DArray heightmap;
+    #if !LANDSCAPE_SHADOW_PASS
+      flat out float v_lod;
+      flat out vec4 v_vtParams;
+      out vec2 v_normalUV;
+      flat out float v_normalLayer;
+    #endif
+  #else
+    #if !LANDSCAPE_SHADOW_PASS
+      out float v_lod;
+    #endif
+  #endif
+
+  #include <landscape/terrain-height>
+
+
+  #define CC_SURFACES_VERTEX_MODIFY_LOCAL_POS
+  vec3 SurfacesVertexModifyLocalPos(in SurfacesStandardVertexIntermediate In) {
+    // The RG32F buffer packs terrain XZ into the first two input components.
+    // Keep the shared surface input unchanged; reconstruct XYZ on return.
+    vec2 localXZ = In.position.xy;
+  #if LANDSCAPE_WIREFRAME && !LANDSCAPE_SHADOW_PASS
+    float wireCells = 16.0;
+    #if USE_INSTANCING
+      wireCells = a_quadrantInst.z * 16.0;
+    #endif
+    // GridMesh uses (a,c,b), (b,c,d). This three-colouring gives each
+    // triangle all three barycentric corners without duplicating vertices.
+    // Derive from the original lattice so edges follow the final geometry.
+    vec2 wireGrid = floor(In.position.xy * wireCells + 0.5);
+    float wireCorner = mod(wireGrid.x + 2.0 * wireGrid.y, 3.0);
+    v_wireBarycentric = wireCorner < 0.5 ? vec3(1.0, 0.0, 0.0)
+      : (wireCorner < 1.5 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0));
+  #endif
+  #if !LANDSCAPE_SHADOW_PASS
+    v_lod = 0.0;
+  #if __VERSION__ >= 300
+    v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
+    v_normalUV = vec2(0.5);
+    v_normalLayer = 0.0;
+    #if USE_INSTANCING
+      v_vtParams = a_vtInst;
+    #endif
+  #endif
+  #endif
+  #if USE_INSTANCING
+    vec2 parentUV = a_quadrantInst.xy + In.position.xy * a_quadrantInst.z;
+    localXZ = a_gridInst.xy + parentUV * a_gridInst.z;
+    #if !LANDSCAPE_SHADOW_PASS
+      v_lod = a_gridInst.w;
+    #endif
+  #endif
+    float height = sampleHeight(localXZ);
+  #if __VERSION__ >= 300 && USE_INSTANCING
+    vec4 base = terrainVertex(parentUV);
+    localXZ = base.xz;
+    height = base.y;
+  #endif
+  #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
+    // Use the final local coordinates for geometry and terrain normal sampling.
+    float resolution = max(heightParams.y, 2.0);
+    v_normalUV = (localXZ - a_tileInst.xy) / a_tileInst.z;
+    v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
+    v_normalLayer = a_tileInst.w;
+  #endif
+    #if __VERSION__ >= 300
+      v_holeXZ = localXZ;
+      v_holeRegion = vec4(0.0, 0.0, 1.0, 0.0);
+      #if USE_INSTANCING
+        v_holeRegion = a_tileInst;
+        if (holeParams.x < 0.5 && landscapeHole(localXZ, a_tileInst, true)) {
+          height = uintBitsToFloat(0x7fc00000u);
+        }
+      #endif
+    #endif
+    // Return the final terrain position.
+    return vec3(localXZ.x, height, localXZ.y);
+  }
+
+  #define CC_SURFACES_VERTEX_MODIFY_LOCAL_SHARED_DATA
+  void SurfacesVertexModifyLocalSharedData(inout SurfacesStandardVertexIntermediate In) {
+    // Supply only the terrain coordinate frame; slopes come from RG8 normal
+    // maps per pixel, not from sparsely sampled, interpolated vertex normals.
+    In.normal = vec3(0.0, 1.0, 0.0);
+    In.tangent = vec4(1.0, 0.0, 0.0, 1.0);
+  }
+
+  #define CC_SURFACES_VERTEX_MODIFY_UV
+  void SurfacesVertexModifyUV(inout SurfacesStandardVertexIntermediate In) {
+    In.texCoord = vec2(In.position.x, -In.position.z);
+  }
+}%
+
+CCProgram landscape-surface %{
+  #include <landscape-hole-fragment>
+  #include <landscape/rvt-surface>
+}%
+
+CCProgram landscape-surface-discard %{
+  discardLandscapeHole();
+}%
+
+CCProgram landscape-vs %{
+  precision highp float;
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/includes/common-vs>
+  #include <landscape-uniforms>
+  #include <landscape-vertex>
+  #include <surfaces/includes/standard-vs>
+  #include <shading-entries/main-functions/render-to-scene/vs>
+}%
+
+CCProgram landscape-fs %{
+  precision highp float;
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/includes/common-fs>
+  #include <landscape-uniforms>
+  #include <landscape-surface>
+  // Effect chunks are included only once, even across conditional branches.
+  // Hoist shared dependencies so both PBR and unlit variants receive them.
+  #include <lighting-models/includes/common>
+  #include <common/lighting/brdf>
+  #include <surfaces/module-functions/debug-view>
+  #if LANDSCAPE_DEBUG_UNLIT
+    #include <lighting-models/includes/unlit>
+    #include <surfaces/includes/unlit-fs>
+  #else
+    #include <lighting-models/includes/standard>
+    #include <surfaces/includes/standard-fs>
+  #endif
+  #include <shading-entries/main-functions/render-to-scene/fs>
+}%
+
+CCProgram landscape-shadow-vs %{
+  precision highp float;
+  precision highp int;
+  #define LANDSCAPE_SHADOW_PASS 1
+  #include <landscape-macros>
+  #include <surfaces/effect-macros/render-to-shadowmap>
+  #include <surfaces/includes/common-vs>
+  #include <landscape-uniforms>
+  #include <landscape-vertex>
+  #include <shading-entries/main-functions/render-to-shadowmap/vs>
+}%
+
+CCProgram landscape-shadow-fs %{
+  precision highp float;
+  precision highp int;
+  #include <landscape-macros>
+  #include <surfaces/effect-macros/render-to-shadowmap>
+  #include <surfaces/includes/common-fs>
+  #include <landscape-uniforms>
+
+  #include <landscape-hole-fragment>
+  in highp vec2 v_clip_depth;
+  layout(location = 0) out vec4 fragColorX;
+
+  void main () {
+    highp float depth = v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5;
+    #if CC_SHADOWMAP_USE_LINEAR_DEPTH
+      if (IS_SPOT_LIGHT(cc_shadowLPNNInfo.x)) {
+        depth = CCGetLinearDepth(FSInput_worldPos.xyz);
+      }
+    #endif
+
+    // An open heightfield must cast its sun-facing surface. Unlike a closed
+    // mesh, front-face culling cannot suppress its self-shadowing. Bias the
+    // stored COLOR depth across the PCF footprint (rasterizer depth bias only
+    // affects the depth attachment, which Cocos does not sample for shadows).
+    // Include half a texel for receiver/caster sample-center disagreement.
+    float radius = cc_shadowWHPBInfo.z > 2.5 ? 2.5 : (cc_shadowWHPBInfo.z > 0.5 ? 1.5 : 0.5);
+    float slope = abs(dFdx(depth)) + abs(dFdy(depth));
+    depth = min(depth + radius * slope, 1.0 - 1.0 / 16777216.0);
+
+    discardLandscapeHole();
+    #if CC_SHADOWMAP_FORMAT == SHADOWMAP_FORMAT_RGBA8
+      fragColorX = packDepthToRGBA(depth);
+    #else
+      fragColorX = vec4(depth, 1.0, 1.0, 1.0);
+    #endif
+  }
+}%
