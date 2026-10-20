@@ -65,6 +65,18 @@ interface QuerySource {
     status: LandscapeQueryStatus;
 }
 
+/** One runtime instance of an already loaded decal layer. */
+export interface LandscapeDecal {
+    /** Minimum X corner in landscape-local coordinates. */
+    x: number;
+    /** Minimum Z corner in landscape-local coordinates. */
+    z: number;
+    /** Square side length, greater than zero and at most 64; must fit inside the terrain. */
+    size: number;
+    /** Index in the asset's preloaded DecalLayer array. */
+    layer: number;
+}
+
 const ShadowCastingMode = Enum({ OFF: 0, ON: 1 });
 const ShadowReceivingMode = Enum({ OFF: 0, ON: 1 });
 
@@ -382,6 +394,36 @@ export class Landscape extends Component {
     /** Initial view has reached the configured geometry and VT precision and can render. */
     public get isReady (): boolean {
         return this._native ? this._native.isReady() : false;
+    }
+
+    /** Add a runtime decal after native terrain initialization (native platforms only).
+     * Returns a nonzero ID local to this Landscape, or 0 if unavailable, out of bounds,
+     * the layer is not loaded, or capacity is full. Malformed parameters throw RangeError.
+     * Authored and runtime decals share a limit of 512 instances. New decals compose
+     * above existing ones. VT refresh uses the normal page budget and is deferred
+     * while LOD/VT is frozen. Decals do not change collision or sampleSurface results.
+     * Runtime instances are discarded on disable or asset replacement, not serialized.
+     */
+    public addDecal (decal: Readonly<LandscapeDecal>): number {
+        if (typeof decal.x !== 'number' || typeof decal.z !== 'number' || typeof decal.size !== 'number'
+            || decal.x < 0 || decal.z < 0 || decal.size <= 0 || decal.size > 64
+            || !Number.isInteger(decal.layer) || decal.layer < 0 || decal.layer > 0xFFFFFFFF) {
+            throw new RangeError('Invalid Landscape decal region or layer');
+        }
+        if (!this.enabledInHierarchy || !this._native) {
+            return 0;
+        }
+        return this._native.addDecal(decal.x, decal.z, decal.size, decal.layer);
+    }
+
+    /** Remove an instance returned by addDecal. Returns false for stale/unknown IDs.
+     * Authored asset instances are unaffected. VT pixels refresh over subsequent frames.
+     */
+    public removeDecal (id: number): boolean {
+        if (!Number.isInteger(id) || id <= 0 || id > 0xFFFFFFFF || !this._native) {
+            return false;
+        }
+        return this._native.removeDecal(id);
     }
 
     @serializable

@@ -286,9 +286,10 @@ try {
   const probeSource=decal=>[
     'precision highp float;precision highp sampler2DArray;',
     '#define USE_INSTANCING 1',
+    '#define LANDSCAPE_TILE_RESOLUTION 129',
     '#define LANDSCAPE_SHADOW_PASS 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_HEIGHT_UNORM 0',
     '#define CCGetWorldMatrix(m) m = mat4(1.0)',
-    'uniform vec4 heightParams,holeParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
+    'uniform vec4 holeParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
     'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};',
     vertexChunks[decal],
     'uniform vec2 testUV;out vec4 probe;',
@@ -298,13 +299,18 @@ try {
   gl.activeTexture(gl.TEXTURE15);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,17,17,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(17*17));
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(129*129));
   const outBuffer=gl.createBuffer();gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER,outBuffer);gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER,16,gl.DYNAMIC_READ);gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER,0,outBuffer);
   const terrainTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE7);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrainTexture);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-  const heights=new Uint8Array(17*17*4);
-  for(let z=0;z<17;z++)for(let x=0;x<17;x++){const h=Math.round((.2+.1*Math.sin(x*.8)*Math.cos(z*.4))*65535),at=(z*17+x)*4;heights.set([h>>8,h&255,0,255],at);}
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,17,17,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
+  const heights=new Uint8Array(129*129*4);
+  for (let z = 0; z < 129; ++z) {
+    for (let x = 0; x < 129; ++x) {
+      const h = Math.round((.2 + .1 * Math.sin(x * .1) * Math.cos(z * .05)) * 65535);
+      heights.set([h >> 8, h & 255, 0, 255], (z * 129 + x) * 4);
+    }
+  }
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,129,129,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
   gl.activeTexture(gl.TEXTURE8);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,0,0,255]));
   const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],mapping=[0,0,0,0],grid=[0,0,8,8],nodeSize=16,fade=1}={})=>{
     const p=probePrograms[decal];gl.useProgram(p);
@@ -317,7 +323,7 @@ try {
     a('a_decalRegion',0,0,16,0);
     a('a_decalGrid',...grid);
     a('a_decalFade',scale,fade,0,0);
-    u('heightParams',1,17,0,0);u('terrainParams',10,0,0,0);u('morphCameraPos',...camera,0);u('decalControl',enabled,0,0,0);u('lodMorph[0]',...range,0,0);
+    u('terrainParams',10,0,0,0);u('morphCameraPos',...camera,0);u('decalControl',enabled,0,0,0);u('lodMorph[0]',...range,0,0);
     gl.uniform2f(gl.getUniformLocation(p,'testUV'),...uv);gl.uniform1i(gl.getUniformLocation(p,'heightmap'),7);gl.uniform1i(gl.getUniformLocation(p,'decalHeightMap'),8);
     gl.uniform1i(gl.getUniformLocation(p,'holeSplatmap'),15);
     gl.enable(gl.RASTERIZER_DISCARD);gl.beginTransformFeedback(gl.POINTS);gl.drawArrays(gl.POINTS,0,1);gl.endTransformFeedback();gl.disable(gl.RASTERIZER_DISCARD);
@@ -420,7 +426,7 @@ try {
     });
     const execute=({p,blocks},uv,camera,passCamera,range)=>{
       gl.useProgram(p);
-      const values={heightParams:[1,17,0,0],terrainParams:[10,0,0,0],morphCameraPos:[...camera,0],
+      const values={terrainParams:[10,0,0,0],morphCameraPos:[...camera,0],
         decalControl:[1,0,0,0],'lodMorph[0]':[...range,0,0],cc_cameraPos:[...passCamera,1]};
       blocks.forEach(({buffer,data,members},i)=>{
         for(const [name,value]of Object.entries(values))if(name in members)data.set(value,members[name]);

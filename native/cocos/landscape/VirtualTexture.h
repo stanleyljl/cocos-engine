@@ -52,10 +52,9 @@ public:
         return {page.x * size, page.z * size, size};
     }
 
-    // Select material resolution independently of geometry, retaining the same
-    // distance bands and stitched coverage for every cell of the node.
-    VTGridMapping gridMapping(LandscapeRegion region, float minY, float maxY,
-                         const Vec3 &camera, uint32_t bias) const;
+    // Subdivide aligned grid regions according to distance, independently of
+    // geometry LOD, and map each cell to a page covering its stitched footprint.
+    VTGridMapping gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
 
     // Local bounds must stay within one sector.
     // Include the complete stitched footprint, not just the original grid cell.
@@ -66,8 +65,8 @@ private:
     uint32_t _rootLevel{0};
 };
 
-// Exact-address physical storage. The renderer owns admission and local grid mappings.
-// The working set includes BOTH displayed and candidate leaves until commit.
+// Exact-address physical storage. LandscapeSchedule owns admission; the renderer owns GPU grid mappings.
+// Reservations protect both displayed and candidate material pages until commit.
 class VirtualTexture {
 public:
     enum class State {
@@ -88,7 +87,7 @@ public:
         }
     };
     bool init(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
-    // Reservation inputs are unique addresses, collected by LandscapeRenderer.
+    // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
     bool reserve(const ccstd::vector<VTPageAddress> &pages);
     const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
@@ -96,10 +95,11 @@ public:
     LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
     void publish(const ccstd::vector<uint32_t> &slots);
     void invalidate();
+    // Invalidate intersecting cached pages, including their filtering gutters.
+    void invalidate(LandscapeRegion region);
     bool ready() const;
     size_t capacity() const { return _pages.size(); }
     bool needsComposition(VTPageAddress address) const;
-    uint64_t revision() const { return _revision; }
     // Exact address only. An absent/unpublished page is an error at draw time.
     int resolve(VTPageAddress address) const;
 
@@ -108,7 +108,6 @@ private:
     LandscapeData _data;
     VTPageLayout _layout;
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
-    uint64_t _revision{0};
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _active;
     ccstd::unordered_map<uint64_t, uint32_t> _lookup;

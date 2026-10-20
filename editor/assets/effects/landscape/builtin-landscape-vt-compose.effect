@@ -17,7 +17,7 @@ CCEffect %{
         - blend: false
       properties:
         vtLayout: { value: [4352, 272, 8, 1] }
-        sourceParams: { value: [129, 1, 0, 0] }
+        rvtNormalParams: { value: [1, 0, 0, 0] }
         cliffParams: { value: [0, 1, 0, 0] }
         cliffLayout: { value: [1, 0, 0, 0] }
         cliffMaterialParams: { value: [0, 1, 0, 0] }
@@ -135,9 +135,11 @@ CCProgram vt-mip-fs %{
 }%
 
 CCProgram vt-compose-uniforms %{
+  // Must match config::SOURCE_TILE_RESOLUTION.
+  #define LANDSCAPE_TILE_RESOLUTION 129
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
-    vec4 sourceParams; // tile resolution, bake terrain normals, unused ZW
+    vec4 rvtNormalParams; // bake terrain normals, unused YZW
     vec4 materialParams[32]; // repeats/m, biome influence, unused, unused
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
@@ -243,7 +245,7 @@ CCProgram vt-compose-fs %{
 
   vec2 sourceUV(vec2 xz, vec4 source) {
     vec2 uv = clamp((xz - source.xy) / source.z, vec2(0.0), vec2(1.0));
-    return (uv * (sourceParams.x - 1.0) + 0.5) / sourceParams.x;
+    return (uv * (float(LANDSCAPE_TILE_RESOLUTION) - 1.0) + 0.5) / float(LANDSCAPE_TILE_RESOLUTION);
   }
 
   vec3 sourceNormal(vec2 xz, vec4 source) {
@@ -363,7 +365,7 @@ CCProgram vt-compose-fs %{
   }
 
   void main() {
-    float edge = sourceParams.x - 1.0;
+    float edge = float(LANDSCAPE_TILE_RESOLUTION) - 1.0;
     vec2 pixel = clamp((v_localXZ - v_source.xy) / v_source.z * edge, vec2(0.0), vec2(edge));
     ivec2 origin = ivec2(min(floor(pixel), vec2(edge - 1.0)));
     vec2 f = pixel - vec2(origin);
@@ -414,7 +416,7 @@ CCProgram vt-compose-fs %{
       weights[sampleIndices[i*2+1]] += spatialWeights[i] * blend;
     }
     vec3 shadingNormal = vec3(0.0, 1.0, 0.0);
-    if (sourceParams.y > 0.5) {
+    if (rvtNormalParams.x > 0.5) {
       ivec2 cell = clamp(ivec2(floor((v_localXZ - v_region.xy) / v_region.z * 2.0)) + ivec2(1), ivec2(0), ivec2(3));
       vec4 source = texelFetch(normalSourceMap, ivec2(cell.y * 4 + cell.x, int(v_decalPage.x)), 0);
       shadingNormal = sourceNormal(v_localXZ, source);
@@ -435,7 +437,7 @@ CCProgram vt-compose-fs %{
       position.y = dot(h, vec2(256.0, 1.0)) / 257.0 * cliffParams.y + cliffParams.z;
       #endif
       referenceNormal = sourceNormal(v_localXZ, source);
-      if (sourceParams.y < 0.5) shadingNormal = referenceNormal;
+      if (rvtNormalParams.x < 0.5) shadingNormal = referenceNormal;
       float cliff = 1.0 - smoothstep(0.55, 0.8, referenceNormal.y);
       axisWeights = pow(abs(referenceNormal), vec3(4.0)) * vec3(cliff, 1.0, cliff);
       // Skip negligible projections in the VT pass. Flat ground uses one pair
@@ -527,7 +529,7 @@ CCProgram vt-compose-fs %{
     surface.normal = normalize(vec3(dot(surface.normal, frameTangent), dot(surface.normal, frameBitangent),
                                     dot(surface.normal, shadingNormal)));
     applyDecals(surface);
-    if (sourceParams.y > 0.5) {
+    if (rvtNormalParams.x > 0.5) {
       surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +
                                  shadingNormal * surface.normal.z);
     }

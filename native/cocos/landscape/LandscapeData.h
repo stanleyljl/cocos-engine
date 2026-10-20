@@ -74,7 +74,6 @@ struct LandscapeData {
     uint32_t sectorsZ{0};
     uint32_t maxLevel{0};
     uint32_t minTileLevel{0};
-    uint32_t tileResolution{0};
     float sectorSize{0.0F};
     float heightScale{0.0F};
     float heightBias{0.0F};
@@ -98,8 +97,7 @@ struct LandscapeData {
     NodeAddress nodeAtClamped(uint32_t level, LandscapePoint position) const;
     LandscapeRegion nodeRegion(NodeAddress address) const;
     // Convert sector-relative node indices to indices across all sectors.
-    NodeAddress nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                             uint32_t localX, uint32_t localZ) const;
+    NodeAddress nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const;
 };
 
 // Index layout for flat node metadata storage: sectors in row-major (Z, X) order, then
@@ -117,8 +115,7 @@ public:
 
     // Both queries return an index into the same flat storage, or INVALID_INDEX.
     // localX/localZ are relative to the given sector at the requested level.
-    size_t sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                           uint32_t localX, uint32_t localZ) const;
+    size_t sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const;
     // globalX/globalZ span all sectors at the requested level.
     size_t globalNodeIndex(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
 

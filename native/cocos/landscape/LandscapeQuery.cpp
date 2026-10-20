@@ -132,7 +132,7 @@ LandscapeQueryStatus LandscapeQuery::getSourceStatus(uint32_t id) const {
 }
 
 void LandscapeQuery::update() {
-    const size_t samples = size_t(_data.tileResolution) * _data.tileResolution;
+    const size_t samples = size_t(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
     for (const auto &pair : _tiles) {
         auto &tile = *pair.second;
         if (tile.status != LandscapeQueryStatus::NOT_READY || !tile.loaded.load(std::memory_order_acquire)) {
@@ -166,18 +166,18 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) const {
     const auto &tile = it->second->data;
     // Locate one grid cell. All channels below share its four texels and
     // fractional coordinates. Height and painted materials share the B-C diagonal.
-    const uint32_t edge = _data.tileResolution - 1U;
+    const uint32_t edge = config::SOURCE_TILE_RESOLUTION - 1U;
     const float gx = std::clamp((local.x / _tileSize - address.x) * edge, 0.0F, float(edge));
     const float gz = std::clamp((local.z / _tileSize - address.z) * edge, 0.0F, float(edge));
     const auto ix = std::min(static_cast<uint32_t>(gx), edge - 1U);
     const auto iz = std::min(static_cast<uint32_t>(gz), edge - 1U);
-    const size_t a = size_t(iz) * _data.tileResolution + ix;
+    const size_t a = size_t(iz) * config::SOURCE_TILE_RESOLUTION + ix;
     // texels = {A, B, C, D}; X increases to the right, Z increases downward.
     // A ---- B
     // |      |
     // C ---- D
     // Height and splat use triangles (A,C,B) and (B,C,D), matching Terrain and physics.
-    const std::array<size_t, 4> texels{a, a + 1U, a + _data.tileResolution, a + _data.tileResolution + 1U};
+    const std::array<size_t, 4> texels{a, a + 1U, a + config::SOURCE_TILE_RESOLUTION, a + config::SOURCE_TILE_RESOLUTION + 1U};
     const float fx = gx - ix;
     const float fz = gz - iz;
 

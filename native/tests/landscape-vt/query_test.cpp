@@ -10,6 +10,8 @@
 using namespace cc::landscape;
 using Status = LandscapeQueryStatus;
 
+constexpr float CELL_SIZE = 2.0F / (config::SOURCE_TILE_RESOLUTION - 1U);
+
 void require(bool ok, const char *message) {
     if (!ok) {
         std::cerr << message << '\n';
@@ -26,21 +28,21 @@ LandscapeData data() {
     d.sectorsZ = 1;
     d.maxLevel = 1;
     d.minTileLevel = 0;
-    d.tileResolution = 3;
     d.sectorSize = 4;
-    d.heightScale = 65535;
+    // Encode the same world-space plane exactly on the fixed 129-sample grid.
+    d.heightScale = 65535.0F * 25.0F / 32.0F;
     d.heightBias = -100;
     return d;
 }
 LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
     LandscapeQueryTile t;
-    t.height.resize(18);
-    t.splat.resize(18);
-    t.normal.resize(27);
-    for (uint32_t z = 0; z < 3; ++z) {
-        for (uint32_t x = 0; x < 3; ++x) {
-            const uint16_t h = static_cast<uint16_t>(100 + (tx * 2 + x) * 100 + (tz * 2 + z) * 50);
-            const size_t i = z * 3 + x;
+    t.height.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
+    t.splat.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
+    t.normal.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 3U);
+    for (uint32_t z = 0; z < config::SOURCE_TILE_RESOLUTION; ++z) {
+        for (uint32_t x = 0; x < config::SOURCE_TILE_RESOLUTION; ++x) {
+            const uint16_t h = static_cast<uint16_t>(128 + (tx * (config::SOURCE_TILE_RESOLUTION - 1U) + x) * 2 + tz * (config::SOURCE_TILE_RESOLUTION - 1U) + z);
+            const size_t i = z * config::SOURCE_TILE_RESOLUTION + x;
             t.height[i * 2] = h >> 8;
             t.height[i * 2 + 1] = h & 255;
             const uint16_t s = 3U | (7U << 5U) | (10U << 10U);
@@ -183,51 +185,53 @@ void failureAndSplat() {
     splat.addSource(1, {1, 1}, 0);
     splat.update();
     auto t = tile(0, 0);
-    for (const auto &pair : {std::pair<size_t, uint16_t>{0, 3}, {1, 7}, {3, 11}, {4, 13}}) {
+    for (const auto &pair : {std::pair<size_t, uint16_t>{0, 3}, {1, 7}, {config::SOURCE_TILE_RESOLUTION, 11}, {config::SOURCE_TILE_RESOLUTION + 1U, 13}}) {
         std::memcpy(t.splat.data() + pair.first * 2, &pair.second, 2);
     }
     splatLoader.jobs.front().complete(std::move(t), true);
     splatLoader.jobs.pop_front();
     splat.update();
-    const auto hit = splat.sample({0.75F, 0.25F});
+    const auto hit = splat.sample({0.75F * CELL_SIZE, 0.25F * CELL_SIZE});
     require(hit.surfaceType == 7, "splat triangle interpolation");
     close(hit.surfaceWeight, 0.75F, "B-C diagonal material weights");
-    const auto first = splat.sample({0.1F, 0.2F});
+    const auto first = splat.sample({0.1F * CELL_SIZE, 0.2F * CELL_SIZE});
     require(first.surfaceType == 3, "first triangle uses A B C");
     close(first.surfaceWeight, 0.7F, "first triangle material weight");
-    const auto second = splat.sample({0.8F, 0.7F});
+    const auto second = splat.sample({0.8F * CELL_SIZE, 0.7F * CELL_SIZE});
     require(second.surfaceType == 13, "second triangle uses B C D");
     close(second.surfaceWeight, 0.5F, "second triangle material weight");
-    const auto diagonal = splat.sample({0.5F, 0.5F});
+    const auto diagonal = splat.sample({0.5F * CELL_SIZE, 0.5F * CELL_SIZE});
     require(diagonal.surfaceType == 7, "B-C edge blends B C with deterministic tie");
     close(diagonal.surfaceWeight, 0.5F, "B-C edge weight");
     for (const auto &point : {LandscapePoint{0.74999F, 0.25F}, LandscapePoint{0.75001F, 0.25F}}) {
-        const auto edge = splat.sample(point);
+        const auto edge = splat.sample({point.x * CELL_SIZE, point.z * CELL_SIZE});
         require(edge.surfaceType == 7, "material is continuous across B-C diagonal");
         close(edge.surfaceWeight, 0.75F, "continuous B-C weight");
     }
-    require(splat.sample({0, 0}).surfaceType == 3, "material corner A");
-    require(splat.sample({1, 0}).surfaceType == 7, "material corner B");
-    require(splat.sample({0, 1}).surfaceType == 11, "material corner C");
-    require(splat.sample({1, 1}).surfaceType == 13, "material corner D");
+    require(splat.sample({0 * CELL_SIZE, 0 * CELL_SIZE}).surfaceType == 3, "material corner A");
+    require(splat.sample({1 * CELL_SIZE, 0 * CELL_SIZE}).surfaceType == 7, "material corner B");
+    require(splat.sample({0 * CELL_SIZE, 1 * CELL_SIZE}).surfaceType == 11, "material corner C");
+    require(splat.sample({1 * CELL_SIZE, 1 * CELL_SIZE}).surfaceType == 13, "material corner D");
 }
 
 void triangleHeight() {
     Loading loading;
-    LandscapeQuery q(data(), loading.loader(), 1);
+    auto terrain = data();
+    terrain.heightScale = 65535;
+    LandscapeQuery q(terrain, loading.loader(), 1);
     q.addSource(1, {1, 1}, 0);
     q.update();
     auto t = tile(0, 0);
-    for (const auto &pair : {std::pair<size_t, uint16_t>{0, 100}, {1, 102}, {3, 104}, {4, 110}}) {
+    for (const auto &pair : {std::pair<size_t, uint16_t>{0, 100}, {1, 102}, {config::SOURCE_TILE_RESOLUTION, 104}, {config::SOURCE_TILE_RESOLUTION + 1U, 110}}) {
         t.height[pair.first * 2] = pair.second >> 8;
         t.height[pair.first * 2 + 1] = pair.second & 255;
     }
     loading.jobs.front().complete(std::move(t), true);
     loading.jobs.pop_front();
     q.update();
-    close(q.sample({0.5F, 0.5F}).position.y, 3, "B-C diagonal, not bilinear or A-D");
-    close(q.sample({0.2F, 0.3F}).position.y, 1.6F, "first triangle");
-    close(q.sample({0.8F, 0.7F}).position.y, 6.4F, "second triangle");
+    close(q.sample({0.5F * CELL_SIZE, 0.5F * CELL_SIZE}).position.y, 3, "B-C diagonal, not bilinear or A-D");
+    close(q.sample({0.2F * CELL_SIZE, 0.3F * CELL_SIZE}).position.y, 1.6F, "first triangle");
+    close(q.sample({0.8F * CELL_SIZE, 0.7F * CELL_SIZE}).position.y, 6.4F, "second triangle");
 }
 
 void holes() {
@@ -242,10 +246,10 @@ void holes() {
     loading.jobs.pop_front();
     q.update();
     require(q.getSourceStatus(1) == Status::HIT, "hole does not make residency unready");
-    require(q.sample({0.25F, 0.25F}).status == Status::MISS, "hole cell misses");
-    require(q.sample({0.99F, 0.99F}).status == Status::MISS, "both triangles in hole miss");
-    require(q.sample({1.25F, 0.25F}).status == Status::HIT, "adjacent solid cell survives");
-    close(q.sample({1.25F, 0.25F}).surfaceWeight, 21.0F / 31.0F, "hole bit is not material weight");
+    require(q.sample({0.25F * CELL_SIZE, 0.25F * CELL_SIZE}).status == Status::MISS, "hole cell misses");
+    require(q.sample({0.99F * CELL_SIZE, 0.99F * CELL_SIZE}).status == Status::MISS, "both triangles in hole miss");
+    require(q.sample({1.25F * CELL_SIZE, 0.25F * CELL_SIZE}).status == Status::HIT, "adjacent solid cell survives");
+    close(q.sample({1.25F * CELL_SIZE, 0.25F * CELL_SIZE}).surfaceWeight, 21.0F / 31.0F, "hole bit is not material weight");
 }
 
 void malformedAndRapidMovement() {
@@ -447,7 +451,7 @@ void directLifecycle() {
     require(inlineRequests == 1 && synchronous.sample({1, 1}).status == Status::NOT_READY, "same region must not leak references");
 
     auto invalid = data();
-    invalid.tileResolution = 0;
+    invalid.sectorSize = 0;
     LandscapeQuery invalidQuery(invalid, loading.loader());
     require(invalidQuery.addSource(1, {1, 1}, 0) == Status::ERROR, "invalid terrain rejects source");
     require(invalidQuery.sample({1, 1}).status == Status::ERROR, "invalid terrain rejects sample");

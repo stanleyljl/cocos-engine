@@ -24,7 +24,6 @@
 
 #pragma once
 #include <array>
-#include <utility>
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
@@ -39,108 +38,53 @@ class Sampler;
 namespace landscape {
 class LandscapeAsset;
 // Physical slots are reserved BEFORE starting IO. In-flight work is bounded;
-// only the coordinator's exact working set may be uploaded. No miss resolution.
+// only the coordinator's exact working set may be uploaded. Source mapping and
+// shader bindings use exact resident tiles, with no missing-source fallback.
 class TilePagePool {
 public:
-    // CPU slot ownership, shared by admission and uploads. A reservation either
-    // succeeds in full or leaves the previous bindings untouched.
-    struct Reservations {
-        struct Slot {
-            uint32_t layer;
-            bool ready{false};
-        };
-        LandscapeData data;
-        uint32_t capacity{0};
-        ccstd::unordered_map<uint64_t, Slot> slots;
-        ccstd::vector<NodeAddress> working;
-        // The coordinator supplies unique addresses; only validate range/capacity here.
-        bool canReserve(const ccstd::vector<NodeAddress> &sources) const {
-            if (sources.size() > capacity) {
-                return false;
-            }
-            for (const auto source : sources) {
-                if (!validSource(source)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        bool reserve(const ccstd::vector<NodeAddress> &sources) {
-            if (!canReserve(sources)) {
-                return false;
-            }
-            // Build the replacement before changing live ownership. Existing
-            // sources retain their layer and readiness; new ones get free layers.
-            ccstd::unordered_map<uint64_t, Slot> next;
-            ccstd::vector<bool> used(capacity, false);
-            for (const auto source : sources) {
-                const auto previous = slots.find(source.key());
-                const Slot slot = previous == slots.end() ? Slot{capacity, false} : previous->second;
-                if (!next.emplace(source.key(), slot).second) {
-                    return false;
-                }
-                if (slot.layer < capacity) {
-                    used[slot.layer] = true;
-                }
-            }
-            uint32_t layer = 0;
-            for (const auto source : sources) {
-                auto &slot = next.at(source.key());
-                if (slot.layer < capacity) {
-                    continue;
-                }
-                while (used[layer]) {
-                    ++layer;
-                }
-                slot.layer = layer;
-                used[layer] = true;
-            }
-            slots = std::move(next);
-            working = sources;
-            return true;
-        }
-        int resident(NodeAddress source) const {
-            const auto it = slots.find(source.key());
-            return it != slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
-        }
-
-    private:
-        bool validSource(NodeAddress source) const {
-            return source.level >= data.minTileLevel && source.level <= data.maxLevel &&
-                   source.x < data.nodesX(source.level) && source.z < data.nodesZ(source.level);
-        }
-
+    struct Tile {
+        NodeAddress address;
+        int layer{-1};
     };
-
     TilePagePool();
     ~TilePagePool();
-    bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount);
-    static bool supportsHeightUnorm(gfx::Device *device);
+    bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
     bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();
     bool valid() const { return _heightArray && _splatArray && _normalArray; }
-    // Reservation inputs are unique addresses, collected by LandscapeRenderer.
+    // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<NodeAddress> &sources) const;
+    // Reserve the whole working set or leave all current bindings untouched.
     bool reserve(const ccstd::vector<NodeAddress> &sources);
     bool loadReserved(bool synchronous = false);
     void update(uint32_t maxUploads);
     int resident(NodeAddress source) const;
+    Tile resolve(NodeAddress node) const;
+    Vec4 shaderParams(const Tile &tile) const;
+    // Append unique source addresses in sampling order.
+    void pageSources(VTPageAddress page, bool bakeNormals, ccstd::vector<NodeAddress> &output) const;
+    bool resolvePage(VTPageAddress page, bool bakeNormals, VTPageInputs &output) const;
     bool ready() const;
-    uint64_t updateRevision() const { return _updateRevision; }
     gfx::Texture *heightArray() const { return _heightArray; }
     gfx::Texture *splatArray() const { return _splatArray; }
     gfx::Texture *normalArray() const { return _normalArray; }
     gfx::Sampler *heightSampler() const { return _heightSampler; }
     gfx::Sampler *splatSampler() const { return _splatSampler; }
-    uint32_t layerCount() const { return _reservations.capacity; }
+    uint32_t layerCount() const { return _capacity; }
 
 private:
+    friend struct LandscapePagingTestAccess;
+    struct Slot {
+        uint32_t layer;
+        bool ready{false};
+    };
+    bool validSource(NodeAddress source) const;
+    uint32_t sourceLevelForSize(float size) const;
+    NodeAddress splatSource(VTPageAddress page) const;
+    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normalSources(VTPageAddress page, bool bakeNormals) const;
     bool initTextures();
     void initSamplers();
-    void uploadTile(uint64_t key,
-                    const uint8_t *height,
-                    const uint8_t *splat,
-                    const uint8_t *normal);
+    void uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
     gfx::Device *_device{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
@@ -150,33 +94,15 @@ private:
     gfx::Sampler *_heightSampler{nullptr};
     gfx::Sampler *_splatSampler{nullptr};
     bool _heightUnorm{false};
-    Reservations _reservations;
-    // Includes decoded tiles until update() consumes them, even if no longer reserved.
-    ccstd::unordered_set<uint64_t> _inFlight;
-    uint64_t _updateRevision{0};
-};
-
-// Pure address planning and exact binding. No tree mutation, loading or search.
-class TilePageResolver {
-public:
-    struct Tile {
-        NodeAddress address;
-        int layer{-1};
-    };
-    TilePageResolver(TilePagePool &pool, const LandscapeData &data);
-    Tile resolve(NodeAddress node) const;
-    Vec4 shaderParams(const Tile &tile) const;
-    // Append unique source addresses in sampling order.
-    void pageSources(VTPageAddress page, bool bakeNormals, ccstd::vector<NodeAddress> &output) const;
-    bool resolvePage(VTPageAddress page, bool bakeNormals, VTPageInputs &output) const;
-
-private:
-    uint32_t sourceLevelForSize(float size) const;
-    NodeAddress splatSource(VTPageAddress page) const;
-    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normalSources(VTPageAddress page, bool bakeNormals) const;
-    TilePagePool &_pool;
+    // Slot ownership and the exact working set share the same lifetime as the pool.
     LandscapeData _data;
     VTPageLayout _vtLayout;
+    uint32_t _capacity{0};
+    ccstd::unordered_map<uint64_t, Slot> _slots;
+    ccstd::vector<NodeAddress> _working;
+    // Includes decoded tiles until update() consumes them, even if no longer reserved.
+    ccstd::unordered_set<uint64_t> _inFlight;
 };
+
 } // namespace landscape
 } // namespace cc

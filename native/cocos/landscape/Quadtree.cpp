@@ -110,8 +110,7 @@ void Quadtree::computeRanges(float lodQualityScale) {
     }
 }
 
-void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
-                               float &minY, float &maxY) const {
+void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const {
     minY = _data.minHeight();
     maxY = _data.maxHeight();
     if (_heightRanges.empty() || _sectorX >= _data.sectorsX || _sectorZ >= _data.sectorsZ ||
@@ -127,9 +126,7 @@ void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz,
     maxY = range.maxY;
 }
 
-const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum,
-                                                const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ,
-                                                bool preloadNearby) {
+const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum, const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ, bool preloadNearby) {
     _camPos = camPos;
     _frustum = &frustum;
     _landscapeWorldOrigin = landscapeWorldOrigin;

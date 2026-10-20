@@ -48,12 +48,7 @@ TilePagePool::~TilePagePool() {
     destroy();
 }
 
-bool TilePagePool::supportsHeightUnorm(gfx::Device *device) {
-    return device != nullptr && hasAllFlags(device->getFormatFeatures(gfx::Format::R16_UNORM),
-                                            gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
-}
-
-bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount) {
+bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
     if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
         return false;
@@ -74,9 +69,10 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     }
     _device = device;
     _asset = asset;
-    _reservations.data = data;
-    _reservations.capacity = layerCount;
-    _heightUnorm = supportsHeightUnorm(device);
+    _data = data;
+    _vtLayout = VTPageLayout(data.sectorSize);
+    _capacity = layerCount;
+    _heightUnorm = heightUnorm;
     if (!initTextures()) {
         destroy();
         return false;
@@ -87,9 +83,9 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
                 _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
     CC_LOG_INFO("[Landscape] %zu sector roots; RG8 XZ normals %ux%ux%u",
                 rootCount,
-                _reservations.data.tileResolution,
-                _reservations.data.tileResolution,
-                _reservations.capacity);
+                config::SOURCE_TILE_RESOLUTION,
+                config::SOURCE_TILE_RESOLUTION,
+                _capacity);
 #endif
     return true;
 }
@@ -99,9 +95,9 @@ bool TilePagePool::initTextures() {
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
-    info.width = _reservations.data.tileResolution;
-    info.height = _reservations.data.tileResolution;
-    info.layerCount = _reservations.capacity;
+    info.width = config::SOURCE_TILE_RESOLUTION;
+    info.height = config::SOURCE_TILE_RESOLUTION;
+    info.layerCount = _capacity;
     info.levelCount = 1;
     _heightArray = _device->createTexture(info);
     info.format = gfx::Format::R16UI;
@@ -136,8 +132,8 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
         return;
     }
     gfx::BufferTextureCopy region;
-    region.texExtent.width = _reservations.data.tileResolution;
-    region.texExtent.height = _reservations.data.tileResolution;
+    region.texExtent.width = config::SOURCE_TILE_RESOLUTION;
+    region.texExtent.height = config::SOURCE_TILE_RESOLUTION;
     region.texExtent.depth = 1;
     region.texSubres.mipLevel = 0;
     region.texSubres.baseArrayLayer = layer;
@@ -146,20 +142,65 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
     _device->copyBuffersToTexture(buffers, array, &region, 1);
 }
 
+bool TilePagePool::validSource(NodeAddress source) const {
+    return source.level >= _data.minTileLevel && source.level <= _data.maxLevel &&
+           source.x < _data.nodesX(source.level) && source.z < _data.nodesZ(source.level);
+}
+
 bool TilePagePool::canReserve(const ccstd::vector<NodeAddress> &sources) const {
-    return _reservations.canReserve(sources);
+    if (sources.size() > _capacity) {
+        return false;
+    }
+    for (const auto source : sources) {
+        if (!validSource(source)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool TilePagePool::reserve(const ccstd::vector<NodeAddress> &sources) {
-    return _reservations.reserve(sources);
+    if (!canReserve(sources)) {
+        return false;
+    }
+    // Build the replacement before changing live ownership. Existing sources
+    // retain their layer and readiness; new ones receive free layers.
+    ccstd::unordered_map<uint64_t, Slot> next;
+    ccstd::vector<bool> used(_capacity, false);
+    for (const auto source : sources) {
+        const auto previous = _slots.find(source.key());
+        const Slot slot = previous == _slots.end() ? Slot{_capacity, false} : previous->second;
+        if (!next.emplace(source.key(), slot).second) {
+            return false;
+        }
+        if (slot.layer < _capacity) {
+            used[slot.layer] = true;
+        }
+    }
+    uint32_t layer = 0;
+    for (const auto source : sources) {
+        auto &slot = next.at(source.key());
+        if (slot.layer < _capacity) {
+            continue;
+        }
+        while (used[layer]) {
+            ++layer;
+        }
+        slot.layer = layer;
+        used[layer] = true;
+    }
+    _slots = std::move(next);
+    _working = sources;
+    return true;
 }
 
 int TilePagePool::resident(NodeAddress source) const {
-    return _reservations.resident(source);
+    const auto it = _slots.find(source.key());
+    return it != _slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
 }
 
 bool TilePagePool::ready() const {
-    return std::all_of(_reservations.slots.begin(), _reservations.slots.end(), [](const auto &e) { return e.second.ready; });
+    return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
 }
 
 bool TilePagePool::loadReserved(bool synchronous) {
@@ -170,8 +211,8 @@ bool TilePagePool::loadReserved(bool synchronous) {
     // Decode into the upload representation on the worker, avoiding a second
     // per-texel conversion on the main thread for hardware-filtered heights.
     const auto heightFormat = _heightUnorm ? gfx::Format::R16UI : gfx::Format::RG8;
-    for (const auto source : _reservations.working) {
-        auto &slot = _reservations.slots.at(source.key());
+    for (const auto source : _working) {
+        auto &slot = _slots.at(source.key());
         if (slot.ready || _inFlight.count(source.key())) {
             continue;
         }
@@ -202,12 +243,9 @@ void TilePagePool::update(uint32_t budget) {
     }
 }
 
-void TilePagePool::uploadTile(uint64_t key,
-                              const uint8_t *height,
-                              const uint8_t *splat,
-                              const uint8_t *normal) {
-    const auto it = _reservations.slots.find(key);
-    if (it == _reservations.slots.end() || it->second.ready) {
+void TilePagePool::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
+    const auto it = _slots.find(key);
+    if (it == _slots.end() || it->second.ready) {
         return;
     }
     auto &slot = it->second;
@@ -215,12 +253,14 @@ void TilePagePool::uploadTile(uint64_t key,
     uploadLayer(_splatArray, slot.layer, splat);
     uploadLayer(_normalArray, slot.layer, normal);
     slot.ready = true;
-    ++_updateRevision;
 }
 
 void TilePagePool::destroy() {
-    _reservations = {};
-    _updateRevision = 0;
+    _data = {};
+    _vtLayout = VTPageLayout{};
+    _capacity = 0;
+    _slots.clear();
+    _working.clear();
     _heightUnorm = false;
     _inFlight.clear();
     _asset = nullptr;
@@ -232,38 +272,35 @@ void TilePagePool::destroy() {
     _device = nullptr;
 }
 
-TilePageResolver::TilePageResolver(TilePagePool &pool, const LandscapeData &data)
-: _pool(pool), _data(data), _vtLayout(data.sectorSize) {}
-
-TilePageResolver::Tile TilePageResolver::resolve(NodeAddress node) const {
+TilePagePool::Tile TilePagePool::resolve(NodeAddress node) const {
     const uint32_t level = std::max(node.level, _data.minTileLevel);
     const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
-    return {source, _pool.resident(source)};
+    return {source, resident(source)};
 }
 
-Vec4 TilePageResolver::shaderParams(const Tile &tile) const {
+Vec4 TilePagePool::shaderParams(const Tile &tile) const {
     const auto region = _data.nodeRegion(tile.address);
     return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
 }
-uint32_t TilePageResolver::sourceLevelForSize(float size) const {
+uint32_t TilePagePool::sourceLevelForSize(float size) const {
     uint32_t level = _data.minTileLevel;
     while (level < _data.maxLevel && _data.nodeSize(level) < size) {
         ++level;
     }
     return level;
 }
-NodeAddress TilePageResolver::splatSource(VTPageAddress page) const {
+NodeAddress TilePagePool::splatSource(VTPageAddress page) const {
     const float size = _vtLayout.pageSize(page.level);
     return _data.nodeAtClamped(sourceLevelForSize(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
 }
-std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::normalSources(VTPageAddress page, bool bake) const {
+std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePagePool::normalSources(VTPageAddress page, bool bake) const {
     std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> result;
     if (!bake) {
         result.fill(splatSource(page));
         return result;
     }
     const float size = _vtLayout.pageSize(page.level);
-    const float target = size * std::max(0.5F, static_cast<float>(_data.tileResolution - 1) / config::VT_PAGE_INTERIOR);
+    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
     const uint32_t level = sourceLevelForSize(target);
     for (uint32_t row = 0; row < 4; ++row) {
         for (uint32_t col = 0; col < 4; ++col) {
@@ -272,7 +309,7 @@ std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePageResolver::normal
     }
     return result;
 }
-void TilePageResolver::pageSources(VTPageAddress page, bool bake, ccstd::vector<NodeAddress> &output) const {
+void TilePagePool::pageSources(VTPageAddress page, bool bake, ccstd::vector<NodeAddress> &output) const {
     // Return each input once, in sampling order. Clamped edge samples and the
     // non-baked normal path may refer to the same tile many times.
     const auto append = [&output](NodeAddress source) {
@@ -289,7 +326,7 @@ void TilePageResolver::pageSources(VTPageAddress page, bool bake, ccstd::vector<
         append(source);
     }
 }
-bool TilePageResolver::resolvePage(VTPageAddress page, bool bake, VTPageInputs &output) const {
+bool TilePagePool::resolvePage(VTPageAddress page, bool bake, VTPageInputs &output) const {
     const auto splat = resolve(splatSource(page));
     if (splat.layer < 0) {
         return false;

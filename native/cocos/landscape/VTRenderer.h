@@ -37,11 +37,10 @@ class DecalRenderer;
 class LandscapeAsset;
 class MaterialLibrary;
 class TilePagePool;
-class TilePageResolver;
 
 // GPU half of VT: owns the atlas, composition passes and source bindings.
-// VirtualTexture is the CPU-only page state machine. Geometry submits demands,
-// then resolves sources, renders once, and binds published page mappings.
+// LandscapeSchedule reserves the pages and source tiles. Composition consumes
+// ready inputs and publishes completed pages; it does not select tree changes.
 class VTRenderer {
 public:
     VTRenderer();
@@ -70,8 +69,7 @@ public:
     bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _bakeNormalEnabled; }
     // Returns the actual composed page count for the shared frame budget.
-    uint32_t render(TilePagePool &tiles, TilePageResolver &resolver, uint32_t maxUpdates);
-    void setFrozen(bool frozen);
+    uint32_t render(TilePagePool &tiles, uint32_t maxUpdates);
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
     void setHeightBlendEnabled(bool enabled);
@@ -100,8 +98,7 @@ private:
     gfx::Framebuffer *framebuffer() const;
     gfx::RenderPass *renderPass() const;
     void syncCliffSources(TilePagePool &tiles);
-    bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles,
-                             const MaterialLibrary &materials, gfx::Device *device);
+    bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device);
     bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
     bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
     void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
@@ -109,9 +106,7 @@ private:
     bool initPageDrawResources(gfx::Device *device);
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
-    void recordPagePass(Material *material, gfx::PipelineState *pipelineState,
-                        gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
-    void invalidateComposedPages();
+    void recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
 
     // Exactly the three vec4 attributes consumed by the compose/mip shaders.
     struct PageInstance {
@@ -121,7 +116,7 @@ private:
     };
     static_assert(sizeof(PageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
 
-    void collectPageBatch(TilePageResolver &resolver, uint32_t maxUpdates);
+    void collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates);
     void submitPageBatch();
     void recordPageBatch(const PageInstance *instances, uint32_t instanceCount);
 
@@ -137,8 +132,7 @@ private:
         IntrusivePtr<gfx::Framebuffer> framebuffer;
     };
 
-    // Applied compose state; deferred requests remain in LandscapeRenderer.
-    bool _frozen{false};
+    // Applied shader state. LandscapeSchedule decides when composition can run.
     bool _bakeNormalEnabled{true};
     bool _cliffEnabled{true};
     struct CliffReference {
@@ -184,7 +178,6 @@ private:
     ccstd::vector<uint32_t> _batchSlots;
     ccstd::vector<PageInstance> _batchInstances;
     bool _needsClear{true};
-    bool _pendingInvalidation{false};
     // RGB is raw UNORM gain (128 = neutral); alpha masks regional influence.
     IntrusivePtr<Texture2D> _globalColorMap;
     IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;

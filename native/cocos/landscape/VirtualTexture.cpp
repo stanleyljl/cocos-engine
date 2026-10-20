@@ -21,54 +21,51 @@ uint32_t VTPageLayout::levelForDistance(float distance) const {
     return level;
 }
 
-VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, float maxY,
-                                  const Vec3 &camera, uint32_t bias) const {
+VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const {
     VTGridMapping result;
-    std::array<bool, 256> assigned{};
     const float cell = region.size / 16.0F;
     const auto axisDistance = [](float p, float lo, float hi) {
         return std::max({lo - p, p - hi, 0.0F});
     };
     const float dy = axisDistance(camera.y, minY, maxY);
-    for (uint32_t z = 0; z < 16; ++z) {
-        for (uint32_t x = 0; x < 16; ++x) {
-            if (assigned[z * 16 + x]) {
-                continue;
+    const auto mapRegion = [&](const auto &self, uint32_t left, uint32_t bottom, uint32_t cells) -> void {
+        const float loX = region.x + left * cell;
+        const float loZ = region.z + bottom * cell;
+        const float size = cells * cell;
+        const float dx = axisDistance(camera.x, loX, loX + size);
+        const float dz = axisDistance(camera.z, loZ, loZ + size);
+        const uint32_t desired = levelForDistance(std::sqrt(dx * dx + dy * dy + dz * dz));
+        if (cells > 1 && pageSize(desired) < size) {
+            const uint32_t half = cells / 2;
+            for (uint32_t z = bottom; z < bottom + cells; z += half) {
+                for (uint32_t x = left; x < left + cells; x += half) {
+                    self(self, x, z, half);
+                }
             }
-            // Evaluate aligned distance bands from eight cells down to one.
-            // This controls page resolution only; the geometry is always whole.
-            for (uint32_t cells = 8; cells > 0; cells /= 2) {
-                const uint32_t left = x / cells * cells;
-                const uint32_t bottom = z / cells * cells;
-                const float loX = region.x + left * cell;
-                const float loZ = region.z + bottom * cell;
-                const float size = cells * cell;
-                const float dx = axisDistance(camera.x, loX, loX + size);
-                const float dz = axisDistance(camera.z, loZ, loZ + size);
-                const uint32_t desired = std::min(_rootLevel, levelForDistance(std::sqrt(dx * dx + dy * dy + dz * dz)) + bias);
-                if (cells > 1 && pageSize(desired) < size) {
-                    continue;
-                }
-                // Odd edge vertices may snap to the preceding even vertex.
-                // Reserve that coverage even before a neighbor changes LOD.
-                const auto page = coveringPage(desired,
-                    {loX - (left & 1U) * cell, loZ - (bottom & 1U) * cell},
-                    {loX + size, loZ + size});
-                const auto found = std::find_if(result.pages.begin(), result.pages.end(), [page](const auto &entry) {
-                    return entry.key() == page.key();
-                });
-                const auto index = static_cast<size_t>(found - result.pages.begin());
-                assert(index < result.cells.size());
-                if (found == result.pages.end()) {
-                    result.pages.push_back(page);
-                }
-                // Fill a whole band once, avoiding repeated distance queries.
-                for (uint32_t row = bottom; row < bottom + cells; ++row) {
-                    std::fill_n(result.cells.begin() + row * 16 + left, cells, static_cast<uint8_t>(index));
-                    std::fill_n(assigned.begin() + row * 16 + left, cells, true);
-                }
-                break;
-            }
+            return;
+        }
+        // Odd vertices morph toward the preceding even vertex; a coarse
+        // neighbor forces the full collapse. Cover the complete trajectory.
+        const auto page = coveringPage(desired,
+                                      {loX - (left & 1U) * cell, loZ - (bottom & 1U) * cell},
+                                      {loX + size, loZ + size});
+        const auto found = std::find_if(result.pages.begin(), result.pages.end(), [page](const auto &entry) {
+            return entry.key() == page.key();
+        });
+        const auto index = static_cast<size_t>(found - result.pages.begin());
+        assert(index < result.cells.size());
+        if (found == result.pages.end()) {
+            result.pages.push_back(page);
+        }
+        for (uint32_t row = bottom; row < bottom + cells; ++row) {
+            std::fill_n(result.cells.begin() + row * 16 + left, cells, static_cast<uint8_t>(index));
+        }
+    };
+    // Subdivide four aligned 8x8 regions only where finer material is needed.
+    // Each cell is assigned once; the geometry remains whole.
+    for (uint32_t z = 0; z < 16; z += 8) {
+        for (uint32_t x = 0; x < 16; x += 8) {
+            mapRegion(mapRegion, x, z, 8);
         }
     }
     return result;
@@ -170,9 +167,6 @@ void VirtualTexture::publish(const ccstd::vector<uint32_t> &slots) {
         assert(p.lastReserved == _reservation && p.needsComposition());
         p.state = State::READY;
     }
-    if (!slots.empty()) {
-        ++_revision;
-    }
 }
 void VirtualTexture::invalidate() {
     for (auto &p : _pages) {
@@ -180,8 +174,22 @@ void VirtualTexture::invalidate() {
             p.state = State::STALE;
         }
     }
-    ++_revision;
 }
+void VirtualTexture::invalidate(LandscapeRegion changed) {
+    for (auto &page : _pages) {
+        if (page.state != State::READY) {
+            continue;
+        }
+        const auto bounds = region(page.address);
+        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
+            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
+            continue;
+        }
+        page.state = State::STALE;
+    }
+}
+
 bool VirtualTexture::ready() const {
     return !_active.empty() && std::all_of(_active.begin(), _active.end(), [this](uint32_t slot) { return _pages[slot].state == State::READY; });
 }

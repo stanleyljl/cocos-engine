@@ -1645,6 +1645,8 @@ cocos_source_files(
                  cocos/landscape/DecalRenderer.cpp
                  cocos/landscape/Quadtree.h
                  cocos/landscape/Quadtree.cpp
+                 cocos/landscape/LandscapeSchedule.h
+                 cocos/landscape/LandscapeSchedule.cpp
                  cocos/landscape/LandscapeRenderer.h
                  cocos/landscape/LandscapeRenderer.cpp
                  cocos/landscape/Landscape.h

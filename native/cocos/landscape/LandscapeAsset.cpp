@@ -116,7 +116,6 @@ bool LandscapeAsset::Manifest::readDimensions() {
         CC_LOG_WARNING("[Landscape] heightmap manifest '%s' is missing required fields", manifestPath.c_str());
         return false;
     }
-    parsed.tileResolution = config::SOURCE_TILE_RESOLUTION;
     parsed.sectorsX = sectorCount[0].GetUint();
     parsed.sectorsZ = sectorCount[1].GetUint();
     if (!parsed.valid()) {
@@ -393,13 +392,12 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     return true;
 }
 
-bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
-                                   uint32_t resolution, gfx::Format heightFormat, TileData &tile) {
+bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath, gfx::Format heightFormat, TileData &tile) {
     // R16_UNORM uploads consume the decoded host-order uint16 values directly.
     // Only the RG8 fallback needs high/low-byte packing; queries request it separately.
-    const bool valid = loadTile(heightPath, heightFormat, resolution, tile.height) &&
-                       loadTile(splatPath, gfx::Format::R16UI, resolution, tile.splat) &&
-                       loadTile(normalPath, gfx::Format::RGB8, resolution, tile.normal);
+    const bool valid = loadTile(heightPath, heightFormat, tile.height) &&
+                       loadTile(splatPath, gfx::Format::R16UI, tile.splat) &&
+                       loadTile(normalPath, gfx::Format::RGB8, tile.normal);
     if (!valid) {
         CC_LOG_ERROR("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
                        heightPath.c_str(), splatPath.c_str(), normalPath.c_str());
@@ -408,7 +406,7 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
         // before upload; height-field normals always lie in the +Y hemisphere.
         // Forward compaction is safe because each destination precedes the next
         // unread RGB pixel. No extra allocation or per-frame conversion needed.
-        const size_t count = static_cast<size_t>(resolution) * resolution;
+        const size_t count = static_cast<size_t>(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
         for (size_t i = 0; i < count; ++i) {
             tile.normal[i * 2U] = tile.normal[i * 3U];
             tile.normal[i * 2U + 1U] = tile.normal[i * 3U + 2U];
@@ -437,7 +435,7 @@ bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Fo
     const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
     const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
     return decodeTileSet(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
-                         resolveFile(directory + "n_" + suffix), _data.tileResolution, heightFormat, tile);
+                         resolveFile(directory + "n_" + suffix), heightFormat, tile);
 }
 
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat) {
@@ -463,16 +461,15 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Fo
         _async->loadFailed.store(true);
         return false;
     }
-    const uint32_t resolution = _data.tileResolution;
     const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [async, key, heightPath, splatPath, normalPath, resolution, heightFormat](int /*threadId*/) {
+        [async, key, heightPath, splatPath, normalPath, heightFormat](int /*threadId*/) {
             if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
             }
             TileData tile;
             tile.key = key;
-            const bool valid = decodeTileSet(heightPath, splatPath, normalPath, resolution, heightFormat, tile);
+            const bool valid = decodeTileSet(heightPath, splatPath, normalPath, heightFormat, tile);
             std::lock_guard<std::mutex> lock(async->mutex);
             if (async->cancelled.load() || async->loadFailed.load()) {
                 return;
@@ -506,20 +503,19 @@ void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Co
         completion({}, false);
         return;
     }
-    const auto resolution = _data.tileResolution;
     if (!_async) {
         _async = std::make_shared<AsyncState>();
     }
     const auto lifetime = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [height, normal, splat, resolution, lifetime, completion = std::move(completion)](int) {
+        [height, normal, splat, lifetime, completion = std::move(completion)](int) {
             if (lifetime && lifetime->cancelled.load()) {
                 return;
             }
             LandscapeQueryTile tile;
-            const bool ok = loadTile(height, gfx::Format::RG8, resolution, tile.height) &&
-                            loadTile(normal, gfx::Format::RGB8, resolution, tile.normal) &&
-                            loadTile(splat, gfx::Format::R16UI, resolution, tile.splat);
+            const bool ok = loadTile(height, gfx::Format::RG8, tile.height) &&
+                            loadTile(normal, gfx::Format::RGB8, tile.normal) &&
+                            loadTile(splat, gfx::Format::R16UI, tile.splat);
             if (lifetime && lifetime->cancelled.load()) {
                 return;
             }
@@ -541,8 +537,7 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
     return true;
 }
 
-bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
-                                    float &minY, float &maxY) const {
+bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const {
     if (!_data.valid() || level > _data.maxLevel) {
         return false;
     }
@@ -569,8 +564,7 @@ Uint16Array LandscapeAsset::decodeSamples(const Uint8Array &png, uint32_t resolu
     return samples;
 }
 
-bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,
-                              uint32_t tileResolution, ccstd::vector<uint8_t> &data) {
+bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data) {
     if (format != gfx::Format::RG8 && format != gfx::Format::R16UI && format != gfx::Format::RGB8) {
         return false;
     }
@@ -582,11 +576,11 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format,
     const bool packHeight = format == gfx::Format::RG8;
     if (!image->initWithImageData(file.getBytes(), file.getSize()) ||
         image->getRenderFormat() != (format == gfx::Format::RGB8 ? gfx::Format::RGB8 : gfx::Format::R16UI) ||
-        static_cast<uint32_t>(image->getWidth()) != tileResolution ||
-        static_cast<uint32_t>(image->getHeight()) != tileResolution) {
+        static_cast<uint32_t>(image->getWidth()) != config::SOURCE_TILE_RESOLUTION ||
+        static_cast<uint32_t>(image->getHeight()) != config::SOURCE_TILE_RESOLUTION) {
         return false;
     }
-    const size_t sampleCount = static_cast<size_t>(tileResolution) * tileResolution;
+    const size_t sampleCount = static_cast<size_t>(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
     const size_t sourceByteSize = sampleCount * (format == gfx::Format::RGB8 ? 3U : sizeof(uint16_t));
     if (image->getDataLen() != sourceByteSize) {
         return false;

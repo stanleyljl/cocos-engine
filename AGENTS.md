@@ -6,6 +6,7 @@
 
 # Collaboration rules
 
+- Preserve existing working features and behavior during all changes and refactors. Simplification is not permission to remove, disable, or degrade functionality (including Landscape morph transitions). Identify the affected behavior before editing and review its preservation afterward; compilation success alone does not establish behavioral equivalence. If a behavior change is necessary, explain it and obtain the user's explicit approval before implementing it.
 - Run performance tests, profiling, and benchmarks only with Release builds. Do not use Debug builds for performance measurements or optimization conclusions; Debug builds may still be used for functional debugging and compilation checks.
 - By default, validate only Windows Release builds. Validate Android only when the user explicitly requests it.
 - Engine code maintainability is a hard requirement for every change, including performance optimizations. Follow established engine flows and keep module responsibilities clear. Avoid one-off special cases, cross-module interfaces, or extra state for local optimizations unless their necessity is demonstrated and the maintenance cost is justified. When a fix requires substantial complexity, explain the evidence and tradeoffs before implementing it.
@@ -17,6 +18,7 @@
 - Keep small, closely related helpers in existing files when practical instead of introducing a separate file.
 - Always put each statement on its own line. Never combine multiple statements on one line, including in short functions, branches, or lambdas.
 - Declare each class or struct data member separately on its own line. Never combine multiple members in one declaration, including members of nested or implementation-local structs.
+- Keep Landscape global function and member function signatures on one line in both declarations and definitions; do not wrap parameter lists.
 - Whenever code changes, review the related comments and update or remove any outdated comments in the same change so they accurately describe the current implementation.
 - Landscape code assumes floating-point inputs and calculations are finite; do not add `isfinite` / `isFinite` guards. Retain the relevant type, range, and index checks.
 - During development, do not preserve compatibility with old data. Update affected code and data together, removing obsolete fields, migration paths, and compatibility fallbacks within the scope of the change. Only introduce backward compatibility when the user explicitly requests it.

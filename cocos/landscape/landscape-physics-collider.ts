@@ -22,8 +22,7 @@ export class LandscapePhysicsHeightfield implements ITerrainAsset {
     public readonly tileSize: number;
     public readonly localOriginY: number;
     public readonly heightFieldScale: number;
-    constructor (public readonly samples: Uint16Array, private readonly _layout: LandscapeHeightLayout,
-        public readonly holes: Uint8Array) {
+    constructor (public readonly samples: Uint16Array, private readonly _layout: LandscapeHeightLayout, public readonly holes: Uint8Array) {
         this.tileSize = _layout.tileSize / (_layout.resolution - 1);
         this.heightFieldScale = _layout.heightScale / 65535;
         this.localOriginY = _layout.heightBias + 32768 * _layout.heightScale / 65535;

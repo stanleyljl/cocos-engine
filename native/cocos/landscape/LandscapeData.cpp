@@ -60,7 +60,7 @@ NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
 bool LandscapeData::valid() const {
     return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
            static_cast<uint64_t>(sectorsX) * sectorsZ <= config::MAX_SECTOR_COUNT &&
-           minTileLevel <= maxLevel && tileResolution > 1U && sectorSize > 0.0F &&
+           minTileLevel <= maxLevel && sectorSize > 0.0F &&
            heightScale > 0.0F;
 }
 
@@ -91,8 +91,7 @@ LandscapeRegion LandscapeData::nodeRegion(NodeAddress address) const {
     return {address.x * size, address.z * size, size};
 }
 
-NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                                       uint32_t localX, uint32_t localZ) const {
+NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const {
     const uint32_t side = nodesPerSectorSide(level);
     assert(sectorX < sectorsX && sectorZ < sectorsZ && localX < side && localZ < side);
     return {level, sectorX * side + localX, sectorZ * side + localZ};
@@ -113,8 +112,7 @@ NodeIndexLayout::NodeIndexLayout(const LandscapeData &data) {
     }
 }
 
-size_t NodeIndexLayout::sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level,
-                                       uint32_t localX, uint32_t localZ) const {
+size_t NodeIndexLayout::sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const {
     if (level >= _levelCount || sectorX >= _sectorsX || sectorZ >= _sectorsZ) {
         return INVALID_INDEX;
     }

@@ -12,7 +12,6 @@ CCEffect %{
         terrainParams: { value: [3000, 0, 0, 0] }
         sectorParams: { value: [1, 1, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
-        heightParams: { value: [1, 129, 0, 0] }
         vtLayout: { value: [4352, 272, 8, 4] }
         decalControl: { value: [1, 0, 0, 0] }
         decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
@@ -60,12 +59,13 @@ CCProgram landscape-uniforms %{
   // L0-L8; maximum sector size = 4096 m at 1 m finest-grid spacing.
   // Must match config::MAX_LOD_LEVELS in LandscapeConfig.h.
   #define LANDSCAPE_MAX_LOD_LEVELS 9
+  // Must match config::SOURCE_TILE_RESOLUTION.
+  #define LANDSCAPE_TILE_RESOLUTION 129
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag
     vec4 sectorParams; // sector size, finest VT page size, unused ZW
     vec4 morphCameraPos;
-    vec4 heightParams; // height sample spacing (m), tile resolution, unused ZW
     vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
     vec4 decalControl; // Enable nearby geometry; cached material is unchanged.
     vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
@@ -91,9 +91,9 @@ CCProgram landscape-hole-sampling %{
   #if __VERSION__ >= 300
     uniform highp usampler2DArray holeSplatmap;
     bool landscapeHole(vec2 localXZ, vec4 region, bool vertexSample) {
-      vec2 grid = clamp((localXZ - region.xy) / region.z, vec2(0.0), vec2(1.0)) * (heightParams.y - 1.0);
+      vec2 grid = clamp((localXZ - region.xy) / region.z, vec2(0.0), vec2(1.0)) * (float(LANDSCAPE_TILE_RESOLUTION) - 1.0);
       // Vertices use aligned point samples. Fragments/physics use the cell's minimum corner.
-      ivec2 p = vertexSample ? ivec2(floor(grid + 0.5)) : min(ivec2(floor(grid)), ivec2(int(heightParams.y) - 2));
+      ivec2 p = vertexSample ? ivec2(floor(grid + 0.5)) : min(ivec2(floor(grid)), ivec2(LANDSCAPE_TILE_RESOLUTION - 2));
       return (texelFetch(holeSplatmap, ivec3(p, int(region.w + 0.5)), 0).r & 32768u) != 0u;
     }
   #endif
@@ -125,7 +125,7 @@ CCProgram landscape-vertex %{
   #endif
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_mappingInst; // local table slot, coarse-neighbor edge mask, unused ZW
+    in vec4 a_mappingInst; // local table slot, coarser/finer neighbor edge masks, unused W
     in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
     in vec4 a_decalRegion; // minimum XZ, world size, height texture layer
     in vec4 a_decalGrid; // fixed XZ origin, width and depth; independent of LOD
@@ -156,7 +156,7 @@ CCProgram landscape-vertex %{
     vec2 ac = c.xz - a.xz;
     vec2 ap = xz - a.xz;
     float det = ab.x * ac.y - ab.y * ac.x;
-    // Stitched edge vertices collapse onto the even lattice. Ignore
+    // Morphing and stitched vertices collapse onto the even lattice. Ignore
     // collapsed triangles rather than dividing by a nearly zero area.
     float cellSize = a_gridInst.z / 16.0;
     if (abs(det) < cellSize * cellSize * 1e-8) {
@@ -171,7 +171,7 @@ CCProgram landscape-vertex %{
   }
 
   vec4 decalTerrainAt(vec2 xz) {
-    // Even vertices never move in XZ; a stitched 2x2 cell block keeps its
+    // Even vertices never move in XZ; a morphing 2x2 cell block keeps its
     // footprint. Invert its triangles to find Y at the FIXED decal position.
     // Interpolating forward from the original cell barycentrics would drag
     // the decal across its height texture and change the stone's silhouette.
@@ -248,7 +248,7 @@ CCProgram landscape-vertex %{
   #endif
   #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
     // Use the final local coordinates for geometry and terrain normal sampling.
-    float resolution = max(heightParams.y, 2.0);
+    float resolution = float(LANDSCAPE_TILE_RESOLUTION);
     v_normalUV = (localXZ - a_tileInst.xy) / a_tileInst.z;
     v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
     v_normalLayer = a_tileInst.w;

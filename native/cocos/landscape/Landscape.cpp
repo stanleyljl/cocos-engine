@@ -195,6 +195,19 @@ void Landscape::onDisable() {
     _node = nullptr;
 }
 
+uint32_t Landscape::addDecal(float x, float z, float size, uint32_t layer) {
+    if (!_renderer || _nextDecalId == 0 || !_renderer->addDecal(_nextDecalId, x, z, size, layer)) {
+        CC_LOG_WARNING("[Landscape] Cannot add decal: initialize terrain, use a valid preloaded layer and region, and keep at most %u instances.",
+                       config::DECAL_INSTANCE_MAX);
+        return 0;
+    }
+    return _nextDecalId++;
+}
+
+bool Landscape::removeDecal(uint32_t id) {
+    return _renderer && _renderer->removeDecal(id);
+}
+
 void Landscape::update() {
     if (_query) {
         _query->update(); // No camera or render-readiness dependency.
@@ -322,7 +335,6 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     const uint32_t cascadesToDeduplicate = selectShadowPasses(sceneData);
     reportVisibilityDistanceStatus();
     finalizePassSelection(cascadesToDeduplicate);
-    _renderer->estimateDrawCalls(_passes.front().models);
 }
 
 uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
@@ -431,10 +443,6 @@ void Landscape::onGlobalPipelineStateChanged() {
     }
 }
 
-LandscapeDrawCalls Landscape::getDrawCalls(uint32_t frame) const {
-    return _renderer ? _renderer->getDrawCalls(frame) : LandscapeDrawCalls{};
-}
-
 bool Landscape::isReady() const {
     return _renderer != nullptr && _renderer->isReady();
 }
@@ -540,7 +548,7 @@ void Landscape::drawDebugBounds() {
 }
 
 TextureBase *Landscape::getVTAtlas() const {
-    return _renderer ? _renderer->vtAtlas() : nullptr;
+    return _renderer ? _renderer->getVTAtlas() : nullptr;
 }
 
 } // namespace landscape

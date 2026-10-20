@@ -24,8 +24,6 @@ using namespace cc;
 %}
 
 %ignore cc::RefCounted;
-%ignore cc::landscape::LandscapeDrawCalls;
-%ignore cc::landscape::Landscape::getDrawCalls;
 %ignore cc::landscape::Landscape::preparePasses;
 %ignore cc::landscape::Landscape::getPassModels;
 %ignore cc::landscape::Landscape::onGlobalPipelineStateChanged;

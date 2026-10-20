@@ -72,12 +72,6 @@ struct LandscapeDebugData {
     bool decal3DEnabled{true};
 };
 
-struct LandscapeDrawCalls {
-    // Estimated base-pass batches from visible landscape models this frame.
-    uint32_t terrainBase{0};
-    uint32_t decalsBase{0};
-};
-
 class Landscape : public RefCounted {
 public:
     Landscape();
@@ -107,7 +101,12 @@ public:
     inline bool isInitialized() const { return _renderer != nullptr; }
     bool isReady() const;
     TextureBase *getVTAtlas() const;
-    LandscapeDrawCalls getDrawCalls(uint32_t frame) const;
+
+    // Main-thread runtime instances, using preloaded asset layers and local XZ.
+    // Returns a nonzero handle on success, zero when unavailable/invalid/full.
+    // Instances are released on disable/reload; stale handles cannot remove new instances.
+    uint32_t addDecal(float x, float z, float size, uint32_t layer);
+    bool removeDecal(uint32_t id);
 
     // World-space, translation-only placement, matching landscape selection.
     // Query result buffer: position XYZ, normal XYZ, material ID, weight.
@@ -155,6 +154,7 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
+    uint32_t _nextDecalId{1}; // Never reset when reloading this Landscape object.
     ccstd::vector<QuadNode> _debugNodes;
     bool _lastVisibilityDistanceWarning{false};
 };

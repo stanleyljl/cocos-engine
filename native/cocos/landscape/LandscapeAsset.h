@@ -105,11 +105,9 @@ public:
     // Call on the main thread; file access and CPU query decode run on a worker.
     // Completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
-    bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ,
-                        float &minY, float &maxY) const;
+    bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const;
     // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
-    static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t tileResolution,
-                         ccstd::vector<uint8_t> &data);
+    static bool loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data);
     // Native libpng decode for physics after its asynchronous file read.
     // Avoid JS inflate/unfilter loops; returns source uint16 values in host order.
     static Uint16Array decodeSamples(const Uint8Array &png, uint32_t resolution);
@@ -137,8 +135,7 @@ private:
     };
 
     void resetAsyncState();
-    static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath,
-                              uint32_t resolution, gfx::Format heightFormat, TileData &tile);
+    static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath, gfx::Format heightFormat, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 
     ccstd::string _dataDir;

@@ -10,7 +10,7 @@ highp float sampleHeightRegion(highp vec2 localXZ, highp vec4 region) {
 #if __VERSION__ >= 300 && USE_INSTANCING
   #if LANDSCAPE_HEIGHT_UNORM
   highp vec2 tileUv = clamp((localXZ - region.xy) / max(region.z, 1e-6), vec2(0.0), vec2(1.0));
-  highp float resolution = max(heightParams.y, 2.0);
+  highp float resolution = float(LANDSCAPE_TILE_RESOLUTION);
   tileUv = (tileUv * (resolution - 1.0) + 0.5) / resolution;
   return textureLod(heightmap, vec3(tileUv, region.w), 0.0).r * terrainParams.x + terrainParams.y;
   #else
@@ -19,7 +19,7 @@ highp float sampleHeightRegion(highp vec2 localXZ, highp vec4 region) {
   // rounding across a byte carry (e.g. 0x7fff -> 0x8000) into height spikes
   // when decal vertices lie between height samples on mobile GPUs.
   highp vec2 tileUv = clamp((localXZ - region.xy) / max(region.z, 1e-6), vec2(0.0), vec2(1.0));
-  int lastTexel = max(int(heightParams.y), 2) - 1;
+  int lastTexel = LANDSCAPE_TILE_RESOLUTION - 1;
   highp vec2 grid = tileUv * float(lastTexel);
   ivec2 p0 = ivec2(floor(grid));
   ivec2 p1 = min(p0 + ivec2(1), ivec2(lastTexel));
@@ -48,19 +48,41 @@ float sampleHeight(vec2 localXZ) {
 #if __VERSION__ >= 300 && USE_INSTANCING
 vec4 terrainVertex(vec2 parentUV) {
   vec2 grid = floor(parentUV * 16.0 + 0.5);
-  int edges = int(a_mappingInst.y + 0.5);
-  // Only the fine side of an actual 2:1 boundary collapses odd vertices.
-  // The coarse side remains fixed. This applies identically to color,
-  // shadow, wireframe and decal reconstruction, regardless of IO latency.
-  bool coarseX = (grid.x < 0.5 && (edges & 1) != 0) || (grid.x > 15.5 && (edges & 2) != 0);
-  bool coarseZ = (grid.y < 0.5 && (edges & 4) != 0) || (grid.y > 15.5 && (edges & 8) != 0);
-  if (coarseX) {
-    grid.y -= mod(grid.y, 2.0);
+  float step = a_gridInst.z / 16.0;
+  vec2 xz = a_gridInst.xy + grid * step;
+  float height = sampleHeight(xz);
+  mat4 world;
+  CCGetWorldMatrix(world);
+  vec3 baseWorld = (world * vec4(xz.x, height, xz.y, 1.0)).xyz;
+  vec2 range = lodMorph[int(a_gridInst.w)].xy;
+  float morph = clamp((distance(morphCameraPos.xyz, baseWorld) - range.x) / max(range.y - range.x, 1e-3), 0.0, 1.0);
+  vec2 collapse = vec2(morph);
+
+  // Distance morph applies throughout the grid. At committed 2:1 boundaries,
+  // the fine edge must meet the coarse lattice even if streaming is delayed.
+  // Conversely, keep that coarse edge fixed while it has finer neighbors.
+  int coarser = int(a_mappingInst.y + 0.5);
+  int finer = int(a_mappingInst.z + 0.5);
+  int edgeX = grid.x < 0.5 ? 1 : (grid.x > 15.5 ? 2 : 0);
+  int edgeZ = grid.y < 0.5 ? 4 : (grid.y > 15.5 ? 8 : 0);
+  if ((coarser & edgeX) != 0) {
+    collapse.y = 1.0;
+  } else if ((finer & edgeX) != 0) {
+    collapse.y = 0.0;
   }
-  if (coarseZ) {
-    grid.x -= mod(grid.x, 2.0);
+  if ((coarser & edgeZ) != 0) {
+    collapse.x = 1.0;
+  } else if ((finer & edgeZ) != 0) {
+    collapse.x = 0.0;
   }
-  vec2 xz = a_gridInst.xy + grid * (a_gridInst.z / 16.0);
-  return vec4(xz.x, sampleHeight(xz), xz.y, 0.0);
+  vec2 odd = mod(grid, 2.0);
+  vec2 targetXZ = xz - odd * step;
+  // Interpolate endpoint heights so sliding vertices do not traverse and
+  // temporarily introduce heightmap details between the two grid positions.
+  // Only odd coordinates move; their collapse also includes edge constraints.
+  float heightMorph = max(odd.x * collapse.x, odd.y * collapse.y);
+  height = mix(height, sampleHeight(targetXZ), heightMorph);
+  xz -= odd * step * collapse;
+  return vec4(xz.x, height, xz.y, morph);
 }
 #endif

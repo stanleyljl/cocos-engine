@@ -186,8 +186,7 @@ IntrusivePtr<gfx::Texture> createTextureArray(gfx::Device *device, uint32_t reso
     return device->createTexture(info);
 }
 
-void uploadMipLevel(gfx::Device *device, gfx::Texture *texture, uint32_t layer,
-                    uint32_t mip, uint32_t size, const ccstd::vector<uint8_t> &pixels) {
+void uploadMipLevel(gfx::Device *device, gfx::Texture *texture, uint32_t layer, uint32_t mip, uint32_t size, const ccstd::vector<uint8_t> &pixels) {
     gfx::BufferTextureCopy region;
     region.texExtent = {size, size, 1U};
     region.texSubres.mipLevel = mip;
@@ -197,43 +196,17 @@ void uploadMipLevel(gfx::Device *device, gfx::Texture *texture, uint32_t layer,
     device->copyBuffersToTexture(buffers, texture, &region, 1U);
 }
 
-void uploadAlbedoHeight(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
-                        uint32_t layer, ccstd::vector<uint8_t> pixels) {
+// Texture traversal and upload are shared; each channel layout keeps its own
+// filtering rule for color space, normals, height and coverage.
+using MipBuilder = void (*)(const ccstd::vector<uint8_t> &, uint32_t, ccstd::vector<uint8_t> &);
+
+void uploadMipChain(gfx::Device *device, gfx::Texture *texture, uint32_t resolution, uint32_t layer, ccstd::vector<uint8_t> pixels, MipBuilder buildMip) {
     ccstd::vector<uint8_t> nextMip;
     uint32_t size = resolution;
     for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
         uploadMipLevel(device, texture, layer, mip, size, pixels);
         if (mip + 1U < texture->getInfo().levelCount) {
-            buildAlbedoHeightMip(pixels, size, nextMip);
-            pixels.swap(nextMip);
-            size = std::max(1U, size / 2U);
-        }
-    }
-
-}
-
-void uploadNormalRoughnessAO(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
-                             uint32_t layer, ccstd::vector<uint8_t> pixels) {
-    ccstd::vector<uint8_t> nextMip;
-    uint32_t size = resolution;
-    for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
-        uploadMipLevel(device, texture, layer, mip, size, pixels);
-        if (mip + 1U < texture->getInfo().levelCount) {
-            buildNormalRoughnessAOMip(pixels, size, nextMip);
-            pixels.swap(nextMip);
-            size = std::max(1U, size / 2U);
-        }
-    }
-}
-
-void uploadDecalColor(gfx::Device *device, gfx::Texture *texture, uint32_t resolution,
-                      uint32_t layer, ccstd::vector<uint8_t> pixels) {
-    ccstd::vector<uint8_t> nextMip;
-    uint32_t size = resolution;
-    for (uint32_t mip = 0U; mip < texture->getInfo().levelCount; ++mip) {
-        uploadMipLevel(device, texture, layer, mip, size, pixels);
-        if (mip + 1U < texture->getInfo().levelCount) {
-            buildDecalColorMip(pixels, size, nextMip);
+            buildMip(pixels, size, nextMip);
             pixels.swap(nextMip);
             size = std::max(1U, size / 2U);
         }
@@ -281,9 +254,9 @@ bool MaterialLibrary::initMaterialLayers(gfx::Device *device, const LandscapeAss
         }
         // Repeats per logical unit depend on the source texture, not the VT page resolution.
         const float uvScale = layer.pixelsPerMeter / static_cast<float>(resolution);
-        uploadAlbedoHeight(device, _albedoHeight, resolution, layer.id, std::move(albedoHeightPixels));
+        uploadMipChain(device, _albedoHeight, resolution, layer.id, std::move(albedoHeightPixels), buildAlbedoHeightMip);
         _materialParams[layer.id] = Vec4{uvScale, layer.globalColorInfluence, 0.0F, 0.0F};
-        uploadNormalRoughnessAO(device, _normalRoughnessAO, resolution, layer.id, std::move(normalRoughnessAOPixels));
+        uploadMipChain(device, _normalRoughnessAO, resolution, layer.id, std::move(normalRoughnessAOPixels), buildNormalRoughnessAOMip);
     }
     return true;
 }
@@ -328,10 +301,10 @@ bool MaterialLibrary::initDecalLayers(gfx::Device *device, const LandscapeAsset 
             color[pixel + 1] = toByte(linearGreen * alpha);
             color[pixel + 2] = toByte(linearBlue * alpha);
         }
-        uploadDecalColor(device, _decalAlbedo, decalSize, i, std::move(color));
+        uploadMipChain(device, _decalAlbedo, decalSize, i, std::move(color), buildDecalColorMip);
         // With detailMaterials, B is a blend weight rather than roughness.
         // Both use the same linear average; RG still uses normal filtering.
-        uploadNormalRoughnessAO(device, _decalNormal, decalSize, i, std::move(normal));
+        uploadMipChain(device, _decalNormal, decalSize, i, std::move(normal), buildNormalRoughnessAOMip);
         uploadMipLevel(device, _decalHeight, i, 0U, decalSize, height);
     }
     return true;

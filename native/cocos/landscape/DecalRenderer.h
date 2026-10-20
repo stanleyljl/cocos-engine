@@ -52,7 +52,7 @@ class MaterialLibrary;
 struct LandscapeSurfaceInstance {
     Vec4 grid;
     Vec4 tile;
-    Vec4 mapping; // local table slot, committed edge mask, unused ZW
+    Vec4 mapping; // local table slot, coarser/finer neighbor edge masks, unused W
     void apply(scene::Model *model, TypedArray &scratch) const;
 };
 
@@ -76,10 +76,13 @@ public:
 
     bool init(Node *node, scene::RenderScene *scene, bool heightUnorm);
     bool setAsset(LandscapeAsset *asset, gfx::Device *device);
+    bool addDecal(uint32_t id, const LandscapeAsset::Decal &decal);
+    bool removeDecal(uint32_t id, LandscapeRegion &region);
     // Only shared terrain shader uniforms/textures/variants are set by the caller.
     std::array<Material *, 2> materials() const;
 
     bool bindComposeMaterial(Material *material, const MaterialLibrary &materials);
+    void updateComposeMaterial(Material *material);
     uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
     void uploadPageDecals();
 
@@ -90,8 +93,7 @@ public:
     void updateView(const Vec3 &viewPosition);
     void refreshInstances(const Vec3 &viewPosition);
     void preparePasses(uint32_t stamp);
-    void collectPassModels(const QuadNode &node, const geometry::Frustum &frustum,
-                           bool shadow, ccstd::vector<const scene::Model *> &models) const;
+    void collectPassModels(const QuadNode &node, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
     void setEnabled(bool enabled);
     void setWireframe(bool wireframe);
@@ -107,6 +109,8 @@ private:
         Vec4 grid;
     };
     struct Instance {
+        LandscapeAsset::Decal decal;
+        uint32_t id{0}; // Zero identifies authored instances, which cannot be removed at runtime.
         Vec3 center;
         float fade{0};
         bool active{false};
@@ -115,7 +119,7 @@ private:
         int columns{0};
         ccstd::vector<Vec4> grids;
     };
-    // Draw ownership changes only when the committed terrain cut changes.
+    // Draw ownership follows the committed terrain cut and live decal instances.
     struct NodeDraws {
         TerrainNode terrain;
         ccstd::vector<Draw> draws;
@@ -123,6 +127,7 @@ private:
     void updateInstance(const Draw &draw, const TerrainNode &node);
     void updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged);
     void appendDecal(NodeDraws &node, uint32_t decal);
+    void initializeInstance(Instance &instance);
     void recycle(Draw &draw);
 
     IntrusivePtr<Node> _node;
@@ -142,6 +147,7 @@ private:
     bool _wireframe{false};
     bool _castShadow{true};
     bool _receiveShadow{true};
+    bool _regionsDirty{true};
 };
 } // namespace landscape
 } // namespace cc
