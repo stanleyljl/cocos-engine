@@ -21,7 +21,7 @@ try {
         gl.deleteProgram(link(prefix + shader.glsl3.vert, prefix + shader.glsl3.frag)); variants++;
     }
     const common = 'precision highp float;precision highp int;precision highp sampler2DArray;\n#define LANDSCAPE_TILE_RESOLUTION 129\nuniform vec4 holeParams;\n';
-    const vertex = common + '#define USE_INSTANCING 1\n#define LANDSCAPE_SHADOW_PASS 0\n#define LANDSCAPE_WIREFRAME 0\n#define LANDSCAPE_HEIGHT_UNORM 0\n'
+    const vertex = common + '#define USE_INSTANCING 1\n#define LANDSCAPE_SHADOW_PASS 0\n#define LANDSCAPE_WIREFRAME 0\n#define LANDSCAPE_HEIGHT_UNORM 0\n#define CCGetWorldMatrix(m) m = mat4(1.0)\n'
         + 'uniform vec4 terrainParams,morphCameraPos,decalControl,lodMorph[9];\n'
         + 'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};\n'
         + fixture.vertex + '\nin vec2 position;void main(){SurfacesStandardVertexIntermediate v;v.position=vec3(position,0);'
@@ -41,6 +41,7 @@ try {
     }
     const uniform = (name, ...v) => gl.uniform4f(gl.getUniformLocation(p, name), ...v);
     uniform('terrainParams', 1,0,0,0);
+    uniform('lodMorph[0]', 1e8,2e8,0,0);
     const texture = (name, unit, format, type, channels, data) => {
         gl.activeTexture(gl.TEXTURE0 + unit); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
         gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);

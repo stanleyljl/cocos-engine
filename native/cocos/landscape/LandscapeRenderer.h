@@ -74,18 +74,17 @@ public:
     LandscapeRenderer();
     ~LandscapeRenderer();
 
-    bool init(Node *node, scene::RenderScene *scene);
+    // Runtime methods require successful initialization of all owned modules.
+    bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
-    bool valid() const;
     // Latched after the initial view settles within budget with all exact bindings ready.
-    bool isReady() const { return _schedule && _schedule->ready(); }
+    bool isReady() const { return _schedule->ready(); }
 
     void setLodRanges(const ccstd::vector<float> &morphStart, const ccstd::vector<float> &morphEnd);
-    bool setAsset(LandscapeAsset *asset);
     bool addDecal(uint32_t id, float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
     void setDebugData(const LandscapeDebugData &data);
-    void preparePasses(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surfaceNodes);
+    void preparePasses(ExpectedTree expected);
     void collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
     void setHoleMode(uint32_t mode);
@@ -98,14 +97,12 @@ public:
 
 private:
     struct GridDraw {
-        QuadNode node;
+        // GPU ownership only. Geometry/material decisions live in CurrentTree.
         int mapping{-1};
         IntrusivePtr<scene::Model> model;
     };
 
-    static bool supportsHeightUnorm(gfx::Device *device);
     void setUnlit(bool enabled);
-
     void syncTerrainModels();
     void bindRuntimeTextures();
     void recycleModel(GridDraw &draw);
@@ -113,10 +110,10 @@ private:
     void updateMaterialProperties();
     void refreshTerrainMaterials();
     void updateMorphCameraProperty();
-    LandscapeSurfaceInstance resolveSurface(const GridDraw &draw);
+    LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t mapping);
     std::array<Material *, 4> surfaceMaterials() const;
-    void updateModel(GridDraw &draw, const LandscapeSurfaceInstance &surface);
-    void updateModelBounds(scene::Model *model, const GridDraw &draw);
+    void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
+    void updateModelBounds(scene::Model *model, const QuadNode &node);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -128,9 +125,9 @@ private:
     std::unique_ptr<TilePagePool> _tilePages;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
+    std::unique_ptr<LandscapeSchedule> _schedule;
 
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
-    std::unique_ptr<LandscapeSchedule> _schedule;
     ccstd::unordered_map<uint64_t, GridDraw> _draws;
 
     // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit

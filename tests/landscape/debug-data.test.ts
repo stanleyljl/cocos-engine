@@ -95,13 +95,13 @@ describe('Landscape debug data', () => {
         };
         const internal = terrain as unknown as { _native: typeof native; _beforeDraw(): void };
         internal._native = native;
-        terrain.debugData.freezeLod = true;
+        terrain.debugData.unlit = true;
         terrain.debugData.heightBlendEnabled = false;
         terrain.onEnable();
         expect(native.onEnable).toHaveBeenLastCalledWith(terrain.node, terrain.lodQualityScale, 16);
         expect(native.setGlobalColorMap).toHaveBeenLastCalledWith(null);
         expect(submitted).toHaveLength(1);
-        expect(submitted[0].freezeLod).toBe(true);
+        expect(submitted[0].unlit).toBe(true);
         expect(submitted[0].heightBlendEnabled).toBe(false);
         terrain.update();
         terrain.update();

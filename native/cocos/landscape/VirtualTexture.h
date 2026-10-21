@@ -5,7 +5,6 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/LandscapeData.h"
-#include "math/Vec4.h"
 #include "math/Vec3.h"
 
 namespace cc::landscape {
@@ -27,12 +26,13 @@ struct VTGridMapping {
     ccstd::vector<VTPageAddress> pages;
 };
 
-// Resolved shader records for one material-page composition.
-struct VTPageInputs {
-    Vec4 region;      // output page: landscape-local XZ origin, size, unused
-    Vec4 splatSource; // input tile: landscape-local XZ origin, size, array layer
+// Source addresses for one material-page composition, independent of residency.
+struct VTPageSources {
+    NodeAddress splat;
     // 4x4 input tiles: 2x2 interior plus a one-tile ring for filtering gutters.
-    std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources;
+    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normals;
+    // Append unique addresses in sampling order, preserving existing entries.
+    void appendTo(ccstd::vector<NodeAddress> &output) const;
 };
 
 // Material-page dimensions are derived together; a geometry maxLevel cannot
@@ -65,7 +65,8 @@ private:
     uint32_t _rootLevel{0};
 };
 
-// Exact-address physical storage. LandscapeSchedule owns admission; the renderer owns GPU grid mappings.
+// CPU material pages: exact-address storage and composition source selection.
+// LandscapeSchedule owns admission; the renderer owns GPU grid mappings.
 // Reservations protect both displayed and candidate material pages until commit.
 class VirtualTexture {
 public:
@@ -93,6 +94,7 @@ public:
     const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
     const Page &page(uint32_t slot) const { return _pages[slot]; }
     LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
+    VTPageSources sources(VTPageAddress address, bool bakeNormals) const;
     void publish(const ccstd::vector<uint32_t> &slots);
     void invalidate();
     // Invalidate intersecting cached pages, including their filtering gutters.

@@ -52,20 +52,20 @@ module.exports = {
                     showRanges: {
                         tooltip: 'Show LOD distance ranges and sector boundaries.',
                     },
-                    freezeLod: {
-                        tooltip: 'Freeze the main camera LOD position and VT data once ready. Each pass still culls against its current view frustum.',
-                    },
                     cliffEnabled: {
-                        tooltip: 'Enable triplanar projection for cliffs and cache the result in RVT. Changes made while frozen take effect after unfreezing.',
+                        tooltip: 'Enable triplanar projection for cliffs and cache the result in RVT.',
                     },
                     heightBlendEnabled: {
-                        tooltip: 'Enable height blending; disable to use linear weight blending. Changes regenerate VT and take effect after unfreezing if made while frozen.',
+                        tooltip: 'Enable height blending; disable to use linear weight blending. Changes regenerate VT.',
                     },
                     bakeNormalEnabled: {
-                        tooltip: 'Bake terrain normals into VT; disable to use normals that vary with geometry LOD. Changes made while frozen take effect after unfreezing.',
+                        tooltip: 'Bake terrain normals into VT; disable to use normals that vary with geometry LOD.',
                     },
                     decal3DEnabled: {
-                        tooltip: 'Show nearby 3D decal meshes; disabling keeps flat RVT decals. Can be toggled immediately even while frozen.',
+                        tooltip: 'Show nearby 3D decal meshes; disabling keeps flat RVT decals.',
+                    },
+                    physicsWireframe: {
+                        tooltip: 'Show loaded terrain collision meshes. The project physics debug view reads this switch and draws the wireframe.',
                     },
                 },
             },

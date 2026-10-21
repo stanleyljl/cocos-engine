@@ -67,9 +67,8 @@ VTRenderer::~VTRenderer() { destroy(); }
 
 bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals) {
     CC_ASSERT(_material == nullptr && _atlas == nullptr);
-    auto *root = Root::getInstance();
-    auto *device = root ? root->getDevice() : nullptr;
-    if (!device || !tiles.valid() || !materials.valid()) {
+    auto *device = Root::getInstance()->getDevice();
+    if (!tiles.valid() || !materials.valid()) {
         return false;
     }
 #if CC_PLATFORM == CC_PLATFORM_WINDOWS
@@ -79,22 +78,10 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     _compress = device->hasFeature(gfx::Feature::COMPUTE_SHADER) &&
                 hasAllFlags(formatFeatures, gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
 #endif
-    const auto initialize = [&]() {
-        _decals = &decals;
-        if (!_pages.init(asset.data()) || !initAtlas(device) || !ensureGridMappingCapacity(1) ||
-            !initComposeMaterial(asset, tiles, materials, device) ||
-            !_decals->bindComposeMaterial(_material, materials) ||
-            !initNormalSourceTable(tiles, device) || !initCliffReference(asset, tiles, device)) {
-            return false;
-        }
-        _material->getPasses()->front()->update();
-        return initPageDrawResources(device) && initMipPasses(device) &&
-               (!_compress || initCompression(device)) && initCommandResources(device);
-    };
-    if (!initialize()) {
+    if (!initResources(asset, tiles, materials, decals, device)) {
         const bool retryUncompressed = _compress;
         destroy();
-        if (!retryUncompressed || !initialize()) {
+        if (!retryUncompressed || !initResources(asset, tiles, materials, decals, device)) {
             destroy();
             return false;
         }
@@ -104,6 +91,23 @@ bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const Ma
     _batchSlots.reserve(config::VT_PAGE_COUNT);
     _batchInstances.reserve(config::VT_PAGE_COUNT);
     return true;
+}
+
+// One complete attempt, also used after releasing a failed compressed setup.
+bool VTRenderer::initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, gfx::Device *device) {
+    _decals = &decals;
+    // Storage first, then its source bindings, then draw/command resources.
+    if (!_pages.init(asset.data()) || !initAtlas(device) || !ensureGridMappingCapacity(1)) {
+        return false;
+    }
+    if (!initComposeMaterial(asset, tiles, materials, device) ||
+        !_decals->bindComposeMaterial(_material, materials) ||
+        !initNormalSourceTable(tiles, device) || !initCliffReference(asset, tiles, device)) {
+        return false;
+    }
+    _material->getPasses()->front()->update();
+    return initPageDrawResources(device) && initMipPasses(device) &&
+           (!_compress || initCompression(device)) && initCommandResources(device);
 }
 
 bool VTRenderer::initAtlas(gfx::Device *device) {
@@ -133,20 +137,26 @@ bool VTRenderer::initAtlas(gfx::Device *device) {
     // No depth attachment: page rectangles never overlap.
     IRenderTextureCreateInfo info;
     info.name = "landscape-vt-atlas";
-    info.width = renderSize();
-    info.height = renderSize();
+    info.width = compositionSize();
+    info.height = compositionSize();
     info.passInfo = passInfo;
     info.colorMipLevels = config::VT_MIP_LEVELS;
     _atlas = ccnew RenderTexture();
     _atlas->initialize(info);
-    return framebuffer() && framebuffer()->getColorTextures().size() == 2 && renderPass();
+    const auto *window = _atlas->getWindow();
+    if (!window || !window->getFramebuffer()) {
+        return false;
+    }
+    const auto *framebuffer = window->getFramebuffer();
+    const auto &textures = framebuffer->getColorTextures();
+    return textures.size() == 2 && textures[0] && textures[1] && framebuffer->getRenderPass();
 }
 
-gfx::Framebuffer *VTRenderer::framebuffer() const {
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getFramebuffer() : nullptr;
+gfx::Framebuffer *VTRenderer::compositionFramebuffer() const {
+    return _atlas->getWindow()->getFramebuffer();
 }
-gfx::RenderPass *VTRenderer::renderPass() const {
-    return framebuffer() ? framebuffer()->getRenderPass() : nullptr;
+gfx::RenderPass *VTRenderer::compositionRenderPass() const {
+    return compositionFramebuffer()->getRenderPass();
 }
 TextureBase *VTRenderer::atlas() const {
     return _compress ? static_cast<TextureBase *>(_compressedAtlas[0].get()) : _atlas.get();
@@ -154,15 +164,15 @@ TextureBase *VTRenderer::atlas() const {
 
 gfx::Texture *VTRenderer::albedo() const {
     if (_compress) {
-        return _compressedAtlas[0] ? _compressedAtlas[0]->getGFXTexture() : nullptr;
+        return _compressedAtlas[0]->getGFXTexture();
     }
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(0) : nullptr;
+    return _atlas->getWindow()->getColorTexture(0);
 }
 gfx::Texture *VTRenderer::normalRoughnessAO() const {
     if (_compress) {
-        return _compressedAtlas[1] ? _compressedAtlas[1]->getGFXTexture() : nullptr;
+        return _compressedAtlas[1]->getGFXTexture();
     }
-    return _atlas && _atlas->getWindow() ? _atlas->getWindow()->getColorTexture(1) : nullptr;
+    return _atlas->getWindow()->getColorTexture(1);
 }
 
 bool VTRenderer::ensureGridMappingCapacity(uint32_t count) {
@@ -323,7 +333,7 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     };
     for (const char *name : requiredProperties) {
         if (pass->getHandle(name) == 0U) {
-            CC_LOG_WARNING("[Landscape] VT effect is missing %s; reimport builtin-landscape effects and rebuild assets", name);
+            CC_LOG_WARNING("[Landscape] VT effect is missing %s; rebuild project effects", name);
             return false;
         }
     }
@@ -340,7 +350,7 @@ bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &
     _globalColorParams = Vec4{1.0F / data.width(), 1.0F / data.depth(), 0.0F, 0.0F};
     applyGlobalColorMap();
     _material->setPropertyVec4Array("materialParams", materials.materialParams());
-    _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(renderSize()),
+    _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(compositionSize()),
                                                 static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
                                                 device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
     _material->setPropertyVec4("rvtNormalParams", Vec4{_bakeNormalEnabled ? 1.0F : 0.0F, 0, 0, 0});
@@ -409,7 +419,7 @@ bool VTRenderer::initPageDrawResources(gfx::Device *device) {
     if (!shader) {
         return false;
     }
-    _pipelineState = device->createPipelineState({shader, pass->getPipelineLayout(), renderPass(), {iaInfo.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(), *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
+    _pipelineState = device->createPipelineState({shader, pass->getPipelineLayout(), compositionRenderPass(), {iaInfo.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(), *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
     return _instances && _inputAssembler && _pipelineState;
 }
 
@@ -436,7 +446,7 @@ bool VTRenderer::initMipPasses(gfx::Device *device) {
         if (!mip.albedo || !mip.normal || !mip.sourceAlbedo || !mip.sourceNormal) {
             return false;
         }
-        mip.framebuffer = device->createFramebuffer({renderPass(), {mip.albedo, mip.normal}, nullptr});
+        mip.framebuffer = device->createFramebuffer({compositionRenderPass(), {mip.albedo, mip.normal}, nullptr});
         if (!mip.framebuffer) {
             return false;
         }
@@ -455,7 +465,7 @@ bool VTRenderer::initMipPasses(gfx::Device *device) {
         // Read the preceding level; the source view excludes the destination.
         mipMaterial->setPropertyGFXTexture("sourceAlbedo", mip.sourceAlbedo.get());
         mipMaterial->setPropertyGFXTexture("sourceNormal", mip.sourceNormal.get());
-        mipMaterial->setPropertyVec4("mipLayout", Vec4{static_cast<float>(renderSize() >> (level - 1)),
+        mipMaterial->setPropertyVec4("mipLayout", Vec4{static_cast<float>(compositionSize() >> (level - 1)),
                                                        static_cast<float>(config::VT_PAGE_RES >> (level - 1)), static_cast<float>(level - 1),
                                                        device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
         mipPass->update();
@@ -463,7 +473,7 @@ bool VTRenderer::initMipPasses(gfx::Device *device) {
         if (!mipShader) {
             return false;
         }
-        _mipPasses[level - 1].pipelineState = device->createPipelineState({mipShader, mipPass->getPipelineLayout(), renderPass(), {_inputAssembler->getAttributes()}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(), *mipPass->getBlendState(), mipPass->getPrimitive(), mipPass->getDynamicStates()});
+        _mipPasses[level - 1].pipelineState = device->createPipelineState({mipShader, mipPass->getPipelineLayout(), compositionRenderPass(), {_inputAssembler->getAttributes()}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(), *mipPass->getBlendState(), mipPass->getPrimitive(), mipPass->getDynamicStates()});
         if (!_mipPasses[level - 1].pipelineState) {
             return false;
         }
@@ -551,7 +561,7 @@ bool VTRenderer::initCompression(gfx::Device *device) {
     return _compressPipeline != nullptr;
 }
 
-void VTRenderer::transitionAtlas(bool writing) {
+void VTRenderer::recordAtlasTransition(bool writing) {
     auto *device = Root::getInstance()->getDevice();
     gfx::TextureBarrierInfo info;
     info.prevAccesses = writing ? (_needsClear ? gfx::AccessFlagBit::NONE : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE)
@@ -566,7 +576,7 @@ void VTRenderer::transitionAtlas(bool writing) {
     _commands->pipelineBarrier(nullptr, nullptr, nullptr, 0, barriers, textures, 2);
 }
 
-void VTRenderer::compressPage(uint32_t slot) {
+void VTRenderer::recordCompression(uint32_t slot) {
     auto *device = Root::getInstance()->getDevice();
     for (uint32_t level = 0; level < config::VT_MIP_LEVELS; ++level) {
         const uint32_t size = config::VT_PAGE_RES >> level;
@@ -596,7 +606,7 @@ void VTRenderer::compressPage(uint32_t slot) {
 bool VTRenderer::initCommandResources(gfx::Device *device) {
     _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
     gfx::RenderPassInfo initialInfo;
-    initialInfo.colorAttachments = renderPass()->getColorAttachments();
+    initialInfo.colorAttachments = compositionRenderPass()->getColorAttachments();
     for (auto &color : initialInfo.colorAttachments) {
         color.loadOp = gfx::LoadOp::CLEAR;
         color.barrier = device->getGeneralBarrier({gfx::AccessFlagBit::NONE,
@@ -609,9 +619,6 @@ bool VTRenderer::initCommandResources(gfx::Device *device) {
 
 void VTRenderer::setGlobalColorMap(Texture2D *texture) {
     _globalColorMap = texture;
-    if (!_material) {
-        return;
-    }
     // Rebinding the same asset also supports replacement of its GPU texture.
     applyGlobalColorMap();
     _pages.invalidate();
@@ -628,36 +635,31 @@ void VTRenderer::setGlobalColorStrength(float strength) {
     const float clampedStrength = std::clamp(strength, 0.0F, 1.0F);
     if (_globalColorStrength != clampedStrength) {
         _globalColorStrength = clampedStrength;
-        if (_material) {
-            const float previous = _globalColorParams.z;
-            applyGlobalColorMap();
-            if (previous != _globalColorParams.z) {
-                // STALE pages retain their pixels until the schedule resumes composition.
-                _pages.invalidate();
-            }
+        const float previous = _globalColorParams.z;
+        applyGlobalColorMap();
+        if (previous != _globalColorParams.z) {
+            // STALE pages retain their pixels until the schedule resumes composition.
+            _pages.invalidate();
         }
     }
 #if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    if (_material) {
-        auto *pass = _material->getPasses()->front().get();
-        const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
-        const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
-        const auto *texture = pass->getDescriptorSet()->getTexture(binding);
-        const auto stale = std::count_if(_pages.activeSlots().begin(), _pages.activeSlots().end(), [this](uint32_t slot) {
-            return _pages.page(slot).state == VirtualTexture::State::STALE;
-        });
-        CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
-                    strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
-                    static_cast<size_t>(stale), _pages.activeSlots().size());
-    }
+    auto *pass = _material->getPasses()->front().get();
+    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
+    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
+    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
+    const auto stale = std::count_if(_pages.activeSlots().begin(), _pages.activeSlots().end(), [this](uint32_t slot) {
+        return _pages.page(slot).state == VirtualTexture::State::STALE;
+    });
+    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
+                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
+                static_cast<size_t>(stale), _pages.activeSlots().size());
 #endif
 }
 
 void VTRenderer::setBakeNormalEnabled(bool enabled) {
-    if (!_material || _bakeNormalEnabled == enabled) {
+    if (_bakeNormalEnabled == enabled) {
         return;
     }
-    // The owner defers BOTH composition and decoding while pages are frozen.
     _bakeNormalEnabled = enabled;
     _material->setPropertyVec4("rvtNormalParams", Vec4{enabled ? 1.0F : 0.0F, 0, 0, 0});
     _pages.invalidate();
@@ -674,14 +676,12 @@ void VTRenderer::setCliffEnabled(bool enabled) {
         _cliff.ready = false;
     }
     _cliff.params.x = _cliff.ready ? (enabled ? 1.0F : -1.0F) : 0.0F;
-    if (_material) {
-        _material->setPropertyVec4("cliffParams", _cliff.params);
-    }
+    _material->setPropertyVec4("cliffParams", _cliff.params);
     _pages.invalidate();
 }
 
 void VTRenderer::syncCliffSources(TilePagePool &tiles) {
-    if (_cliff.ready || (!_cliffEnabled && _cliff.params.w <= 0.0F) || !_material) {
+    if (_cliff.ready || (!_cliffEnabled && _cliff.params.w <= 0.0F)) {
         return;
     }
     bool ready = true;
@@ -715,9 +715,6 @@ void VTRenderer::syncCliffSources(TilePagePool &tiles) {
 }
 
 void VTRenderer::setHeightBlendEnabled(bool enabled) {
-    if (!_material) {
-        return;
-    }
     auto *pass = _material->getPasses()->front().get();
     auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("heightBlendParams")));
     const float strength = enabled ? 1.0F : 0.0F;
@@ -727,21 +724,11 @@ void VTRenderer::setHeightBlendEnabled(bool enabled) {
     // Keep the effect's scale/sharpness when toggling the global blend mode.
     params.x = strength;
     _material->setPropertyVec4("heightBlendParams", params);
-    // Frozen pages can reference source tiles that are no longer resident.
-    // Re-resolve them through the normal update path after unfreezing.
+    // Recomposition reserves its source tiles through the normal scheduling path.
     _pages.invalidate();
 }
 
-bool VTRenderer::valid() const {
-    return albedo() && normalRoughnessAO() && _pipelineState && _commands &&
-           std::all_of(_mipPasses.begin(), _mipPasses.end(),
-                       [](const MipPass &pass) { return pass.pipelineState && pass.framebuffer; });
-}
-
 uint32_t VTRenderer::render(TilePagePool &tiles, uint32_t maxUpdates) {
-    if (!valid()) {
-        return 0;
-    }
     syncCliffSources(tiles);
     if (maxUpdates == 0 || !sourcesReady()) {
         return 0;
@@ -756,6 +743,25 @@ uint32_t VTRenderer::render(TilePagePool &tiles, uint32_t maxUpdates) {
     return static_cast<uint32_t>(_batchSlots.size());
 }
 
+bool VTRenderer::resolvePageInputs(VTPageAddress page, const TilePagePool &tiles, PageInputs &output) const {
+    const auto sources = _pages.sources(page, _bakeNormalEnabled);
+    const auto splat = tiles.resolve(sources.splat);
+    if (splat.layer < 0) {
+        return false;
+    }
+    const auto region = _pages.region(page);
+    output.region = {region.x, region.z, region.size, 0};
+    output.splatSource = tiles.shaderParams(splat);
+    for (size_t i = 0; i < sources.normals.size(); ++i) {
+        const auto tile = tiles.resolve(sources.normals[i]);
+        if (tile.layer < 0) {
+            return false;
+        }
+        output.normalSources[i] = tiles.shaderParams(tile);
+    }
+    return true;
+}
+
 void VTRenderer::collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates) {
     // Source slots can change between batches. Resolve only for this submission,
     // so no cached input bindings or separate input-readiness state can go stale.
@@ -766,8 +772,8 @@ void VTRenderer::collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates
         if (!page.needsComposition()) {
             continue;
         }
-        VTPageInputs inputs;
-        if (!tiles.resolvePage(page.address, _bakeNormalEnabled, inputs)) {
+        PageInputs inputs;
+        if (!resolvePageInputs(page.address, tiles, inputs)) {
             continue;
         }
         const uint32_t decalCount = _decals->collectPageDecals(slot, inputs.region);
@@ -782,7 +788,7 @@ void VTRenderer::collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates
     }
 }
 
-void VTRenderer::submitPageBatch() {
+void VTRenderer::uploadPageInputs() {
     _decals->updateComposeMaterial(_material);
     _decals->uploadPageDecals();
     gfx::BufferTextureCopy indexCopy;
@@ -791,18 +797,15 @@ void VTRenderer::submitPageBatch() {
     Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSources, &indexCopy, 1);
 
     _material->getPasses()->front()->update();
+}
+
+void VTRenderer::submitPageBatch() {
+    uploadPageInputs();
     _commands->begin();
     if (_compress) {
-        transitionAtlas(true);
-        // The compressed path reuses one scratch page, then copies its encoded
-        // blocks to the final atlas before drawing the next page.
-        for (size_t i = 0; i < _batchInstances.size(); ++i) {
-            recordPageBatch(&_batchInstances[i], 1);
-            compressPage(_batchSlots[i]);
-        }
-        transitionAtlas(false);
+        recordCompressedPages();
     } else {
-        recordPageBatch(_batchInstances.data(), static_cast<uint32_t>(_batchInstances.size()));
+        recordCompositionAndMips(_batchInstances.data(), static_cast<uint32_t>(_batchInstances.size()));
     }
     _commands->end();
     gfx::CommandBuffer *command = _commands.get();
@@ -820,7 +823,18 @@ void VTRenderer::submitPageBatch() {
 #endif
 }
 
-void VTRenderer::recordPageBatch(const PageInstance *instances, uint32_t instanceCount) {
+void VTRenderer::recordCompressedPages() {
+    recordAtlasTransition(true);
+    // The compressed path reuses one scratch page, then copies its encoded
+    // blocks to the final atlas before drawing the next page.
+    for (size_t i = 0; i < _batchInstances.size(); ++i) {
+        recordCompositionAndMips(&_batchInstances[i], 1);
+        recordCompression(_batchSlots[i]);
+    }
+    recordAtlasTransition(false);
+}
+
+void VTRenderer::recordCompositionAndMips(const PageInstance *instances, uint32_t instanceCount) {
     // Updating the vertex buffer is ordered after the preceding page's draws.
     const auto *barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
         {gfx::AccessFlagBit::VERTEX_BUFFER, gfx::AccessFlagBit::TRANSFER_WRITE});
@@ -829,10 +843,10 @@ void VTRenderer::recordPageBatch(const PageInstance *instances, uint32_t instanc
     barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
         {gfx::AccessFlagBit::TRANSFER_WRITE, gfx::AccessFlagBit::VERTEX_BUFFER});
     _commands->pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-    recordPagePass(_material, _pipelineState, framebuffer(), renderSize(), instanceCount);
+    recordPagePass(_material, _pipelineState, compositionFramebuffer(), compositionSize(), instanceCount);
     for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
         const auto &mip = _mipPasses[level - 1];
-        recordPagePass(mip.material, mip.pipelineState, mip.framebuffer.get(), renderSize() >> level, instanceCount);
+        recordPagePass(mip.material, mip.pipelineState, mip.framebuffer.get(), compositionSize() >> level, instanceCount);
     }
     // Only the first batch uses the initial pass with no prior attachment access.
     _needsClear = false;
@@ -840,7 +854,7 @@ void VTRenderer::recordPageBatch(const PageInstance *instances, uint32_t instanc
 
 void VTRenderer::recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount) {
     const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 0.5F, 1, 1}};
-    _commands->beginRenderPass(_needsClear ? _initialPass.get() : renderPass(), framebuffer,
+    _commands->beginRenderPass(_needsClear ? _initialPass.get() : compositionRenderPass(), framebuffer,
                                gfx::Rect{0, 0, atlasSize, atlasSize}, colors, 1.0F, 0);
     auto *pass = material->getPasses()->front().get();
     _commands->bindPipelineState(pipelineState);
@@ -852,7 +866,7 @@ void VTRenderer::recordPagePass(Material *material, gfx::PipelineState *pipeline
     _commands->endRenderPass();
 }
 
-void VTRenderer::destroy() {
+void VTRenderer::destroyCompression() {
     _compressPipeline = nullptr;
     _compressSets = {};
     _compressUniforms = {};
@@ -868,6 +882,10 @@ void VTRenderer::destroy() {
         texture = nullptr;
     }
     _compress = false;
+}
+
+void VTRenderer::destroy() {
+    destroyCompression();
     _cliff = {};
     _normalSources = nullptr;
     _normalSourceData.clear();

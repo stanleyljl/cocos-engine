@@ -3,6 +3,7 @@ const result = document.getElementById('result');
 try {
   const gl = document.createElement('canvas').getContext('webgl2');
   if (!gl) throw new Error('WebGL2 unavailable');
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   const compile = (type, source) => {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, '#version 300 es\n' + source); gl.compileShader(shader);
@@ -30,7 +31,7 @@ try {
   const constants = new Float32Array(2336);
   const blockBytes = gl.getActiveUniformBlockParameter(p, gl.getUniformBlockIndex(p, 'Constants'), gl.UNIFORM_BLOCK_DATA_SIZE);
   if (blockBytes !== constants.byteLength || blockBytes > 16384) throw new Error('Unexpected compose uniform block size: ' + blockBytes);
-  constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
+  constants.set([1,1,0,1],0); constants.set([0,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
     gl.activeTexture(gl.TEXTURE0+unit); const t=gl.createTexture(); gl.bindTexture(target,t);
@@ -66,9 +67,17 @@ try {
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0,influence=1}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2192],0,0);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize * 128,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
+    // Embed the test cell in a production-size tile; extend its outer corners.
+    const packed = pairs.map(pack);
+    const samples = new Uint16Array(129 * 129);
+    for (let z = 0; z < 129; ++z) {
+      for (let x = 0; x < 129; ++x) {
+        samples[z * 129 + x] = packed[Math.min(z, 1) * 2 + Math.min(x, 1)];
+      }
+    }
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,samples);
     for (let i = 0; i < 32; i++) {
       constants.set([scale, Array.isArray(influence) ? influence[i % influence.length] : influence, 0, 0], 8 + i * 4);
     }
@@ -76,7 +85,7 @@ try {
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
     if(gl.getError()!==gl.NO_ERROR) throw new Error('WebGL error');
-    if(constants[5]<.5){output[5]=output[3];output[3]=255;} // Decode the new tangent-normal packing for baseline material checks.
+    if(constants[4]<.5){output[5]=output[3];output[3]=255;} // Decode the new tangent-normal packing for baseline material checks.
     return output;
   };
   let checks=0;
@@ -312,11 +321,11 @@ try {
   }
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,129,129,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
   gl.activeTexture(gl.TEXTURE8);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,0,0,255]));
-  const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],mapping=[0,0,0,0],grid=[0,0,8,8],nodeSize=16,fade=1}={})=>{
+  const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],mapping=[0,0,0,0],grid=[0,0,8,8],nodeSize=16,nodeOrigin=[0,0],fade=1}={})=>{
     const p=probePrograms[decal];gl.useProgram(p);
     const u=(n,...v)=>gl.uniform4f(gl.getUniformLocation(p,n),...v);
     const a=(n,...v)=>{const l=gl.getAttribLocation(p,n);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...v);}};
-    a('a_gridInst',0,0,nodeSize,0);
+    a('a_gridInst',...nodeOrigin,nodeSize,0);
     a('a_mappingInst',...mapping);
     a('a_tileInst',0,0,16,0);
     a('a_normalParentInst',0,0,16,0);
@@ -330,11 +339,11 @@ try {
     const result=new Float32Array(4);gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER,0,result);return [...result];
   };
   const approx=(a,b,label)=>close(a,b,label,3e-5);
-  // Reference geometry comes from executing the unmodified terrain variant,
+  // Reference geometry comes from executing the directly sampled terrain variant,
   // then locating the rendered triangle on the CPU at a fixed XZ coordinate.
   // This is deliberately independent of the decal shader's 2x2 block search.
   const terrainMesh=options=>Array.from({length:17*17},(_,i)=>
-    probe([i%17/16,Math.floor(i/17)/16],{...options,decal:0,mapping:[0,0,0,0]}));
+    probe([i%17/16,Math.floor(i/17)/16],{...options,decal:0}));
   const onTerrain=(mesh,xz)=>{
     for(let z=0;z<16;z++)for(let x=0;x<16;x++){
       const i=z*17+x;
@@ -377,10 +386,21 @@ try {
       approx(a,onTerrain(mesh,uv.map(v=>v*8)),'height at fixed point matches selected triangles');
     }
   }
-  // The fine side of a 2:1 edge collapses odd vertices onto the coarse lattice.
+  // Cached endpoint heights must also match every edge-constraint combination.
+  for (const mapping of [[0,15,0,0], [0,0,15,0], [0,5,10,0], [0,10,5,0]]) {
+    for (const range of [[100,200], [2,20], [0,.001]]) {
+      const options = { mapping, range, grid: [0,0,16,16] };
+      const mesh = terrainMesh(options);
+      for (const uv of [...sampleUVs, [0,.3], [1,.3], [.3,0], [.3,1]]) {
+        approx(probe(uv, options), onTerrain(mesh, uv.map(v => v * 16)), 'cached heights preserve constrained edges');
+      }
+    }
+  }
+  // The fine edge collapses onto the adjacent coarse edge, which is pinned by
+  // its finer-neighbor mask even when the distance morph would move it.
   for(let j=0;j<=16;j++){
     const fine=probe([1,j/16],{decal:0,mapping:[0,2,0,0]});
-    const coarse=probe([.5,Math.floor(j/2)/16],{decal:0,nodeSize:32,mapping:[0,0,0,0]});
+    const coarse=probe([0,Math.floor(j/2)/16],{decal:0,nodeSize:32,nodeOrigin:[16,0],mapping:[0,0,1,0]});
     approx(fine.slice(0,3),coarse.slice(0,3),'fine-to-coarse stitched edge is continuous');
   }
   for(const uv of sampleUVs){

@@ -25,6 +25,7 @@
 
 #include "core/Root.h"
 #include "landscape/VirtualTexture.h"
+#include "math/Vec4.h"
 
 namespace cc {
 class Material;
@@ -41,6 +42,7 @@ class TilePagePool;
 // GPU half of VT: owns the atlas, composition passes and source bindings.
 // LandscapeSchedule reserves the pages and source tiles. Composition consumes
 // ready inputs and publishes completed pages; it does not select tree changes.
+// Runtime methods require init() to have succeeded.
 class VTRenderer {
 public:
     VTRenderer();
@@ -65,7 +67,6 @@ public:
     bool updateGridMapping(uint32_t slot, const VTGridMapping &mapping);
     void uploadGridMappings(ccstd::vector<uint32_t> slots);
     void requiredSources(ccstd::vector<NodeAddress> &sources) const;
-    bool valid() const;
     bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
     bool isBakeNormalEnabled() const { return _bakeNormalEnabled; }
     // Returns the actual composed page count for the shared frame budget.
@@ -90,23 +91,26 @@ private:
         return level;
     }
 
+    // Initialization owns a complete resource set; a failed attempt is released
+    // before retrying with an uncompressed atlas.
+    bool initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, gfx::Device *device);
     bool initAtlas(gfx::Device *device);
-    bool initCompression(gfx::Device *device);
-    void compressPage(uint32_t slot);
-    void transitionAtlas(bool writing);
-    uint32_t renderSize() const { return _compress ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE; }
-    gfx::Framebuffer *framebuffer() const;
-    gfx::RenderPass *renderPass() const;
-    void syncCliffSources(TilePagePool &tiles);
     bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device);
     bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
     bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
-    void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
-    void applyGlobalColorMap();
     bool initPageDrawResources(gfx::Device *device);
     bool initMipPasses(gfx::Device *device);
     bool initCommandResources(gfx::Device *device);
-    void recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
+
+    // Source bindings and debug settings feed subsequent composition batches.
+    void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
+    void syncCliffSources(TilePagePool &tiles);
+    void applyGlobalColorMap();
+
+    // The composition target is a full atlas or one reusable scratch page.
+    uint32_t compositionSize() const { return _compress ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE; }
+    gfx::Framebuffer *compositionFramebuffer() const;
+    gfx::RenderPass *compositionRenderPass() const;
 
     // Exactly the three vec4 attributes consumed by the compose/mip shaders.
     struct PageInstance {
@@ -116,9 +120,24 @@ private:
     };
     static_assert(sizeof(PageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
 
+    struct PageInputs {
+        Vec4 region; // output page: landscape-local XZ origin, size, unused
+        Vec4 splatSource; // input tile: landscape-local XZ origin, size, array layer
+        std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources;
+    };
+    bool resolvePageInputs(VTPageAddress page, const TilePagePool &tiles, PageInputs &output) const;
     void collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates);
+    void uploadPageInputs();
     void submitPageBatch();
-    void recordPageBatch(const PageInstance *instances, uint32_t instanceCount);
+    void recordCompressedPages();
+    void recordCompositionAndMips(const PageInstance *instances, uint32_t instanceCount);
+    void recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
+
+    // Optional compressed output: record encoding and copies after all page mips.
+    bool initCompression(gfx::Device *device);
+    void destroyCompression();
+    void recordCompression(uint32_t slot);
+    void recordAtlasTransition(bool writing);
 
     // Each mip has its own descriptors: recording a later mip must not overwrite
     // the preceding pass's source texture bindings.
@@ -151,6 +170,7 @@ private:
     ccstd::vector<uint32_t> _freeGridMappings;
     uint32_t _gridMappingSize{0};
     uint32_t _gridMappingCount{0};
+    // Render target: full atlas in RGBA8 mode, one reusable page in compressed mode.
     IntrusivePtr<RenderTexture> _atlas;
     // Compression uses _atlas as reusable single-page RGBA scratch storage.
     bool _compress{false};

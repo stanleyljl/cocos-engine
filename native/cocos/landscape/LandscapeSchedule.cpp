@@ -27,14 +27,21 @@ LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, TilePagePool &tiles,
 : _asset(asset), _tiles(tiles), _vt(vt), _data(asset.data()),
   _layout(_data.sectorSize), _expectedTree(_data.maxLevel) {
     _currentTree.init(_data);
-    // Start with complete sector coverage and one coarse material page per root.
+}
+
+bool LandscapeSchedule::beginInitialChange() {
+    Transaction transaction;
+    // Bootstrap uses the same admission/prepare/commit path as later changes.
+    // Every sector starts with one coarse material page and complete coverage.
     for (const auto &entry : _currentTree.nodes()) {
         const auto address = entry.second.geometry.address();
         CurrentTree::Node node;
         node.geometry = geometry(address);
         node.material.pages.push_back({_layout.rootLevel(), address.x, address.z});
-        _pending.nodes.emplace(entry.first, std::move(node));
+        transaction.topology.added.push_back(address);
+        transaction.nodes.push_back(std::move(node));
     }
+    return admit(std::move(transaction));
 }
 
 QuadNode LandscapeSchedule::geometry(NodeAddress address) const {
@@ -49,7 +56,7 @@ QuadNode LandscapeSchedule::geometry(NodeAddress address) const {
 }
 
 float LandscapeSchedule::distance(NodeAddress node) const {
-    const auto &camera = _expectedTree.camera();
+    const auto &camera = _camera;
     const auto bounds = geometry(node);
     const auto region = _data.nodeRegion(node);
     const float x = std::max({region.x - camera.x, camera.x - region.x - region.size, 0.0F});
@@ -62,26 +69,34 @@ CurrentTree::Node LandscapeSchedule::desiredNode(NodeAddress address) const {
     CurrentTree::Node result;
     result.geometry = geometry(address);
     result.material = _layout.gridMapping(_data.nodeRegion(address), result.geometry.minY,
-                                         result.geometry.maxY, _expectedTree.camera());
+                                         result.geometry.maxY, _camera);
     return result;
 }
 
-void LandscapeSchedule::buildRequests() {
-    _requests.clear();
-    _requestIndex = 0;
-    const auto append = [this](NodeAddress node, RequestType type, uint32_t priority) {
-        _requests.push_back({node, type, priority, _expectedTree.visible(node), distance(node)});
+bool LandscapeSchedule::beginNextChange() {
+    if (!_needsPlan) {
+        return false;
+    }
+    struct Work {
+        CurrentTree::Candidate candidate;
+        bool visible;
+        float distance;
+        uint32_t priority;
     };
-    for (const auto &request : _currentTree.requests(_expectedTree)) {
-        append(request.node, request.split ? RequestType::SPLIT : RequestType::MERGE, request.priority);
+    ccstd::vector<Work> work;
+    for (const auto candidate : _currentTree.candidates(_expectedTree)) {
+        const auto priority = candidate.operation == CurrentTree::Operation::SPLIT ? _expectedTree.refinementPriority(candidate.node) : 0;
+        work.push_back({candidate, _expectedTree.visible(candidate.node), distance(candidate.node),
+                        priority});
     }
-    for (const auto &entry : _currentTree.nodes()) {
-        append(entry.second.geometry.address(), RequestType::MATERIAL, 0);
-    }
-    // Release capacity first; otherwise favor visible, nearby work.
-    std::sort(_requests.begin(), _requests.end(), [](const Request &a, const Request &b) {
-        if ((a.type == RequestType::MERGE) != (b.type == RequestType::MERGE)) {
-            return a.type == RequestType::MERGE;
+    // Release capacity first; otherwise favor visible, nearby work. All priorities
+    // refer to this cut and view and are discarded as soon as one change is admitted.
+    using Operation = CurrentTree::Operation;
+    std::sort(work.begin(), work.end(), [](const Work &a, const Work &b) {
+        const auto left = a.candidate.operation;
+        const auto right = b.candidate.operation;
+        if ((left == Operation::MERGE) != (right == Operation::MERGE)) {
+            return left == Operation::MERGE;
         }
         if (a.visible != b.visible) {
             return a.visible;
@@ -89,47 +104,36 @@ void LandscapeSchedule::buildRequests() {
         if (a.distance != b.distance) {
             return a.distance < b.distance;
         }
-        if (a.type != b.type) {
-            return a.type < b.type;
+        if (left != right) {
+            return left < right;
         }
         if (a.priority != b.priority) {
             return a.priority > b.priority;
         }
-        return a.node.key() < b.node.key();
+        return a.candidate.node.key() < b.candidate.node.key();
     });
-    _rebuildRequests = false;
-}
-
-bool LandscapeSchedule::selectNextChange() {
-    if (_rebuildRequests) {
-        buildRequests();
-    }
-    while (_requestIndex < _requests.size()) {
-        const auto request = _requests[_requestIndex++];
-        if (request.type == RequestType::MATERIAL) {
-            auto node = desiredNode(request.node);
-            if (sameMapping(node.material, _currentTree.nodes().at(request.node.key()).material)) {
-                continue;
-            }
-            _pending.nodes.emplace(request.node.key(), std::move(node));
-        } else {
-            if (!_currentTree.plan({request.node, request.type == RequestType::SPLIT, request.priority}, _pending)) {
-                continue;
-            }
-            for (auto &entry : _pending.nodes) {
-                entry.second = desiredNode(entry.second.geometry.address());
-            }
+    for (const auto &item : work) {
+        Transaction transaction;
+        if (!_currentTree.plan(item.candidate, transaction.topology)) {
+            continue;
         }
-        if (admitChange()) {
+        for (const auto address : transaction.topology.added) {
+            transaction.nodes.push_back(desiredNode(address));
+        }
+        if (item.candidate.operation == Operation::REFRESH &&
+            sameMapping(transaction.nodes.front().material, _currentTree.nodes().at(item.candidate.node.key()).material)) {
+            continue;
+        }
+        if (admit(std::move(transaction))) {
             return true;
         }
-        // A refused candidate owns no resources and leaves the current tree intact.
-        _pending = {};
     }
+    // Retry only after demand/view changes or a commit releases resources.
+    _needsPlan = false;
     return false;
 }
 
-LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
+LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::vector<CurrentTree::Node> &added) const {
     Resources resources;
     ccstd::unordered_set<uint64_t> sources;
     ccstd::unordered_set<uint64_t> pages;
@@ -137,23 +141,25 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
     for (const auto source : resources.sources) {
         sources.insert(source.key());
     }
-    const auto collect = [&](const auto &nodes) {
-        for (const auto &entry : nodes) {
-            const auto address = entry.second.geometry.address();
-            const auto source = address.ancestor(std::max(address.level, _data.minTileLevel));
-            if (sources.insert(source.key()).second) {
-                resources.sources.push_back(source);
-            }
-            for (const auto page : entry.second.material.pages) {
-                if (pages.insert(page.key()).second) {
-                    resources.pages.push_back(page);
-                }
+    const auto collect = [&](const CurrentTree::Node &node) {
+        const auto address = node.geometry.address();
+        const auto source = address.ancestor(std::max(address.level, _data.minTileLevel));
+        if (sources.insert(source.key()).second) {
+            resources.sources.push_back(source);
+        }
+        for (const auto page : node.material.pages) {
+            if (pages.insert(page.key()).second) {
+                resources.pages.push_back(page);
             }
         }
     };
-    // Old bindings remain protected until the whole local change is committed.
-    collect(_currentTree.nodes());
-    collect(_pending.nodes);
+    // Keep all displayed bindings alive, including nodes retired by the transaction.
+    for (const auto &entry : _currentTree.nodes()) {
+        collect(entry.second);
+    }
+    for (const auto &node : added) {
+        collect(node);
+    }
     std::sort(resources.pages.begin(), resources.pages.end(), [](auto a, auto b) {
         return a.key() < b.key();
     });
@@ -173,7 +179,7 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
     // Other composition inputs can be released between batches.
     for (const auto page : resources.pages) {
         ccstd::vector<NodeAddress> inputs;
-        _tiles.pageSources(page, true, inputs);
+        _vt.pages().sources(page, true).appendTo(inputs);
         if (!sourcesFit(pinned, inputs, _tiles.layerCount())) {
             return false;
         }
@@ -181,37 +187,44 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
     return true;
 }
 
-bool LandscapeSchedule::admitChange() {
-    auto resources = collectResources();
+bool LandscapeSchedule::admit(Transaction transaction) {
+    transaction.resources = collectResources(transaction.nodes);
+    const auto &resources = transaction.resources;
     if (!canPrepare(resources)) {
         return false;
     }
     const auto currentCount = _currentTree.nodes().size();
-    const auto nextCount = _pending.removed.empty() ? currentCount
-                                                  : currentCount - _pending.removed.size() + _pending.nodes.size();
+    const auto &topology = transaction.topology;
+    const auto nextCount = topology.removed.empty() ? currentCount
+                                                  : currentCount - topology.removed.size() + topology.added.size();
     if (!_vt.ensureGridMappingCapacity(static_cast<uint32_t>(std::max(currentCount, nextCount)))) {
         return false;
     }
-    // Admission checks the entire transition before either pool changes ownership.
+    // Validate the entire union before changing either pool's reservations.
     if (!_vt.pages().reserve(resources.pages) || !_tiles.reserve(resources.sources)) {
         return false;
     }
-    _resources = std::move(resources);
+    _pending = std::move(transaction);
     return true;
 }
 
+const LandscapeSchedule::Resources &LandscapeSchedule::activeResources() const {
+    return _pending ? _pending->resources : _resources;
+}
+
 ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
-    auto sources = _resources.sources;
+    const auto &resources = activeResources();
+    auto sources = resources.sources;
     ccstd::unordered_set<uint64_t> working;
     for (const auto source : sources) {
         working.insert(source.key());
     }
-    for (const auto page : _resources.pages) {
+    for (const auto page : resources.pages) {
         if (!_vt.pages().needsComposition(page)) {
             continue;
         }
         ccstd::vector<NodeAddress> inputs;
-        _tiles.pageSources(page, _vt.isBakeNormalEnabled(), inputs);
+        _vt.pages().sources(page, _vt.isBakeNormalEnabled()).appendTo(inputs);
         if (!sourcesFit(working, inputs, _tiles.layerCount())) {
             continue;
         }
@@ -270,9 +283,9 @@ bool LandscapeSchedule::prepareResources(bool synchronous) {
 }
 
 void LandscapeSchedule::commitChange() {
-    _currentTree.commit(_pending);
-    _pending = {};
-    _rebuildRequests = true;
+    _currentTree.commit(_pending->topology, _pending->nodes);
+    _pending.reset();
+    _needsPlan = true;
     // The old tree is no longer displayed. Keep only committed height sources,
     // material pages and projection references; composition inputs are temporary.
     _resources = collectResources();
@@ -280,17 +293,19 @@ void LandscapeSchedule::commitChange() {
     _tiles.reserve(_resources.sources);
 }
 
-void LandscapeSchedule::update(const ccstd::vector<QuadNode> &geometryNodes, const ccstd::vector<QuadNode> &surface, const Vec3 &camera, uint32_t frame, bool frozen) {
+void LandscapeSchedule::update(ExpectedTree expected, const Vec3 &camera, uint32_t frame) {
     _currentTree.clearChanges();
-    if (_failed || (frozen && _ready)) {
+    if (_failed) {
         return;
     }
     if (_asset.loadingFailed()) {
         stopLoading();
         return;
     }
-    _rebuildRequests |= _expectedTree.target(geometryNodes);
-    _rebuildRequests |= _expectedTree.setView(surface, camera);
+    _needsPlan |= !(_expectedTree == expected);
+    _expectedTree = std::move(expected);
+    _needsPlan |= _camera.x != camera.x || _camera.y != camera.y || _camera.z != camera.z;
+    _camera = camera;
     if (!_frame || *_frame != frame) {
         _frame = frame;
         _remainingPages = config::VT_PAGE_UPDATE_BUDGET;
@@ -298,7 +313,7 @@ void LandscapeSchedule::update(const ccstd::vector<QuadNode> &geometryNodes, con
             _tiles.update(config::PAGE_UPLOAD_BUDGET);
         }
     }
-    if (_resources.pages.empty() && !admitChange()) {
+    if (!_pending && _resources.pages.empty() && !beginInitialChange()) {
         stopLoading();
         return;
     }
@@ -308,10 +323,10 @@ void LandscapeSchedule::update(const ccstd::vector<QuadNode> &geometryNodes, con
         if (!prepareResources(!_ready)) {
             return;
         }
-        if (!_pending.empty()) {
+        if (_pending) {
             commitChange();
         }
-        if (!selectNextChange()) {
+        if (!beginNextChange()) {
             _ready = true;
             return;
         }

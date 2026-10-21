@@ -9,44 +9,38 @@
 namespace cc::landscape {
 class VTRenderer;
 
-// Advances CurrentTree toward ExpectedTree one prepared local change at a time.
-// Admission protects the displayed tree; preparation loads sources and composes
-// material pages; commit publishes the change and releases retired resources.
+// Compare demand with committed coverage, admit one replacement, prepare it,
+// then commit geometry and materials together. Only an admitted transaction
+// survives across updates; candidate ordering is never cached against an old cut.
 class LandscapeSchedule {
 public:
     LandscapeSchedule(LandscapeAsset &asset, TilePagePool &tiles, VTRenderer &vt);
-    void update(const ccstd::vector<QuadNode> &geometry, const ccstd::vector<QuadNode> &surface, const Vec3 &localCamera, uint32_t frame, bool frozen);
+    void update(ExpectedTree expected, const Vec3 &localCamera, uint32_t frame);
     bool ready() const { return _ready; }
     const CurrentTree &currentTree() const { return _currentTree; }
     QuadNode geometry(NodeAddress address) const;
 
 private:
-    enum class RequestType {
-        MERGE,
-        SPLIT,
-        MATERIAL,
-    };
-    struct Request {
-        NodeAddress node;
-        RequestType type;
-        uint32_t priority{0};
-        bool visible{false};
-        float distance{0};
-    };
     struct Resources {
         // Persistent inputs and output pages protected until commit. Temporary
         // composition inputs are selected afresh from dirty pages during prepare.
         ccstd::vector<NodeAddress> sources;
         ccstd::vector<VTPageAddress> pages;
     };
+    struct Transaction {
+        CurrentTree::Change topology;
+        ccstd::vector<CurrentTree::Node> nodes;
+        Resources resources;
+    };
 
-    void buildRequests();
-    bool selectNextChange();
-    bool admitChange();
+    bool beginInitialChange();
+    bool beginNextChange();
+    bool admit(Transaction transaction);
     bool prepareResources(bool synchronous);
     void commitChange();
 
-    Resources collectResources() const;
+    Resources collectResources(const ccstd::vector<CurrentTree::Node> &added = {}) const;
+    const Resources &activeResources() const;
     bool canPrepare(const Resources &resources) const;
     ccstd::vector<NodeAddress> compositionSources() const;
     bool resourcesReady() const;
@@ -61,11 +55,10 @@ private:
     VTPageLayout _layout;
     ExpectedTree _expectedTree;
     CurrentTree _currentTree;
-    CurrentTree::Change _pending;
+    std::optional<Transaction> _pending;
     Resources _resources;
-    ccstd::vector<Request> _requests;
-    size_t _requestIndex{0};
-    bool _rebuildRequests{true};
+    Vec3 _camera;
+    bool _needsPlan{true};
     bool _ready{false};
     bool _failed{false};
     std::optional<uint32_t> _frame;

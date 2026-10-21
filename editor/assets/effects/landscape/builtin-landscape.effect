@@ -14,7 +14,7 @@ CCEffect %{
         morphCameraPos: { value: [0, 0, 0, 0] }
         vtLayout: { value: [4352, 272, 8, 4] }
         rvtNormalParams: { value: [1, 0, 0, 0] }
-        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
+        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -175,11 +175,13 @@ CCProgram landscape-vertex %{
       v_lod = a_gridInst.w;
     #endif
   #endif
-    float height = sampleHeight(localXZ);
+    float height;
   #if __VERSION__ >= 300 && USE_INSTANCING
     vec4 base = terrainVertex(parentUV);
     localXZ = base.xz;
     height = base.y;
+  #else
+    height = sampleHeight(localXZ);
   #endif
   #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
     // Use the final local coordinates for geometry and terrain normal sampling.

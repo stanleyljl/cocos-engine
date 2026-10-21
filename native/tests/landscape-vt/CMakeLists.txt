@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(LandscapeVTPagingTests LANGUAGES CXX)
 enable_testing()
 add_executable(landscape_vt_paging_test paging_test.cpp ../../cocos/landscape/LandscapeData.cpp
+    ../../cocos/landscape/Quadtree.cpp
     ../../cocos/landscape/VirtualTexture.cpp
     ../../cocos/landscape/TilePagePool.cpp ../../cocos/base/RefCounted.cpp
     ../../cocos/math/Vec3.cpp ../../cocos/math/Vec4.cpp ../../cocos/math/MathUtil.cpp)

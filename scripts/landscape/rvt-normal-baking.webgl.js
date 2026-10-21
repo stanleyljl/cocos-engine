@@ -29,7 +29,7 @@ try {
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
   const constants = new Float32Array(2336);
-  constants.set([1,1,0,1],0); constants.set([2,0,0,0],4);
+  constants.set([1,1,0,1],0); constants.set([0,0,0,0],4);
   constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
   const tex = (name,unit,target) => {
     gl.activeTexture(gl.TEXTURE0+unit); const t=gl.createTexture(); gl.bindTexture(target,t);
@@ -66,9 +66,17 @@ try {
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,0,0,0);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize,sourceLayer);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize * 128,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(pairs.map(pack)));
+    // Embed the test cell in a production-size tile; extend its outer corners.
+    const packed = pairs.map(pack);
+    const samples = new Uint16Array(129 * 129);
+    for (let z = 0; z < 129; ++z) {
+      for (let x = 0; x < 129; ++x) {
+        samples[z * 129 + x] = packed[Math.min(z, 1) * 2 + Math.min(x, 1)];
+      }
+    }
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,samples);
     for (let i = 0; i < 32; i++) {
       constants.set([scale, 1, 0, 0], 8 + i * 4);
     }
@@ -157,11 +165,11 @@ try {
   gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,2,2,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(4));
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(129*129));
   const readPixel=(x,y)=>{const out=[];for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);out.push(...b);}return out;};
   const compose=(baked,detail)=>{
     gl.useProgram(p);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.viewport(0,0,2,2);
-    constants.set([2,2,0,1],0);constants[5]=baked?1:0;
+    constants.set([2,2,0,1],0);constants[4]=baked?1:0;
     gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,0,0,1,0);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),0,0,1,0);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,constants?.[2192]||0,0,0);
@@ -221,7 +229,7 @@ try {
       gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0);
     }
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,0,0,0);
-    constants.set([size,size,2,1],0);constants[5]=1;
+    constants.set([size,size,2,1],0);constants[4]=1;
     gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.viewport(0,0,size,size);gl.drawArrays(gl.TRIANGLES,0,6);
     for(let y=0;y<size;y++)for(let x=0;x<size;x++){
@@ -258,7 +266,7 @@ try {
     gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
     constants.set([1,1,0,1],0);
-    constants.set([1,1,0,0],2324);constants.set([1,0,0,0],2328);constants[5]=1;
+    constants.set([1,1,0,0],2324);constants.set([1,0,0,0],2328);constants[4]=1;
     const material=repeat([0,0,0]);
     const at={x:.27,y:.31,span:.01};
     for(const n of [[255,128],[0,128],[128,255],[128,0],[210,210]]){
@@ -273,7 +281,7 @@ try {
       const normal=unit([ref[4]/127.5-1,ref[3]/127.5-1,ref[5]/127.5-1]);
       close(normal.map(v=>v*127.5+127.5),enc(decode(n)),'flat material recovers signed terrain normal',3);
       close(render(repeat([0,1,16]),at),render(repeat([1,1,0]),at),'height blending retained on cliffs',1);
-      constants[5]=0;const off=render(material,at);constants[5]=1;
+      constants[4]=0;const off=render(material,at);constants[4]=1;
       close(off.slice(0,3),ref.slice(0,3),'F11 does not change cliff color',0);
       close([off[4],off[3],off[5]],[128,128,255],'F11 OFF keeps tangent encoding',2);
     }
@@ -306,7 +314,7 @@ try {
     setNormal([128,128]);setHeight(.16);
     const flat=render(material,at);constants[2324]=0;
     close(render(material,at),flat,'flat ground preserves planar rendering',0);
-    constants[2324]=1;constants[5]=1;
+    constants[2324]=1;constants[4]=1;
     // Neighbor reference tiles agree at their shared endpoint, including when
     // the bake footprint crosses the boundary. The height field is continuous.
     setNormal([255,128]);constants[2328]=.5;

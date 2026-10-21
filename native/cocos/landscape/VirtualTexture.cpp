@@ -87,6 +87,49 @@ VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint m
     return {};
 }
 
+void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
+    // Return each input once, in sampling order. Clamped edge samples and the
+    // non-baked normal path may refer to the same tile many times.
+    const auto append = [&output](NodeAddress source) {
+        const auto duplicate = std::find_if(output.begin(), output.end(), [source](NodeAddress entry) {
+            return entry.key() == source.key();
+        });
+        if (duplicate == output.end()) {
+            output.push_back(source);
+        }
+    };
+    append(splat);
+    for (const auto source : normals) {
+        append(source);
+    }
+}
+
+VTPageSources VirtualTexture::sources(VTPageAddress page, bool bakeNormals) const {
+    const auto sourceLevelForSize = [this](float size) {
+        uint32_t level = _data.minTileLevel;
+        while (level < _data.maxLevel && _data.nodeSize(level) < size) {
+            ++level;
+        }
+        return level;
+    };
+    const float size = _layout.pageSize(page.level);
+    VTPageSources result;
+    result.splat = _data.nodeAtClamped(sourceLevelForSize(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
+    if (!bakeNormals) {
+        result.normals.fill(result.splat);
+        return result;
+    }
+    // Match source height density to the output page, including its filtering ring.
+    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
+    const uint32_t level = sourceLevelForSize(target);
+    for (uint32_t row = 0; row < 4; ++row) {
+        for (uint32_t col = 0; col < 4; ++col) {
+            result.normals[row * 4 + col] = _data.nodeAtClamped(level, {(page.x - 0.25F + col * 0.5F) * size, (page.z - 0.25F + row * 0.5F) * size});
+        }
+    }
+    return result;
+}
+
 bool VirtualTexture::init(const LandscapeData &data, uint32_t capacity) {
     if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
         return false;

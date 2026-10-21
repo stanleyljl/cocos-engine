@@ -16,7 +16,7 @@ CCEffect %{
         decalControl: { value: [1, 0, 0, 0] }
         decalHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         rvtNormalParams: { value: [1, 0, 0, 0] }
-        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp } }
+        vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         # Runtime texture arrays are bound by LandscapeRenderer before the
@@ -170,6 +170,25 @@ CCProgram landscape-vertex %{
     return true;
   }
 
+  void buildDecalTerrainBlock(vec2 block, out vec4 p[9]) {
+    // All morph targets are the even corners of this block. Sample each
+    // original height once, then reuse those corners when morphing in place.
+    // Even corners retain their height, so traversal order cannot change it.
+    for (int z = 0; z < 3; ++z) {
+      for (int x = 0; x < 3; ++x) {
+        vec2 localXZ = a_gridInst.xy + (block + vec2(float(x), float(z))) * (a_gridInst.z / 16.0);
+        p[z * 3 + x] = vec4(localXZ.x, sampleHeight(localXZ), localXZ.y, 0.0);
+      }
+    }
+    for (int z = 0; z < 3; ++z) {
+      for (int x = 0; x < 3; ++x) {
+        int i = z * 3 + x;
+        int target = (z / 2 * 2) * 3 + (x / 2 * 2);
+        p[i] = morphTerrainVertex(block + vec2(float(x), float(z)), p[i].y, p[target].y);
+      }
+    }
+  }
+
   vec4 decalTerrainAt(vec2 xz) {
     // Even vertices never move in XZ; a morphing 2x2 cell block keeps its
     // footprint. Invert its triangles to find Y at the FIXED decal position.
@@ -178,19 +197,17 @@ CCProgram landscape-vertex %{
     vec2 grid = (xz - a_gridInst.xy) / a_gridInst.z * 16.0;
     vec2 block = clamp(floor(grid * 0.5) * 2.0, vec2(0.0), vec2(14.0));
     vec4 p[9];
-    for (int z = 0; z < 3; ++z) {
-      for (int x = 0; x < 3; ++x) {
-        p[z * 3 + x] = terrainVertex((block + vec2(float(x), float(z))) / 16.0);
-      }
-    }
+    buildDecalTerrainBlock(block, p);
     vec2 heightMorph;
     for (int z = 0; z < 2; ++z) {
       for (int x = 0; x < 2; ++x) {
         int i = z * 3 + x;
-        if (decalTriangleHeight(xz, p[i], p[i + 1], p[i + 3], heightMorph))
+        if (decalTriangleHeight(xz, p[i], p[i + 1], p[i + 3], heightMorph)) {
           return vec4(xz.x, heightMorph.x, xz.y, heightMorph.y);
-        if (decalTriangleHeight(xz, p[i + 4], p[i + 3], p[i + 1], heightMorph))
+        }
+        if (decalTriangleHeight(xz, p[i + 4], p[i + 3], p[i + 1], heightMorph)) {
           return vec4(xz.x, heightMorph.x, xz.y, heightMorph.y);
+        }
       }
     }
     // Only reached for coordinates outside the node or roundoff at its edge.
@@ -232,7 +249,7 @@ CCProgram landscape-vertex %{
       v_lod = a_gridInst.w;
     #endif
   #endif
-    float height = sampleHeight(localXZ);
+    float height;
   #if __VERSION__ >= 300 && USE_INSTANCING
     vec4 base;
     base = decalTerrainAt(a_decalGrid.xy + In.position.xy * a_decalGrid.zw);
@@ -245,6 +262,8 @@ CCProgram landscape-vertex %{
     base.y += v_decalLift;
     localXZ = base.xz;
     height = base.y;
+  #else
+    height = sampleHeight(localXZ);
   #endif
   #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
     // Use the final local coordinates for geometry and terrain normal sampling.

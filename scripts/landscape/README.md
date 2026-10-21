@@ -203,7 +203,7 @@ sources are only resolved a second time if uploads changed the available data.
 
 `Landscape.rvtNormalEnabled` switches between cached normals and the original
 geometry-LOD normal blend. Switching invalidates pages; permanent roots provide
-a fallback until fine pages are rebuilt. Changes defer while residency is frozen.
+a fallback until fine pages are rebuilt.
 `Landscape.decal3DEnabled` controls raised decal geometry independently.
 
 Restart Creator, rebuild the project, then rebuild the native executable so
@@ -235,7 +235,7 @@ reference tiles remain resident in either mode. No material name or ID is
 selected by the engine. Planar decals compose after terrain materials.
 Reimport the terrain and rebuild project assets after changing its manifest.
 
-Projection changes defer while residency is frozen. Restart Creator, rebuild
+Restart Creator, rebuild
 the project, then rebuild native code after engine TypeScript, Effect or native
 binding changes. Shortcut assignments belong to the application.
 

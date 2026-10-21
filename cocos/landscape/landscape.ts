@@ -145,44 +145,44 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(4)
-    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.freezeLod.tooltip')
-    public freezeLod = false;
-
-    @serializable
-    @editable
-    @displayOrder(5)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.unlit.tooltip')
     public unlit = false;
 
     @serializable
     @editable
-    @displayOrder(6)
+    @displayOrder(5)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showVTAtlas.tooltip')
     public showVTAtlas = false;
 
     @serializable
     @editable
-    @displayOrder(7)
+    @displayOrder(6)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.cliffEnabled.tooltip')
     public cliffEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(8)
+    @displayOrder(7)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.heightBlendEnabled.tooltip')
     public heightBlendEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(9)
+    @displayOrder(8)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.bakeNormalEnabled.tooltip')
     public bakeNormalEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(10)
+    @displayOrder(9)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.decal3DEnabled.tooltip')
     public decal3DEnabled = true;
+
+    @serializable
+    @editable
+    @displayOrder(10)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.physicsWireframe.tooltip')
+    public physicsWireframe = false;
 
 }
 
@@ -400,8 +400,8 @@ export class Landscape extends Component {
      * Returns a nonzero ID local to this Landscape, or 0 if unavailable, out of bounds,
      * the layer is not loaded, or capacity is full. Malformed parameters throw RangeError.
      * Authored and runtime decals share a limit of 512 instances. New decals compose
-     * above existing ones. VT refresh uses the normal page budget and is deferred
-     * while LOD/VT is frozen. Decals do not change collision or sampleSurface results.
+     * above existing ones. VT refresh uses the normal page budget.
+     * Decals do not change collision or sampleSurface results.
      * Runtime instances are discarded on disable or asset replacement, not serialized.
      */
     public addDecal (decal: Readonly<LandscapeDecal>): number {
@@ -550,13 +550,13 @@ export class Landscape extends Component {
             | (Number(data.lodColor) << 1)
             | (Number(data.showRanges) << 2)
             | (Number(data.showBox) << 3)
-            | (Number(data.freezeLod) << 4)
-            | (Number(data.unlit) << 5)
-            | (Number(data.showVTAtlas) << 6)
-            | (Number(data.cliffEnabled) << 7)
-            | (Number(data.heightBlendEnabled) << 8)
-            | (Number(data.bakeNormalEnabled) << 9)
-            | (Number(data.decal3DEnabled) << 10);
+            | (Number(data.unlit) << 4)
+            | (Number(data.showVTAtlas) << 5)
+            | (Number(data.cliffEnabled) << 6)
+            | (Number(data.heightBlendEnabled) << 7)
+            | (Number(data.bakeNormalEnabled) << 8)
+            | (Number(data.decal3DEnabled) << 9)
+            | (Number(data.physicsWireframe) << 10);
         if (flags === this._appliedDebugFlags) {
             return;
         }
@@ -615,13 +615,12 @@ export class Landscape extends Component {
             return;
         }
         // Snapshot the main-camera LOD position. Native pass collection traverses
-        // each current frustum independently, including while LOD/VT is frozen.
+        // each current frustum independently.
         this._native.update();
     }
 
     private _beforeDraw (): void {
-        // Immediate-mode debug boxes must be re-submitted every frame, even while
-        // LOD is frozen.
+        // Immediate-mode debug boxes must be re-submitted every frame.
         if (this._debugData.showBox) {
             this._native?.drawDebugBounds();
         }

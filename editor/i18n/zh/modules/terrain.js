@@ -52,20 +52,20 @@ module.exports = {
                     showRanges: {
                         tooltip: '显示 LOD 距离范围和 Sector 边界。',
                     },
-                    freezeLod: {
-                        tooltip: '就绪后冻结主相机 LOD 位置和 VT 数据，各 Pass 仍按当前视锥剔除。',
-                    },
                     cliffEnabled: {
-                        tooltip: '悬崖三平面投影，结果缓存到 RVT。冻结时的切换在解冻后生效。',
+                        tooltip: '悬崖三平面投影，结果缓存到 RVT。',
                     },
                     heightBlendEnabled: {
-                        tooltip: '开启高度混合；关闭使用线性权重混合。切换后重新生成 VT；冻结期间的修改在解冻后生效。',
+                        tooltip: '开启高度混合；关闭使用线性权重混合。切换后重新生成 VT。',
                     },
                     bakeNormalEnabled: {
-                        tooltip: '将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。冻结期间的切换在解冻后生效。',
+                        tooltip: '将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。',
                     },
                     decal3DEnabled: {
-                        tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。冻结时仍可即时切换。',
+                        tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。',
+                    },
+                    physicsWireframe: {
+                        tooltip: '显示已加载的地形碰撞网格，由项目物理调试视图读取此开关并绘制线框。',
                     },
                 },
             },

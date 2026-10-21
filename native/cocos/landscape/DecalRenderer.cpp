@@ -35,9 +35,13 @@
 #include "landscape/GridMesh.h"
 #include "landscape/MaterialLibrary.h"
 #include "renderer/gfx-base/GFXDevice.h"
+#include "renderer/gfx-base/GFXFramebuffer.h"
 #include "renderer/gfx-base/GFXTexture.h"
+#include "renderer/pipeline/InstancedBuffer.h"
+#include "renderer/pipeline/PipelineStateManager.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
+#include "scene/RenderWindow.h"
 
 namespace cc {
 namespace landscape {
@@ -76,7 +80,7 @@ static void setLandscapeInstanceAttribute(scene::Model *model, TypedArray &scrat
     model->setInstancedAttribute(name, scratch);
 }
 
-void LandscapeSurfaceInstance::apply(scene::Model *model, TypedArray &scratch) const {
+void LandscapeGridParams::apply(scene::Model *model, TypedArray &scratch) const {
     setLandscapeInstanceAttribute(model, scratch, "a_gridInst", grid);
     setLandscapeInstanceAttribute(model, scratch, "a_tileInst", tile);
     setLandscapeInstanceAttribute(model, scratch, "a_mappingInst", mapping);
@@ -102,9 +106,16 @@ bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm
     _wire = createDecalMaterial(true, heightUnorm);
     _mesh = GridMesh::create(Root::getInstance()->getDevice(), 16);
     _scratch = Float32Array(4);
-    return _mesh && _solid && _wire &&
-           _solid->getPasses() && !_solid->getPasses()->empty() &&
-           _wire->getPasses() && !_wire->getPasses()->empty();
+    if (!_mesh || !_solid || !_wire ||
+        !_solid->getPasses() || _solid->getPasses()->empty() ||
+        !_wire->getPasses() || _wire->getPasses()->empty()) {
+        return false;
+    }
+    // Keep a disabled model for the first real draw and warm its pipelines.
+    // Creating shader objects alone does not compile programs on GLES3.
+    _pool.push_back(createModel());
+    warmupPipelines();
+    return true;
 }
 
 std::array<Material *, 2> DecalRenderer::materials() const {
@@ -172,7 +183,7 @@ void DecalRenderer::initializeInstance(Instance &instance) {
 }
 
 bool DecalRenderer::addDecal(uint32_t id, const LandscapeAsset::Decal &decal) {
-    if (!_asset || id == 0 || _instances.size() >= config::DECAL_INSTANCE_MAX) {
+    if (id == 0 || _instances.size() >= config::DECAL_INSTANCE_MAX) {
         return false;
     }
     const auto &data = _asset->data();
@@ -289,7 +300,7 @@ void DecalRenderer::uploadPageDecals() {
 }
 
 void DecalRenderer::updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged) {
-    node.surface.apply(draw.model, _scratch);
+    node.gridParams.apply(draw.model, _scratch);
     if (boundsChanged) {
         const auto &d = _instances[draw.decal].decal;
         const float lift = _asset->decalLayers()[d.layer].heightScale;
@@ -326,13 +337,7 @@ void DecalRenderer::appendDecal(NodeDraws &node, uint32_t decal) {
         for (int ix = firstX; ix < endX; ++ix) {
             IntrusivePtr<scene::Model> model;
             if (_pool.empty()) {
-                model = Root::getInstance()->createModel<scene::Model>();
-                model->setNode(_node);
-                model->setTransform(_node);
-                model->setCastShadow(_castShadow);
-                model->setReceiveShadow(_receiveShadow);
-                model->initSubModel(0, _mesh, _wireframe ? _wire.get() : _solid.get());
-                model->attachToScene(_scene);
+                model = createModel();
             } else {
                 model = std::move(_pool.back());
                 _pool.pop_back();
@@ -347,6 +352,35 @@ void DecalRenderer::appendDecal(NodeDraws &node, uint32_t decal) {
     // Preserve composition order when a lower-index decal enters range later.
     std::inplace_merge(node.draws.begin(), node.draws.begin() + firstDraw, node.draws.end(),
                        [](const Draw &a, const Draw &b) { return a.decal < b.decal; });
+}
+
+IntrusivePtr<scene::Model> DecalRenderer::createModel() {
+    auto *model = Root::getInstance()->createModel<scene::Model>();
+    model->setNode(_node);
+    model->setTransform(_node);
+    model->setCastShadow(_castShadow);
+    model->setReceiveShadow(_receiveShadow);
+    model->initSubModel(0, _mesh, _wireframe ? _wire.get() : _solid.get());
+    model->setEnabled(false);
+    model->attachToScene(_scene);
+    return model;
+}
+
+void DecalRenderer::warmupPipelines() {
+    if (_pool.empty()) {
+        return;
+    }
+    auto *subModel = _pool.back()->getSubModels().front().get();
+    auto *renderPass = Root::getInstance()->getMainWindow()->getFramebuffer()->getRenderPass();
+    const auto &passes = *subModel->getPasses();
+    for (uint32_t i = 0; i < passes.size(); ++i) {
+        // Build the real instanced layout without adding a draw to a live queue.
+        pipeline::InstancedBuffer instances(passes[i]);
+        instances.merge(subModel, i);
+        for (const auto &instance : instances.getInstances()) {
+            pipeline::PipelineStateManager::getOrCreatePipelineState(passes[i], instance.shader, instance.ia, renderPass);
+        }
+    }
 }
 
 void DecalRenderer::recycle(Draw &draw) {
@@ -385,9 +419,6 @@ void DecalRenderer::updateNode(const TerrainNode &node) {
 
 void DecalRenderer::updateView(const Vec3 &viewPosition) {
     _viewPosition = viewPosition;
-    if (!_asset) {
-        return;
-    }
     const Vec3 localView = viewPosition - _node->getWorldPosition();
     enum class ViewChange : uint8_t {
         NONE,
@@ -493,6 +524,8 @@ void DecalRenderer::onGlobalPipelineStateChanged() {
     for (const auto &model : _pool) {
         model->onGlobalPipelineStateChanged();
     }
+    // Scene activation can change fog/shadow macros after material initialization.
+    warmupPipelines();
 }
 
 void DecalRenderer::setEnabled(bool enabled) {
@@ -519,6 +552,7 @@ void DecalRenderer::refreshMaterials() {
         model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
     }
     refreshInstances(_viewPosition);
+    warmupPipelines();
 }
 
 void DecalRenderer::setCastShadow(bool enabled) {
@@ -543,7 +577,7 @@ void DecalRenderer::setReceiveShadow(bool enabled) {
     for (const auto &model : _pool) {
         model->setReceiveShadow(enabled);
     }
-    // Variant changes can rebuild instance layouts, including frozen models.
+    // Variant changes can rebuild instance layouts; restore all active bindings.
     refreshMaterials();
 }
 

@@ -48,10 +48,10 @@ class RenderScene;
 namespace landscape {
 class MaterialLibrary;
 
-// Resolved terrain sources shared by terrain and displaced decal instances.
-struct LandscapeSurfaceInstance {
-    Vec4 grid;
-    Vec4 tile;
+// Shader instance parameters for one grid, shared by terrain and displaced decals.
+struct LandscapeGridParams {
+    Vec4 grid; // landscape-local XZ origin, size, geometry LOD
+    Vec4 tile; // source tile XZ origin, size, texture array layer
     Vec4 mapping; // local table slot, coarser/finer neighbor edge masks, unused W
     void apply(scene::Model *model, TypedArray &scratch) const;
 };
@@ -66,7 +66,7 @@ public:
         LandscapeRegion region;
         float minY{0};
         float maxY{0};
-        LandscapeSurfaceInstance surface;
+        LandscapeGridParams gridParams;
     };
 
     DecalRenderer();
@@ -128,6 +128,8 @@ private:
     void updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged);
     void appendDecal(NodeDraws &node, uint32_t decal);
     void initializeInstance(Instance &instance);
+    IntrusivePtr<scene::Model> createModel();
+    void warmupPipelines();
     void recycle(Draw &draw);
 
     IntrusivePtr<Node> _node;

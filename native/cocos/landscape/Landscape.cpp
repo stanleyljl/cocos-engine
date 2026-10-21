@@ -54,29 +54,6 @@
 
 namespace cc {
 namespace landscape {
-namespace {
-
-// Merge pass resource requests while preserving every requested quadrant.
-void mergeNodeSelections(ccstd::vector<QuadNode> &nodes) {
-    std::sort(nodes.begin(), nodes.end(), [](const QuadNode &a, const QuadNode &b) {
-        return a.address().key() < b.address().key();
-    });
-    size_t count = 0;
-    for (const auto &node : nodes) {
-        if (count > 0 && nodes[count - 1].address().key() == node.address().key()) {
-            auto &merged = nodes[count - 1];
-            merged.quadrantMask |= node.quadrantMask;
-            merged.minY = std::min(merged.minY, node.minY);
-            merged.maxY = std::max(merged.maxY, node.maxY);
-        } else {
-            nodes[count++] = node;
-        }
-    }
-    nodes.resize(count);
-}
-
-} // namespace
-
 Landscape::Landscape() = default;
 
 Landscape::~Landscape() {
@@ -117,10 +94,7 @@ void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
         return;
     }
     auto renderer = std::make_unique<LandscapeRenderer>();
-    if (!renderer->init(_node.get(), _scene)) {
-        return;
-    }
-    if (!renderer->setAsset(asset.get())) {
+    if (!renderer->init(_node.get(), _scene, asset.get())) {
         return;
     }
     renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
@@ -184,7 +158,7 @@ void Landscape::onDisable() {
     }
     _passes.clear();
     _passCount = 0;
-    _geometryNodes.clear();
+    _selectedNodes.clear();
     _renderer = nullptr;
     _quadtree = nullptr;
     _query = nullptr;
@@ -209,15 +183,10 @@ bool Landscape::removeDecal(uint32_t id) {
 }
 
 void Landscape::update() {
-    if (_query) {
-        _query->update(); // No camera or render-readiness dependency.
-    }
-    if (!_node || !_renderer || !_quadtree || !_renderer->valid()) {
+    if (!_renderer) {
         return;
     }
-    if (_debugData.freezeLod && _renderer->isReady()) {
-        return;
-    }
+    _query->update(); // No camera or render-readiness dependency.
     auto *camera = pickMainCamera();
     if (!camera) {
         return;
@@ -227,16 +196,16 @@ void Landscape::update() {
     _renderer->setViewPos(_lodViewPosition);
 }
 
-void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow) {
+void Landscape::selectPass(const geometry::Frustum &frustum, bool shadow, ExpectedTree &expected) {
     if (_passCount == _passes.size()) {
         _passes.emplace_back();
     }
     auto &pass = _passes[_passCount++];
     pass.frustum = &frustum;
     pass.shadow = shadow;
-    pass.nodes.clear();
     pass.models.clear();
-    _visibilityDistanceWarning |= selectNodes(frustum, pass.nodes, !shadow);
+    _visibilityDistanceWarning |= selectNodes(frustum, _selectedNodes, !shadow);
+    expected.include(_selectedNodes, !shadow);
 }
 
 bool Landscape::queryTransformValid() const {
@@ -320,7 +289,7 @@ bool Landscape::selectNodes(const geometry::Frustum &frustum, ccstd::vector<Quad
 
 void Landscape::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
     _passCount = 0;
-    if (!_renderer || !_quadtree || !_renderer->valid()) {
+    if (!_renderer) {
         return;
     }
     const auto layer = _node->getLayer();
@@ -331,13 +300,14 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     _visibilityDistanceWarning = false;
 
     // The first selection is the only color pass in this forward camera batch.
-    selectPass(camera.getFrustum(), false);
-    const uint32_t cascadesToDeduplicate = selectShadowPasses(sceneData);
+    ExpectedTree expected(_asset->data().maxLevel);
+    selectPass(camera.getFrustum(), false, expected);
+    const uint32_t cascadesToDeduplicate = selectShadowPasses(sceneData, expected);
     reportVisibilityDistanceStatus();
-    finalizePassSelection(cascadesToDeduplicate);
+    finalizePassSelection(cascadesToDeduplicate, std::move(expected));
 }
 
-uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
+uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneData, ExpectedTree &expected) {
     uint32_t cascadesToDeduplicate = 0;
     const auto *shadows = sceneData.getShadows();
     if (_castShadow && shadows && shadows->isEnabled() && shadows->getType() == scene::ShadowType::SHADOW_MAP) {
@@ -345,14 +315,14 @@ uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneD
         const auto *csmLayers = sceneData.getCSMLayers();
         if (mainLight && mainLight->isShadowEnabled()) {
             if (mainLight->isShadowFixedArea()) {
-                selectPass(csmLayers->getSpecialLayer()->getValidFrustum(), true);
+                selectPass(csmLayers->getSpecialLayer()->getValidFrustum(), true, expected);
             } else {
                 const uint32_t count = sceneData.getCSMSupported() ? static_cast<uint32_t>(mainLight->getCSMLevel()) : 1U;
                 if (mainLight->getCSMOptimizationMode() == scene::CSMOptimizationMode::REMOVE_DUPLICATES) {
                     cascadesToDeduplicate = count;
                 }
                 for (uint32_t i = 0; i < count; ++i) {
-                    selectPass(csmLayers->getLayers()[i]->getValidFrustum(), true);
+                    selectPass(csmLayers->getLayers()[i]->getValidFrustum(), true, expected);
                 }
             }
         }
@@ -362,7 +332,7 @@ uint32_t Landscape::selectShadowPasses(const pipeline::PipelineSceneData &sceneD
             }
             const auto *spot = static_cast<const scene::SpotLight *>(light);
             if (spot->isShadowEnabled()) {
-                selectPass(spot->getFrustum(), true);
+                selectPass(spot->getFrustum(), true, expected);
             }
         }
     }
@@ -383,17 +353,9 @@ void Landscape::reportVisibilityDistanceStatus() {
     }
 }
 
-void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate) {
-    // Only residency/model storage is shared. Each pass keeps its own root traversal result.
-    auto &surfaceNodes = _passes.front().nodes;
-    mergeNodeSelections(surfaceNodes);
-    _geometryNodes.clear();
-    for (size_t i = 0; i < _passCount; ++i) {
-        const auto &nodes = _passes[i].nodes;
-        _geometryNodes.insert(_geometryNodes.end(), nodes.begin(), nodes.end());
-    }
-    mergeNodeSelections(_geometryNodes);
-    _renderer->preparePasses(_geometryNodes, surfaceNodes);
+void Landscape::finalizePassSelection(uint32_t cascadesToDeduplicate, ExpectedTree expected) {
+    // Demand is shared; actual visibility is independently culled from CurrentTree.
+    _renderer->preparePasses(std::move(expected));
     for (size_t i = 0; i < _passCount; ++i) {
         auto &pass = _passes[i];
         _renderer->collectPassModels(*pass.frustum, pass.shadow, pass.models);

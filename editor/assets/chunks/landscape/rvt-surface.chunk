@@ -20,8 +20,7 @@
 #endif
 
 #if __VERSION__ >= 300
-void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY,
-                               out vec2 atlasUV, out vec2 atlasDX, out vec2 atlasDY) {
+void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY, out vec2 atlasUV, out vec2 atlasDX, out vec2 atlasDY) {
   // One local entry per grid cell; geometry and material resolution are independent.
   ivec2 cell = ivec2(clamp(floor((localXZ - v_vtParams.xy) * (16.0 / v_vtParams.z)), vec2(0.0), vec2(15.0)));
   int entry = int(v_vtParams.w + 0.5) * 256 + cell.y * 16 + cell.x;
@@ -50,8 +49,7 @@ void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY,
   atlasDY *= footprintScale;
 }
 
-void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY,
-                          out vec4 cachedAlbedo, out vec4 normalRoughnessAO) {
+void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY, out vec4 cachedAlbedo, out vec4 normalRoughnessAO) {
   vec2 atlasUV;
   vec2 atlasDX;
   vec2 atlasDY;

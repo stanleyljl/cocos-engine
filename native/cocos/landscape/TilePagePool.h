@@ -23,12 +23,12 @@
 ****************************************************************************/
 
 #pragma once
-#include <array>
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
-#include "landscape/VirtualTexture.h"
+#include "landscape/LandscapeData.h"
+#include "math/Vec4.h"
 namespace cc {
 namespace gfx {
 class Device;
@@ -37,6 +37,7 @@ class Sampler;
 } // namespace gfx
 namespace landscape {
 class LandscapeAsset;
+// Each physical slot holds a source tile's height, splat and normal data.
 // Physical slots are reserved BEFORE starting IO. In-flight work is bounded;
 // only the coordinator's exact working set may be uploaded. Source mapping and
 // shader bindings use exact resident tiles, with no missing-source fallback.
@@ -61,9 +62,6 @@ public:
     int resident(NodeAddress source) const;
     Tile resolve(NodeAddress node) const;
     Vec4 shaderParams(const Tile &tile) const;
-    // Append unique source addresses in sampling order.
-    void pageSources(VTPageAddress page, bool bakeNormals, ccstd::vector<NodeAddress> &output) const;
-    bool resolvePage(VTPageAddress page, bool bakeNormals, VTPageInputs &output) const;
     bool ready() const;
     gfx::Texture *heightArray() const { return _heightArray; }
     gfx::Texture *splatArray() const { return _splatArray; }
@@ -79,13 +77,11 @@ private:
         bool ready{false};
     };
     bool validSource(NodeAddress source) const;
-    uint32_t sourceLevelForSize(float size) const;
-    NodeAddress splatSource(VTPageAddress page) const;
-    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normalSources(VTPageAddress page, bool bakeNormals) const;
     bool initTextures();
     void initSamplers();
     void uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
+
     gfx::Device *_device{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
     IntrusivePtr<gfx::Texture> _heightArray;
@@ -96,7 +92,6 @@ private:
     bool _heightUnorm{false};
     // Slot ownership and the exact working set share the same lifetime as the pool.
     LandscapeData _data;
-    VTPageLayout _vtLayout;
     uint32_t _capacity{0};
     ccstd::unordered_map<uint64_t, Slot> _slots;
     ccstd::vector<NodeAddress> _working;

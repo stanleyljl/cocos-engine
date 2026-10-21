@@ -56,6 +56,7 @@ namespace landscape {
 
 class LandscapeAsset;
 class LandscapeRenderer;
+class ExpectedTree;
 class LandscapeQuery;
 
 struct LandscapeDebugData {
@@ -63,13 +64,13 @@ struct LandscapeDebugData {
     bool lodColor{false};
     bool showRanges{false};
     bool showBox{false};
-    bool freezeLod{false};
     bool unlit{false};
     bool showVTAtlas{false};
     bool cliffEnabled{true};
     bool heightBlendEnabled{true};
     bool bakeNormalEnabled{true};
     bool decal3DEnabled{true};
+    bool physicsWireframe{false};
 };
 
 class Landscape : public RefCounted {
@@ -120,10 +121,10 @@ private:
     void applyRendererSettings(LandscapeRenderer &renderer) const;
     void logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const;
     scene::Camera *pickMainCamera() const;
-    void selectPass(const geometry::Frustum &frustum, bool shadow);
-    uint32_t selectShadowPasses(const pipeline::PipelineSceneData &sceneData);
+    void selectPass(const geometry::Frustum &frustum, bool shadow, ExpectedTree &expected);
+    uint32_t selectShadowPasses(const pipeline::PipelineSceneData &sceneData, ExpectedTree &expected);
     void reportVisibilityDistanceStatus();
-    void finalizePassSelection(uint32_t cascadesToDeduplicate);
+    void finalizePassSelection(uint32_t cascadesToDeduplicate, ExpectedTree expected);
     void removeCSMDuplicates(uint32_t cascadeCount);
     bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes, bool preloadNearby = false);
     bool queryTransformValid() const;
@@ -131,14 +132,14 @@ private:
     struct PassSelection {
         const geometry::Frustum *frustum{nullptr};
         bool shadow{false};
-        ccstd::vector<QuadNode> nodes;
         ccstd::vector<const scene::Model *> models;
     };
     ccstd::vector<PassSelection> _passes;
     size_t _passCount{0};
     bool _visibilityDistanceWarning{false};
     Vec3 _lodViewPosition;
-    ccstd::vector<QuadNode> _geometryNodes;
+    // Reused while accumulating pass demand; no per-pass target snapshots.
+    ccstd::vector<QuadNode> _selectedNodes;
 
     LandscapeDebugData _debugData;
     uint32_t _holeMode{0};

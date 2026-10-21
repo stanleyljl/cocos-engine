@@ -5,18 +5,23 @@
 #include "landscape/VTRenderer.h"
 #include "landscape/VirtualTexture.h"
 #include "base/Log.h"
+#include "core/geometry/AABB.h"
 #include "renderer/gfx-base/GFXTexture.h"
 
 #include <cstdlib>
 
 // This executable exercises the real TilePagePool reservation methods without
-// a device or asset loader. Fail immediately if a CPU test enters either path.
+// a device or asset loader. Tree tests use explicit targets rather than camera
+// selection. Fail immediately if a test enters any of these unprovided paths.
 namespace cc {
 LogLevel Log::slogLevel = LogLevel::INFO;
 void Log::logMessage(LogType, LogLevel, const char *, ...) {
     std::abort();
 }
 void gfx::Texture::initialize(const gfx::TextureInfo &) {
+    std::abort();
+}
+bool geometry::AABB::aabbFrustum(const geometry::Frustum &) const {
     std::abort();
 }
 bool landscape::LandscapeAsset::loadTileSet(uint32_t, uint32_t, uint32_t, gfx::Format, TileData &) const {
@@ -35,7 +40,6 @@ namespace cc::landscape {
 struct LandscapePagingTestAccess {
     static void initPool(TilePagePool &pool, const LandscapeData &data, uint32_t capacity) {
         pool._data = data;
-        pool._vtLayout = VTPageLayout(data.sectorSize);
         pool._capacity = capacity;
     }
     static auto &slots(TilePagePool &pool) {
@@ -74,11 +78,47 @@ ccstd::unordered_set<uint64_t> leafKeys(const CurrentTree &tree) {
 }
 
 ccstd::vector<NodeAddress> addedNodes(const CurrentTree::Change &change) {
-    ccstd::vector<NodeAddress> result;
-    for (const auto &entry : change.nodes) {
-        result.push_back(NodeAddress::fromKey(entry.first));
+    return change.added;
+}
+
+// Topology-only tests supply explicit synthetic bounds; production supplies
+// asset bounds and VT mappings through LandscapeSchedule's admitted transaction.
+void commitTopology(CurrentTree &tree, const CurrentTree::Change &change, const LandscapeData &data) {
+    ccstd::unordered_map<uint64_t, CurrentTree::EdgeMasks> oldEdges;
+    for (const auto &entry : tree.nodes()) {
+        oldEdges.emplace(entry.first, tree.edgeMasks(entry.second.geometry.address()));
     }
+    tree.clearChanges();
+    ccstd::vector<CurrentTree::Node> prepared;
+    for (const auto node : change.added) {
+        prepared.push_back({{node.level, node.x, node.z, data.minHeight(), data.maxHeight()}, {}});
+    }
+    tree.commit(change, prepared);
+    for (const auto node : change.removed) {
+        require(tree.changedNodes().count(node.key()) != 0, "Renderer was not notified of a removed node");
+    }
+    for (const auto &entry : tree.nodes()) {
+        const auto old = oldEdges.find(entry.first);
+        const auto edges = tree.edgeMasks(entry.second.geometry.address());
+        if (old == oldEdges.end() || old->second.coarser != edges.coarser || old->second.finer != edges.finer) {
+            require(tree.changedNodes().count(entry.first) != 0, "Renderer would retain stale morph edge constraints");
+        }
+    }
+}
+
+ccstd::vector<CurrentTree::Candidate> topologyCandidates(const CurrentTree &tree, const ExpectedTree &expected) {
+    auto result = tree.candidates(expected);
+    result.erase(std::remove_if(result.begin(), result.end(), [](const auto &candidate) {
+        return candidate.operation == CurrentTree::Operation::REFRESH;
+    }), result.end());
     return result;
+}
+
+ExpectedTree demand(uint32_t maxLevel, const ccstd::vector<QuadNode> &geometry, const ccstd::vector<QuadNode> &surface = {}) {
+    ExpectedTree expected(maxLevel);
+    expected.include(geometry, false);
+    expected.include(surface, true);
+    return expected;
 }
 
 void collectUpdates(const VirtualTexture &pages, ccstd::vector<uint32_t> &updates, uint32_t budget) {
@@ -393,9 +433,9 @@ void testCapacityLimitedTransitions() {
             roots.push_back(n); materials.push_back({n.level, n.x, n.z});
         }
         require(heights.reserve(roots) && pages.reserve(materials), "exact root capacity must fit");
-        expected.target({QuadNode{0, 15, 15, 0, 1}});
+        expected = demand(d.maxLevel, {QuadNode{0, 15, 15, 0, 1}}, {});
         bool planned = false;
-        for (const auto &request : selection.requests(expected)) {
+        for (const auto &request : topologyCandidates(selection, expected)) {
             CurrentTree::Change change;
             if (!selection.plan(request, change)) continue;
             planned = true;
@@ -448,11 +488,11 @@ void testCapacityLimitedTransitions() {
                                      QuadNode{0, 0, 0, 0, 1}, QuadNode{0, 31, 0, 0, 1},
                                      QuadNode{0, 0, 31, 0, 1}, QuadNode{0, 31, 31, 0, 1},
                                      QuadNode{0, 16, 16, 0, 1}, QuadNode{0, 15, 15, 0, 1}}) {
-                expected.target({target});
+                expected = demand(d.maxLevel, {target}, {});
                 bool settled = false;
                 for (uint32_t step = 0; step < 256; ++step) {
                     bool changed = false;
-                    for (const auto &request : selection.requests(expected)) {
+                    for (const auto &request : topologyCandidates(selection, expected)) {
                         CurrentTree::Change change;
                         if (!selection.plan(request, change)) continue;
                         const auto before = leafKeys(selection);
@@ -467,7 +507,7 @@ void testCapacityLimitedTransitions() {
                             complete(delayed ? 1U : capacities.second);
                             require(leafKeys(selection) == before, "incomplete pages changed committed coverage");
                         } while (!pages.ready());
-                        selection.commit(change);
+                        commitTopology(selection, change, d);
                         require(reserve({}), "committed cut exceeds capacity");
                         checkCut(selection, d);
                         checkStitchedEdges(selection, d);
@@ -516,7 +556,7 @@ void testLocalTransitions() {
     for (uint32_t frame = 0; frame < 1600; ++frame) {
         const uint32_t quadrant = frame / 200;
         const uint32_t x = quadrant & 1 ? 16 : 15, z = quadrant & 2 ? 16 : 15;
-        expected.target({{0, x, z, 0, 1}});
+        expected = demand(d.maxLevel, {{0, x, z, 0, 1}}, {});
         auto resources = [&](const CurrentTree::Change &change) {
             ccstd::vector<NodeAddress> result;
             ccstd::unordered_set<uint64_t> unique;
@@ -546,7 +586,7 @@ void testLocalTransitions() {
             return result;
         };
         if (pending.empty()) {
-            for (const auto &request : selection.requests(expected)) {
+            for (const auto &request : topologyCandidates(selection, expected)) {
                 CurrentTree::Change change;
                 if (!selection.plan(request, change)) {
                     continue;
@@ -578,7 +618,7 @@ void testLocalTransitions() {
         pages.publish(updates);
         const bool ready = std::all_of(LandscapePagingTestAccess::working(heights).begin(), LandscapePagingTestAccess::working(heights).end(), [&](auto n) { return heights.resident(n) >= 0; });
         if (ready && pages.ready() && !pending.empty()) {
-            selection.commit(pending);
+            commitTopology(selection, pending, d);
             // Verify the production commit changed precisely the requested set.
             auto expected = before;
             for (auto n : pending.removed) {
@@ -625,8 +665,8 @@ void testIndexedDemand() {
                 continue;
             }
             CurrentTree::Change change;
-            require(selection.plan({n, true, 1}, change), "Uniform subdivision");
-            selection.commit(change);
+            require(selection.plan({n, CurrentTree::Operation::SPLIT}, change), "Uniform subdivision");
+            commitTopology(selection, change, d);
             changed = true;
             break;
         }
@@ -639,10 +679,10 @@ void testIndexedDemand() {
     for (uint32_t i = 0; i < 4096; ++i) {
         target.push_back({0, random() % 48U, random() % 48U, 0, 1});
     }
-    expected.target(target);
+    expected = demand(d.maxLevel, target, {});
     ccstd::unordered_set<uint64_t> indexed;
-    for (const auto &request : selection.requests(expected)) {
-        if (request.split) {
+    for (const auto &request : topologyCandidates(selection, expected)) {
+        if (request.operation == CurrentTree::Operation::SPLIT) {
             indexed.insert(request.node.key());
         }
     }
@@ -688,23 +728,23 @@ void testCommittedVisibility() {
         });
         return result;
     };
-    expected.target({}); // The distance/target traversal selected nothing.
+    expected = demand(d.maxLevel, {}, {}); // The distance/target traversal selected nothing.
     const auto coarse = visible(0.25, 0.25, 0.75, 0.75);
     require(coarse.size() == 1 && coarse.count(NodeAddress{5, 0, 0}.key()),
             "An empty fine selection hid visible coarse geometry");
-    expected.target({{0, 0, 0, 0, 0}});
+    expected = demand(d.maxLevel, {{0, 0, 0, 0, 0}}, {});
     CurrentTree::Change pending;
-    const auto requests = selection.requests(expected);
+    const auto requests = topologyCandidates(selection, expected);
     require(!requests.empty() && selection.plan(requests.front(), pending), "Visibility transition setup");
     require(visible(0.25, 0.25, 0.75, 0.75) == coarse,
             "Unpublished refinement changed pass visibility");
     // Commit refinement until the actual draw reaches the flat fine region.
     for (uint32_t round = 0; round < 100; ++round) {
         bool changed = false;
-        for (const auto &request : selection.requests(expected)) {
+        for (const auto &request : topologyCandidates(selection, expected)) {
             CurrentTree::Change change;
             if (selection.plan(request, change)) {
-                selection.commit(change);
+                commitTopology(selection, change, d);
                 changed = true;
                 break;
             }
@@ -791,45 +831,74 @@ void testExpectedTree() {
     ExpectedTree expected(data.maxLevel);
     const auto original = leafKeys(current);
     const ccstd::vector<QuadNode> target{{0, 1, 1, 0, 1}};
-    expected.target(target);
-    require(expected.matches(target) && !expected.matches({}), "target snapshot mismatch");
-    require(leafKeys(current) == original, "changing the expected tree must not mutate current coverage");
-    const auto requests = current.requests(expected);
+    const auto next = demand(data.maxLevel, target, target);
+    require(!(expected == next), "new demand must invalidate the plan");
+    expected = next;
+    require(expected == demand(data.maxLevel, target, target), "unchanged demand must not restart planning");
+    require(expected == demand(data.maxLevel, {target.front(), target.front()}, target), "duplicate demand is semantically unchanged");
+    require(expected.visible({3, 0, 0}) && expected.visible({0, 1, 1}) && !expected.visible({0, 7, 7}),
+            "visibility must overlap the selected path, not unrelated siblings");
+    require(leafKeys(current) == original, "changing demand must not mutate current coverage");
+    const auto requests = topologyCandidates(current, expected);
     require(!requests.empty(), "expected refinement must produce a local request");
     CurrentTree::Change change;
     require(current.plan(requests.front(), change), "local balanced change");
-    require(leafKeys(current) == original, "preparing a change must retain the current tree until resources are ready");
-    const auto preparedKey = change.nodes.begin()->first;
+    require(leafKeys(current) == original, "planning must retain coverage until resources are ready");
+    ccstd::vector<CurrentTree::Node> prepared;
+    for (const auto node : change.added) {
+        prepared.push_back({{node.level, node.x, node.z, 0.25F, 1.0F}, {}});
+    }
+    const auto preparedKey = change.added.front().key();
     const VTPageAddress preparedPage{1, 0, 0};
-    change.nodes.at(preparedKey).material.pages.push_back(preparedPage);
-    change.nodes.at(preparedKey).geometry.minY = 0.25F;
-    current.commit(change);
+    prepared.front().material.pages.push_back(preparedPage);
+    current.commit(change, prepared);
     require(current.nodes().at(preparedKey).material.pages.front().key() == preparedPage.key() &&
                 current.nodes().at(preparedKey).geometry.minY == 0.25F,
-            "committing topology must publish its prepared geometry and materials together");
+            "commit must publish prepared geometry and materials together");
     checkCut(current, data);
     checkStitchedEdges(current, data);
     current.clearChanges();
     const auto beforeMaterial = leafKeys(current);
-    CurrentTree::Change materialChange;
-    auto replacement = current.nodes().at(preparedKey);
-    replacement.material.pages = {{2, 0, 0}};
-    materialChange.nodes.emplace(preparedKey, std::move(replacement));
+    require(current.plan({NodeAddress::fromKey(preparedKey), CurrentTree::Operation::REFRESH}, change), "material refresh plan");
+    prepared = {current.nodes().at(preparedKey)};
+    prepared.front().material.pages = {{2, 0, 0}};
     require(current.nodes().at(preparedKey).material.pages.front().key() == preparedPage.key(),
             "preparing materials must retain the displayed mapping");
-    current.commit(materialChange);
+    current.commit(change, prepared);
     require(leafKeys(current) == beforeMaterial &&
                 current.nodes().at(preparedKey).material.pages.front().level == 2 &&
                 current.changedNodes().size() == 1 && current.changedNodes().count(preparedKey) == 1,
             "material-only commits must preserve topology and notify only their owner");
-    require(current.plan({{2, 1, 0}, true, 1}, change), "refine one child before an incomplete sibling merge");
-    current.commit(change);
-    require(!current.plan({{3, 0, 0}, false, 0}, change) && change.empty(),
+    require(current.plan({{2, 1, 0}, CurrentTree::Operation::SPLIT}, change), "refine one child before an incomplete sibling merge");
+    commitTopology(current, change, data);
+    require(!current.plan({{3, 0, 0}, CurrentTree::Operation::MERGE}, change) && change.empty(),
             "a rejected merge must not retain partially collected removals");
     const auto displayed = leafKeys(current);
-    expected.target({});
+    expected = demand(data.maxLevel, {}, {});
     require(leafKeys(current) == displayed, "a new target must not remove displayed nodes");
-    require(!current.requests(expected).empty(), "an empty target must allow resource-releasing merges");
+    require(!topologyCandidates(current, expected).empty(), "empty demand must allow resource-releasing merges");
+    expected = demand(data.maxLevel, {}, {{2, 0, 0, 0, 1}});
+    require(expected.visible({0, 3, 3}) && expected.visible({3, 0, 0}) && !expected.visible({0, 4, 4}),
+            "coarse color demand must cover descendants without covering its siblings");
+    const ccstd::vector<QuadNode> shadow{{0, 7, 7, 0, 1}};
+    const ccstd::vector<QuadNode> color{{1, 0, 0, 0, 1}};
+    ExpectedTree passes(data.maxLevel);
+    passes.include(shadow, false);
+    passes.include(color, true);
+    passes.include(shadow, false);
+    ExpectedTree reversed(data.maxLevel);
+    reversed.include(color, true);
+    reversed.include(shadow, false);
+    require(passes == reversed, "pass order and duplicate shadow demand must not restart planning");
+    require(passes.refinementPriority({1, 3, 3}) != 0 && !passes.visible({0, 7, 7}) && passes.visible({0, 0, 0}),
+            "shadow refinement must not acquire color-pass priority");
+    ccstd::unordered_set<uint64_t> refresh;
+    for (const auto candidate : current.candidates(passes)) {
+        if (candidate.operation == CurrentTree::Operation::REFRESH) {
+            require(refresh.insert(candidate.node.key()).second, "duplicate material candidate");
+        }
+    }
+    require(refresh == leafKeys(current), "every displayed leaf must retain a material update candidate");
 }
 
 void testCoordinateLayouts() {
@@ -989,7 +1058,51 @@ void testPageCompositionBudget() {
     std::cout << "PASS: shared page allowance, multiple commits and partial composition\n";
 }
 
+void testCompositionSources() {
+    auto data = cacheData(7);
+    data.sectorSize = 2048.0F;
+    data.minTileLevel = 3;
+    VirtualTexture pages;
+    require(pages.init(data), "Initialize source selection without a tile pool");
+    const auto interior = pages.sources({8, 2, 2}, true);
+    require(interior.splat.key() == NodeAddress{4, 2, 2}.key(), "Splat source must cover the entire page");
+    for (uint32_t row = 0; row < 4; ++row) {
+        for (uint32_t col = 0; col < 4; ++col) {
+            require(interior.normals[row * 4 + col].key() == NodeAddress{3, col + 3, row + 3}.key(), "Normal sources must preserve the 4x4 sampling order and gutter ring");
+        }
+    }
+    ccstd::vector<NodeAddress> sources;
+    interior.appendTo(sources);
+    require(sources.size() == 17 && sources.front().key() == interior.splat.key(), "Reserve splat before the sixteen normal sources");
+    interior.appendTo(sources);
+    require(sources.size() == 17, "Appending to existing reservations must not duplicate sources");
+
+    const auto corner = pages.sources({8, 0, 0}, true);
+    sources.clear();
+    corner.appendTo(sources);
+    require(sources.size() == 10, "Clamped corner must reserve only nine normal tiles plus the splat tile");
+    for (uint32_t row = 0; row < 4; ++row) {
+        for (uint32_t col = 0; col < 4; ++col) {
+            const uint32_t x = col > 0 ? col - 1 : 0;
+            const uint32_t z = row > 0 ? row - 1 : 0;
+            require(corner.normals[row * 4 + col].key() == NodeAddress{3, x, z}.key(), "Clamp gutter samples without changing shader table order");
+        }
+    }
+    const auto unbaked = pages.sources({8, 2, 2}, false);
+    sources.clear();
+    unbaked.appendTo(sources);
+    require(sources.size() == 1, "Unbaked normals must use the splat source only");
+    for (const auto normal : unbaked.normals) {
+        require(normal.key() == unbaked.splat.key(), "Unbaked shader inputs must all reference the splat tile");
+    }
+    const auto fine = pages.sources({0, 17, 29}, true);
+    sources.clear();
+    fine.appendTo(sources);
+    require(sources.size() == 1 && sources.front().key() == NodeAddress{3, 0, 0}.key(), "Sub-tile pages must respect the minimum source level");
+}
+
 int main() {
+    testCompositionSources();
     testSectorCountLimit();
     testHeightReservations();
     testExactPageLifecycle();

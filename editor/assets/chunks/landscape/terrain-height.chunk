@@ -46,11 +46,11 @@ float sampleHeight(vec2 localXZ) {
 }
 
 #if __VERSION__ >= 300 && USE_INSTANCING
-vec4 terrainVertex(vec2 parentUV) {
-  vec2 grid = floor(parentUV * 16.0 + 0.5);
+// Geometry and decals share this exact morph, including committed edge constraints.
+// Heights are supplied separately so a decal block can reuse its corner samples.
+vec4 morphTerrainVertex(vec2 grid, float height, float targetHeight) {
   float step = a_gridInst.z / 16.0;
   vec2 xz = a_gridInst.xy + grid * step;
-  float height = sampleHeight(xz);
   mat4 world;
   CCGetWorldMatrix(world);
   vec3 baseWorld = (world * vec4(xz.x, height, xz.y, 1.0)).xyz;
@@ -76,13 +76,20 @@ vec4 terrainVertex(vec2 parentUV) {
     collapse.x = 0.0;
   }
   vec2 odd = mod(grid, 2.0);
-  vec2 targetXZ = xz - odd * step;
   // Interpolate endpoint heights so sliding vertices do not traverse and
   // temporarily introduce heightmap details between the two grid positions.
   // Only odd coordinates move; their collapse also includes edge constraints.
   float heightMorph = max(odd.x * collapse.x, odd.y * collapse.y);
-  height = mix(height, sampleHeight(targetXZ), heightMorph);
+  height = mix(height, targetHeight, heightMorph);
   xz -= odd * step * collapse;
   return vec4(xz.x, height, xz.y, morph);
+}
+
+vec4 terrainVertex(vec2 parentUV) {
+  vec2 grid = floor(parentUV * 16.0 + 0.5);
+  float step = a_gridInst.z / 16.0;
+  vec2 xz = a_gridInst.xy + grid * step;
+  vec2 targetXZ = xz - mod(grid, 2.0) * step;
+  return morphTerrainVertex(grid, sampleHeight(xz), sampleHeight(targetXZ));
 }
 #endif

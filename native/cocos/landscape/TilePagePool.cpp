@@ -23,7 +23,6 @@
 ****************************************************************************/
 
 #include "landscape/TilePagePool.h"
-#include "landscape/VirtualTexture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,7 +69,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     _device = device;
     _asset = asset;
     _data = data;
-    _vtLayout = VTPageLayout(data.sectorSize);
     _capacity = layerCount;
     _heightUnorm = heightUnorm;
     if (!initTextures()) {
@@ -78,15 +76,7 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
         return false;
     }
     initSamplers();
-#if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] height format: %s (2 bytes/texel)",
-                _heightUnorm ? "R16_UNORM, hardware filtering" : "RG8, manual interpolation");
-    CC_LOG_INFO("[Landscape] %zu sector roots; RG8 XZ normals %ux%ux%u",
-                rootCount,
-                config::SOURCE_TILE_RESOLUTION,
-                config::SOURCE_TILE_RESOLUTION,
-                _capacity);
-#endif
+
     return true;
 }
 
@@ -257,7 +247,6 @@ void TilePagePool::uploadTile(uint64_t key, const uint8_t *height, const uint8_t
 
 void TilePagePool::destroy() {
     _data = {};
-    _vtLayout = VTPageLayout{};
     _capacity = 0;
     _slots.clear();
     _working.clear();
@@ -281,68 +270,6 @@ TilePagePool::Tile TilePagePool::resolve(NodeAddress node) const {
 Vec4 TilePagePool::shaderParams(const Tile &tile) const {
     const auto region = _data.nodeRegion(tile.address);
     return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
-}
-uint32_t TilePagePool::sourceLevelForSize(float size) const {
-    uint32_t level = _data.minTileLevel;
-    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
-        ++level;
-    }
-    return level;
-}
-NodeAddress TilePagePool::splatSource(VTPageAddress page) const {
-    const float size = _vtLayout.pageSize(page.level);
-    return _data.nodeAtClamped(sourceLevelForSize(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
-}
-std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> TilePagePool::normalSources(VTPageAddress page, bool bake) const {
-    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> result;
-    if (!bake) {
-        result.fill(splatSource(page));
-        return result;
-    }
-    const float size = _vtLayout.pageSize(page.level);
-    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
-    const uint32_t level = sourceLevelForSize(target);
-    for (uint32_t row = 0; row < 4; ++row) {
-        for (uint32_t col = 0; col < 4; ++col) {
-            result[row * 4 + col] = _data.nodeAtClamped(level, {(page.x - 0.25F + col * 0.5F) * size, (page.z - 0.25F + row * 0.5F) * size});
-        }
-    }
-    return result;
-}
-void TilePagePool::pageSources(VTPageAddress page, bool bake, ccstd::vector<NodeAddress> &output) const {
-    // Return each input once, in sampling order. Clamped edge samples and the
-    // non-baked normal path may refer to the same tile many times.
-    const auto append = [&output](NodeAddress source) {
-        const auto duplicate = std::find_if(output.begin(), output.end(), [source](NodeAddress entry) {
-            return entry.key() == source.key();
-        });
-        if (duplicate == output.end()) {
-            output.push_back(source);
-        }
-    };
-    append(splatSource(page));
-    const auto normals = normalSources(page, bake);
-    for (const auto source : normals) {
-        append(source);
-    }
-}
-bool TilePagePool::resolvePage(VTPageAddress page, bool bake, VTPageInputs &output) const {
-    const auto splat = resolve(splatSource(page));
-    if (splat.layer < 0) {
-        return false;
-    }
-    const auto region = _vtLayout.pageRegion(page);
-    output.region = {region.x, region.z, region.size, 0};
-    output.splatSource = shaderParams(splat);
-    const auto normals = normalSources(page, bake);
-    for (size_t i = 0; i < normals.size(); ++i) {
-        const auto tile = resolve(normals[i]);
-        if (tile.layer < 0) {
-            return false;
-        }
-        output.normalSources[i] = shaderParams(tile);
-    }
-    return true;
 }
 } // namespace landscape
 } // namespace cc
