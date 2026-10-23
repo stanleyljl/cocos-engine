@@ -65,12 +65,6 @@ public:
         int32_t detailMaterial0{-1}; // optional tiled material-library pair, RVT-only
         int32_t detailMaterial1{-1}; // normalRoughnessAO.B stores pair blend weight
     };
-    // Optional slope-based material override, authored by the terrain asset.
-    struct CliffMaterial {
-        int32_t layer{-1}; // negative retains painted splat materials
-        float maxNormalY{0.0F};
-        float globalColorInfluence{1.0F}; // multiplier of the terrain-wide strength
-    };
     struct Decal {
         float x{0}; // minimum corner in landscape-local XZ
         float z{0};
@@ -82,7 +76,7 @@ public:
         uint64_t key{0};
         ccstd::vector<uint8_t> height; // requested RG8 high/low bytes or R16UI host-order values
         ccstd::vector<uint8_t> splat;
-        ccstd::vector<uint8_t> normal; // linear RG8 terrain-local XZ; shader reconstructs +Y
+        ccstd::vector<uint8_t> normal; // padded linear RG8 terrain-local XZ; shader reconstructs +Y
     };
 
     LandscapeAsset();
@@ -106,7 +100,7 @@ public:
     // Completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const;
-    // Decodes uint16 height/splat PNGs as RG8/R16UI, or RGB PNGs as linear RGB8.
+    // Decodes 129x129 uint16 height/splat as RG8/R16UI, or padded 145x145 normals as RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data);
     // Native libpng decode for physics after its asynchronous file read.
     // Avoid JS inflate/unfilter loops; returns source uint16 values in host order.
@@ -123,7 +117,6 @@ public:
     bool valid() const { return _data.valid(); }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
-    const CliffMaterial &cliffMaterial() const { return _cliffMaterial; }
 
 private:
     struct Manifest;
@@ -143,7 +136,6 @@ private:
     LandscapeData _data;
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
-    CliffMaterial _cliffMaterial;
     ccstd::vector<DecalLayer> _decalLayers;
     ccstd::vector<Decal> _decals;
     uint32_t _decalResolution{1};

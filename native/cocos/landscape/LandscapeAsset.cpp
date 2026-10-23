@@ -71,7 +71,6 @@ struct LandscapeAsset::Manifest {
     ccstd::unordered_map<ccstd::string, ccstd::string> files;
     ccstd::vector<MaterialLayer> materialLayers;
     uint32_t materialResolution{0};
-    CliffMaterial cliffMaterial;
     ccstd::vector<DecalLayer> decalLayers;
     ccstd::vector<Decal> decals;
     uint32_t decalResolution{1};
@@ -80,7 +79,7 @@ struct LandscapeAsset::Manifest {
 
     bool read() {
         return readDimensions() && readHeightRanges() && readFileIndex() &&
-               readMaterials() && readCliffMaterial() &&
+               readMaterials() &&
                readDecalLayers() && readDecals();
     }
 
@@ -96,7 +95,6 @@ struct LandscapeAsset::Manifest {
     bool readHeightRangeLevel(uint32_t level, const rapidjson::Value &levelValue);
     bool readFileIndex();
     bool readMaterials();
-    bool readCliffMaterial();
     bool readDecalLayers();
     bool readDecals();
 };
@@ -251,23 +249,6 @@ bool LandscapeAsset::Manifest::readMaterials() {
     return true;
 }
 
-bool LandscapeAsset::Manifest::readCliffMaterial() {
-    if (document.HasMember("cliffMaterial")) {
-        const auto &value = document["cliffMaterial"];
-        uint32_t layer = 0U;
-        if (!readUnsigned(value, "layer", layer) || layer >= materialLayers.size() ||
-            !readFloat(value, "maxNormalY", cliffMaterial.maxNormalY) ||
-            cliffMaterial.maxNormalY < 0.0F || cliffMaterial.maxNormalY > 1.0F ||
-            !readFloat(value, "globalColorInfluence", cliffMaterial.globalColorInfluence) ||
-            cliffMaterial.globalColorInfluence < 0.0F || cliffMaterial.globalColorInfluence > 1.0F) {
-            CC_LOG_WARNING("[Landscape] invalid cliffMaterial in '%s'", manifestPath.c_str());
-            return false;
-        }
-        cliffMaterial.layer = static_cast<int32_t>(layer);
-    }
-    return true;
-}
-
 bool LandscapeAsset::Manifest::readDecalLayers() {
     if (document.HasMember("decalLibrary")) {
         const auto &library = document["decalLibrary"];
@@ -381,7 +362,6 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _files = std::move(manifest.files);
     _materialLayers = std::move(manifest.materialLayers);
     _materialResolution = manifest.materialResolution;
-    _cliffMaterial = manifest.cliffMaterial;
     _decalLayers = std::move(manifest.decalLayers);
     _decals = std::move(manifest.decals);
     _decalResolution = manifest.decalResolution;
@@ -406,7 +386,7 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
         // before upload; height-field normals always lie in the +Y hemisphere.
         // Forward compaction is safe because each destination precedes the next
         // unread RGB pixel. No extra allocation or per-frame conversion needed.
-        const size_t count = static_cast<size_t>(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
+        const size_t count = static_cast<size_t>(config::SOURCE_NORMAL_RESOLUTION) * config::SOURCE_NORMAL_RESOLUTION;
         for (size_t i = 0; i < count; ++i) {
             tile.normal[i * 2U] = tile.normal[i * 3U];
             tile.normal[i * 2U + 1U] = tile.normal[i * 3U + 2U];
@@ -574,13 +554,14 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, ccs
     }
     IntrusivePtr<Image> image = ccnew Image();
     const bool packHeight = format == gfx::Format::RG8;
+    const uint32_t resolution = format == gfx::Format::RGB8 ? config::SOURCE_NORMAL_RESOLUTION : config::SOURCE_TILE_RESOLUTION;
     if (!image->initWithImageData(file.getBytes(), file.getSize()) ||
         image->getRenderFormat() != (format == gfx::Format::RGB8 ? gfx::Format::RGB8 : gfx::Format::R16UI) ||
-        static_cast<uint32_t>(image->getWidth()) != config::SOURCE_TILE_RESOLUTION ||
-        static_cast<uint32_t>(image->getHeight()) != config::SOURCE_TILE_RESOLUTION) {
+        static_cast<uint32_t>(image->getWidth()) != resolution ||
+        static_cast<uint32_t>(image->getHeight()) != resolution) {
         return false;
     }
-    const size_t sampleCount = static_cast<size_t>(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
+    const size_t sampleCount = static_cast<size_t>(resolution) * resolution;
     const size_t sourceByteSize = sampleCount * (format == gfx::Format::RGB8 ? 3U : sizeof(uint16_t));
     if (image->getDataLen() != sourceByteSize) {
         return false;

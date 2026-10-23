@@ -13,7 +13,6 @@ CCEffect %{
         sectorParams: { value: [1, 1, 0, 0] }
         morphCameraPos: { value: [0, 0, 0, 0] }
         vtLayout: { value: [4352, 272, 8, 4] }
-        rvtNormalParams: { value: [1, 0, 0, 0] }
         vtPageMap: { value: black, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtAlbedo: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         vtNormalRoughnessAO: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
@@ -21,7 +20,6 @@ CCEffect %{
         # material is used by a model. Leaving value unset makes Pass use its
         # existing non-null default during validated material initialization.
         heightmap: { sampler: { minFilter: linear, magFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
-        terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         lodMorph: { value: [0, 0, 0, 0] }
     - vert: landscape-vs
       frag: landscape-fs
@@ -65,7 +63,6 @@ CCProgram landscape-uniforms %{
     vec4 sectorParams; // sector size, finest VT page size, unused ZW
     vec4 morphCameraPos;
     vec4 vtLayout; // atlas size, slot size, border, coarsest-mip filter margin in base texels
-    vec4 rvtNormalParams; // 1 = baked terrain-local normals, 0 = tangent-space detail
     // Effect reflection requires a literal array length; keep it equal to LANDSCAPE_MAX_LOD_LEVELS.
     vec4 lodMorph[9];
     vec4 holeParams; // 0 = vertex NaN, 1 = fragment discard
@@ -130,8 +127,6 @@ CCProgram landscape-vertex %{
     #if !LANDSCAPE_SHADOW_PASS
       flat out float v_lod;
       flat out vec4 v_vtParams;
-      out vec2 v_normalUV;
-      flat out float v_normalLayer;
     #endif
   #else
     #if !LANDSCAPE_SHADOW_PASS
@@ -161,8 +156,6 @@ CCProgram landscape-vertex %{
     v_lod = 0.0;
   #if __VERSION__ >= 300
     v_vtParams = vec4(0.0, 0.0, 1.0, 0.0);
-    v_normalUV = vec2(0.5);
-    v_normalLayer = 0.0;
     #if USE_INSTANCING
       v_vtParams = vec4(a_gridInst.xyz, a_mappingInst.x);
     #endif
@@ -182,13 +175,6 @@ CCProgram landscape-vertex %{
     height = base.y;
   #else
     height = sampleHeight(localXZ);
-  #endif
-  #if __VERSION__ >= 300 && USE_INSTANCING && !LANDSCAPE_SHADOW_PASS
-    // Use the final local coordinates for geometry and terrain normal sampling.
-    float resolution = float(LANDSCAPE_TILE_RESOLUTION);
-    v_normalUV = (localXZ - a_tileInst.xy) / a_tileInst.z;
-    v_normalUV = v_normalUV * ((resolution - 1.0) / resolution) + 0.5 / resolution;
-    v_normalLayer = a_tileInst.w;
   #endif
     #if __VERSION__ >= 300
       v_holeXZ = localXZ;

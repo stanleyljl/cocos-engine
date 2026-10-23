@@ -38,7 +38,7 @@ LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
     LandscapeQueryTile t;
     t.height.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
     t.splat.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
-    t.normal.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 3U);
+    t.normal.resize(config::SOURCE_NORMAL_RESOLUTION * config::SOURCE_NORMAL_RESOLUTION * 3U);
     for (uint32_t z = 0; z < config::SOURCE_TILE_RESOLUTION; ++z) {
         for (uint32_t x = 0; x < config::SOURCE_TILE_RESOLUTION; ++x) {
             const uint16_t h = static_cast<uint16_t>(128 + (tx * (config::SOURCE_TILE_RESOLUTION - 1U) + x) * 2 + tz * (config::SOURCE_TILE_RESOLUTION - 1U) + z);
@@ -48,9 +48,11 @@ LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
             const uint16_t s = 3U | (7U << 5U) | (10U << 10U);
             std::memcpy(t.splat.data() + i * 2, &s, 2);
             // Deliberately different from the height gradient: queries must use RGB.
-            t.normal[i * 3] = 64;
-            t.normal[i * 3 + 1] = 220;
-            t.normal[i * 3 + 2] = 160;
+            // Leave the padding black so a missing offset or wrong stride fails sampling.
+            const size_t n = (size_t(z + config::SOURCE_NORMAL_BORDER) * config::SOURCE_NORMAL_RESOLUTION + x + config::SOURCE_NORMAL_BORDER) * 3U;
+            t.normal[n] = 64;
+            t.normal[n + 1] = 220;
+            t.normal[n + 2] = 160;
         }
     }
     return t;

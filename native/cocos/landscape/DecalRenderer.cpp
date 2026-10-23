@@ -233,7 +233,7 @@ bool DecalRenderer::removeDecal(uint32_t id, LandscapeRegion &region) {
 }
 
 bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrary &materials) {
-    auto *pass = material->getPasses()->front().get();
+    const auto &pass = material->getPasses()->front();
     for (const char *name : {"decalAlbedoMap", "decalNormalMap", "decalRegions",
                              "decalIndexMap", "decalLayerParams", "decalParams"}) {
         if (!pass->getHandle(name)) {

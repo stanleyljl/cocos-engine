@@ -42,6 +42,12 @@
 - When multiple change types are involved, list all required steps in execution order: restart the editor, rebuild the project, then recompile native code.
 - Include the applicable reminders in the final response, stating which steps have already been completed and which remain for the user.
 
+# Deferred Landscape work
+
+- Multi-camera Landscape support is deferred until the user explicitly resumes it (recorded 2026-10-21). Do not implement it as part of unrelated refactoring.
+- Current limitations: LOD selection uses one main camera; ExpectedTree/CurrentTree, morph camera parameters, decal visibility/fade and resource reservations are shared rather than independent per view.
+- Proposed direction to evaluate when resumed: keep ExpectedTree/CurrentTree, draw instances and morph/decal view state per view; share height data, TilePagePool and VT atlas; aggregate resource demands across views before scheduling to avoid mutual eviction. Shadow passes should use their owning view's LOD and morph. Preserve existing single-camera behavior and morph transitions. Confirm whether the use case is camera switching, shared-LOD secondary views or simultaneous independent views before choosing the scope.
+
 # Progress communication
 
 - Before starting tool-assisted work, briefly tell the user what you will investigate or change.

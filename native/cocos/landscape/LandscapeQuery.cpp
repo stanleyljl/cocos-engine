@@ -133,13 +133,14 @@ LandscapeQueryStatus LandscapeQuery::getSourceStatus(uint32_t id) const {
 
 void LandscapeQuery::update() {
     const size_t samples = size_t(config::SOURCE_TILE_RESOLUTION) * config::SOURCE_TILE_RESOLUTION;
+    const size_t normalSamples = size_t(config::SOURCE_NORMAL_RESOLUTION) * config::SOURCE_NORMAL_RESOLUTION;
     for (const auto &pair : _tiles) {
         auto &tile = *pair.second;
         if (tile.status != LandscapeQueryStatus::NOT_READY || !tile.loaded.load(std::memory_order_acquire)) {
             continue;
         }
         const bool valid = tile.data.height.size() == samples * 2U &&
-                           tile.data.splat.size() == samples * 2U && tile.data.normal.size() == samples * 3U;
+                           tile.data.splat.size() == samples * 2U && tile.data.normal.size() == normalSamples * 3U;
         tile.status = valid ? LandscapeQueryStatus::HIT : LandscapeQueryStatus::ERROR;
     }
 }
@@ -164,8 +165,8 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) const {
         return result;
     }
     const auto &tile = it->second->data;
-    // Locate one grid cell. All channels below share its four texels and
-    // fractional coordinates. Height and painted materials share the B-C diagonal.
+    // Locate one grid cell. All channels share its fractional coordinates;
+    // normals have a padded row stride. Height and materials share the B-C diagonal.
     const uint32_t edge = config::SOURCE_TILE_RESOLUTION - 1U;
     const float gx = std::clamp((local.x / _tileSize - address.x) * edge, 0.0F, float(edge));
     const float gz = std::clamp((local.z / _tileSize - address.z) * edge, 0.0F, float(edge));
@@ -178,6 +179,8 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) const {
     // C ---- D
     // Height and splat use triangles (A,C,B) and (B,C,D), matching Terrain and physics.
     const std::array<size_t, 4> texels{a, a + 1U, a + config::SOURCE_TILE_RESOLUTION, a + config::SOURCE_TILE_RESOLUTION + 1U};
+    const size_t normalA = size_t(iz + config::SOURCE_NORMAL_BORDER) * config::SOURCE_NORMAL_RESOLUTION + ix + config::SOURCE_NORMAL_BORDER;
+    const std::array<size_t, 4> normalTexels{normalA, normalA + 1U, normalA + config::SOURCE_NORMAL_RESOLUTION, normalA + config::SOURCE_NORMAL_RESOLUTION + 1U};
     const float fx = gx - ix;
     const float fz = gz - iz;
 
@@ -199,7 +202,7 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) const {
     float nz = 0;
     for (size_t i = 0; i < texels.size(); ++i) {
         const auto h = texels[i] * 2U;
-        const auto n = texels[i] * 3U;
+        const auto n = normalTexels[i] * 3U;
         height += triangleWeights[i] * (uint32_t(tile.height[h]) * 256U + tile.height[h + 1U]);
         nx += weights[i] * (tile.normal[n] * (2.0F / 255.0F) - 1.0F);
         ny += weights[i] * (tile.normal[n + 1U] * (2.0F / 255.0F) - 1.0F);
@@ -214,7 +217,7 @@ LandscapeSurfaceResult LandscapeQuery::sample(LandscapePoint local) const {
     result.normal.set(nx / length, ny / length, nz / length);
 
     // Painted splat uses the same triangle weights as height and VT composition.
-    // No visual height-blend, cliff or decal overrides.
+    // No visual height blending or decals.
     std::array<float, config::MATERIAL_LIBRARY_MAX> material{};
     for (size_t i = 0; i < texels.size(); ++i) {
         if (triangleWeights[i] == 0.0F) {

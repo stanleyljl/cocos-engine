@@ -183,9 +183,8 @@ void LandscapeRenderer::bindRuntimeTextures() {
     for (auto *material : surfaceMaterials()) {
         setRuntimeTexture(material, "holeSplatmap", _tilePages->splatArray(), _tilePages->splatSampler());
         setRuntimeTexture(material, "heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
-        setRuntimeTexture(material, "terrainNormalMap", _tilePages->normalArray(), _tilePages->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.gridMappings(), _tilePages->splatSampler());
+        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _tilePages->splatSampler());
         setRuntimeTexture(material, "vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
     for (auto *material : _decals->materials()) {
@@ -213,8 +212,7 @@ void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
         _decals->setEnabled(data.decal3DEnabled);
     }
     _vtRenderer->setHeightBlendEnabled(data.heightBlendEnabled);
-    _vtRenderer->setBakeNormalEnabled(data.bakeNormalEnabled);
-    _vtRenderer->setCliffEnabled(data.cliffEnabled);
+    _vtRenderer->setRefineFarDetail(data.refineFarDetail);
     if (previous.wireframe != data.wireframe) {
         refreshTerrainMaterials();
     }
@@ -256,7 +254,6 @@ void LandscapeRenderer::updateMaterialProperties() {
         material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U ? 0.0F : 1.0F, 0, 0, 0});
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, layout.pageSize(0), 0, 0});
-        material->setPropertyVec4("rvtNormalParams", Vec4{_vtRenderer->isBakeNormalEnabled() ? 1.0F : 0.0F, 0, 0, 0});
         material->setPropertyVec4Array("lodMorph", lodMorph);
         material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
                                                    static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
@@ -315,9 +312,9 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
 
 void LandscapeRenderer::preparePasses(ExpectedTree expected) {
     const auto frame = Root::getInstance()->getFrameCount();
-    auto *oldMappings = _vtRenderer->gridMappings();
+    auto *oldMappings = _vtRenderer->pageTable().texture();
     _schedule->update(std::move(expected), _viewPosition - _node->getWorldPosition(), frame);
-    if (oldMappings != _vtRenderer->gridMappings()) {
+    if (oldMappings != _vtRenderer->pageTable().texture()) {
         bindRuntimeTextures();
     }
     if (!_schedule->currentTree().changedNodes().empty()) {
@@ -405,7 +402,7 @@ bool LandscapeRenderer::addDecal(uint32_t id, float x, float z, float size, uint
     if (!_decals->addDecal(id, {x, z, size, layer})) {
         return false;
     }
-    _vtRenderer->pages().invalidate({x, z, size});
+    _vtRenderer->invalidate({x, z, size});
     return true;
 }
 
@@ -414,7 +411,7 @@ bool LandscapeRenderer::removeDecal(uint32_t id) {
     if (!_decals->removeDecal(id, region)) {
         return false;
     }
-    _vtRenderer->pages().invalidate(region);
+    _vtRenderer->invalidate(region);
     return true;
 }
 
@@ -424,7 +421,7 @@ void LandscapeRenderer::recycleModel(GridDraw &draw) {
         _pool.push_back(std::move(draw.model));
     }
     if (draw.mapping >= 0) {
-        _vtRenderer->releaseGridMapping(static_cast<uint32_t>(draw.mapping));
+        _vtRenderer->pageTable().release(static_cast<uint32_t>(draw.mapping));
         draw.mapping = -1;
     }
 }
@@ -455,10 +452,10 @@ void LandscapeRenderer::syncTerrainModels() {
         auto &draw = _draws[key];
         const auto &node = it->second.geometry;
         if (draw.mapping < 0) {
-            draw.mapping = static_cast<int>(_vtRenderer->allocateGridMapping());
+            draw.mapping = static_cast<int>(_vtRenderer->pageTable().allocate());
         }
         const auto mapping = static_cast<uint32_t>(draw.mapping);
-        if (_vtRenderer->updateGridMapping(mapping, it->second.material)) {
+        if (_vtRenderer->pageTable().update(mapping, it->second.material, *_vtRenderer)) {
             changedMappings.push_back(mapping);
         }
         if (!draw.model) {
@@ -476,7 +473,7 @@ void LandscapeRenderer::syncTerrainModels() {
         const auto region = _data.nodeRegion(node.address());
         _decals->updateNode({key, region, node.minY, node.maxY, gridParams});
     }
-    _vtRenderer->uploadGridMappings(std::move(changedMappings));
+    _vtRenderer->pageTable().upload(std::move(changedMappings));
 }
 
 void LandscapeRenderer::setHoleMode(uint32_t mode) {

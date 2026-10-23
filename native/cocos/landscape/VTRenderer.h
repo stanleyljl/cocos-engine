@@ -22,188 +22,189 @@
  THE SOFTWARE.
 ****************************************************************************/
 #pragma once
-
-#include "core/Root.h"
-#include "landscape/VirtualTexture.h"
-#include "math/Vec4.h"
+#include <array>
+#include <cstdint>
+#include <memory>
+#include "base/Ptr.h"
+#include "base/std/container/unordered_map.h"
+#include "base/std/container/vector.h"
+#include "landscape/VTPageProcessing.h"
+#include "math/Vec3.h"
 
 namespace cc {
-class Material;
-class RenderTexture;
-class RenderingSubMesh;
 class TextureBase;
-class Texture2D;
-namespace landscape {
-class DecalRenderer;
-class LandscapeAsset;
-class MaterialLibrary;
-class TilePagePool;
+}
 
-// GPU half of VT: owns the atlas, composition passes and source bindings.
-// LandscapeSchedule reserves the pages and source tiles. Composition consumes
-// ready inputs and publishes completed pages; it does not select tree changes.
-// Runtime methods require init() to have succeeded.
+namespace cc::landscape {
+class VTRenderer;
+
+// Material coordinates are independent of the geometry quadtree. Level zero
+// covers at least one logical unit; increasing the level doubles the covered area side.
+struct VTPageAddress {
+    uint32_t level{0};
+    uint32_t x{0};
+    uint32_t z{0};
+
+    uint64_t key() const { return makeNodeKey(level, x, z); }
+};
+
+// A node owns unique page addresses and a compact index for each grid cell.
+// Residency and physical-slot lookup visit pages once, not all 256 cells.
+struct VTGridMapping {
+    static constexpr uint32_t SIDE = 16;
+    static constexpr uint32_t CELL_COUNT = SIDE * SIDE;
+    std::array<uint8_t, CELL_COUNT> cells{};
+    ccstd::vector<VTPageAddress> pages;
+};
+
+// Source addresses for one material-page composition, independent of residency.
+struct VTPageSources {
+    NodeAddress splat;
+    // 2x2 lookup: base precision repeats one tile; far detail uses up to four.
+    // Each source includes its own real-neighbor border for the VT gutters.
+    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normals;
+    // Append unique addresses in sampling order, preserving existing entries.
+    void appendTo(ccstd::vector<NodeAddress> &output) const;
+};
+
+// Material-page dimensions are derived together; a geometry maxLevel cannot
+// accidentally be supplied as the VT root. This class does not own atlas slots.
+class VTPageLayout {
+public:
+    explicit VTPageLayout(float sectorSize = 1.0F);
+
+    uint32_t rootLevel() const { return _rootLevel; }
+    float pageSize(uint32_t level) const {
+        return level <= _rootLevel ? _sectorSize / static_cast<float>(1U << (_rootLevel - level)) : 0.0F;
+    }
+    // Distance-based material resolution, independent of geometry LOD.
+    uint32_t levelForDistance(float distance) const;
+    LandscapeRegion pageRegion(VTPageAddress page) const {
+        const float size = pageSize(page.level);
+        return {page.x * size, page.z * size, size};
+    }
+
+    // Subdivide aligned grid regions according to distance, independently of
+    // geometry LOD, and map each cell to a page covering its stitched footprint.
+    VTGridMapping gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
+
+    // Local bounds must stay within one sector.
+    // Include the complete stitched footprint, not just the original grid cell.
+    VTPageAddress coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const;
+
+private:
+    void mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const;
+    float _sectorSize;
+    uint32_t _rootLevel{0};
+};
+
+// GPU page table consumed by terrain draws. Each grid owns 256 consecutive
+// RG8 entries (physical slot, VT level); allocation and uploads live together.
+class VTPageTable {
+public:
+    VTPageTable();
+    ~VTPageTable();
+    gfx::Texture *texture() const { return _texture.get(); }
+    bool ensureCapacity(uint32_t count);
+    uint32_t allocate();
+    void release(uint32_t slot);
+    bool update(uint32_t slot, const VTGridMapping &mapping, const VTRenderer &pages);
+    void upload(ccstd::vector<uint32_t> slots);
+    void destroy();
+
+private:
+    friend struct LandscapePagingTestAccess;
+    struct Entry {
+        uint8_t physicalSlot{0};
+        uint8_t level{0};
+    };
+    static_assert(sizeof(Entry) == 2, "VT page table entries must match RG8 texels");
+    IntrusivePtr<gfx::Texture> _texture;
+    ccstd::vector<Entry> _entries;
+    ccstd::vector<uint32_t> _freeSlots;
+    uint32_t _size{0};
+    uint32_t _count{0};
+};
+
+// Owns page residency and the complete VT update sequence. LandscapeSchedule
+// admits resource demands; only this coordinator submits work and publishes pages.
 class VTRenderer {
 public:
     VTRenderer();
     ~VTRenderer();
     VTRenderer(const VTRenderer &) = delete;
     VTRenderer &operator=(const VTRenderer &) = delete;
-
     bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals);
     void destroy();
-    VirtualTexture &pages() { return _pages; }
-    const VirtualTexture &pages() const { return _pages; }
+    uint32_t render(TilePagePool &tiles, uint32_t maxUpdates);
+
+    enum class State {
+        EMPTY,
+        DIRTY, // No composed pixels yet.
+        READY,
+        STALE, // Needs recomposition; previous pixels remain drawable.
+    };
+    struct Page {
+        VTPageAddress address;
+        State state{State::EMPTY};
+        uint64_t lastReserved{0};
+        bool needsComposition() const {
+            return state == State::DIRTY || state == State::STALE;
+        }
+        bool drawable() const {
+            return state == State::READY || state == State::STALE;
+        }
+    };
+    // Reservation inputs are unique addresses, collected by LandscapeSchedule.
+    bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
+    bool reserve(const ccstd::vector<VTPageAddress> &pages);
+    const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
+    const Page &page(uint32_t slot) const { return _pages[slot]; }
+    LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
+    VTPageSources sources(VTPageAddress address, bool refineFarDetail) const;
+    void invalidate();
+    // Invalidate intersecting cached pages, including their filtering gutters.
+    void invalidate(LandscapeRegion region);
+    bool ready() const;
+    size_t capacity() const { return _pages.size(); }
+    bool needsComposition(VTPageAddress address) const;
+    // Exact address only. An absent/unpublished page is an error at draw time.
+    int resolve(VTPageAddress address) const;
+
+    VTPageTable &pageTable() { return _pageTable; }
+    const VTPageTable &pageTable() const { return _pageTable; }
+    bool getRefineFarDetail() const { return _refineFarDetail; }
+    void setGlobalColorStrength(float strength);
+    void setGlobalColorMap(Texture2D *texture);
+    void setHeightBlendEnabled(bool enabled);
+    void setRefineFarDetail(bool enabled);
     TextureBase *atlas() const;
     gfx::Texture *albedo() const;
     gfx::Texture *normalRoughnessAO() const;
     gfx::Sampler *sampler() const { return _sampler; }
-    // Flattened 16 x 16 local tables: RG8 = physical slot, actual VT level.
-    gfx::Texture *gridMappings() const { return _gridMappings.get(); }
-    bool ensureGridMappingCapacity(uint32_t count);
-    uint32_t allocateGridMapping();
-    void releaseGridMapping(uint32_t slot);
-    // Update the CPU mirror; the caller batches only the changed slots.
-    bool updateGridMapping(uint32_t slot, const VTGridMapping &mapping);
-    void uploadGridMappings(ccstd::vector<uint32_t> slots);
-    void requiredSources(ccstd::vector<NodeAddress> &sources) const;
-    bool sourcesReady() const { return (!_cliffEnabled && _cliff.params.w <= 0.0F) || _cliff.ready; }
-    bool isBakeNormalEnabled() const { return _bakeNormalEnabled; }
-    // Returns the actual composed page count for the shared frame budget.
-    uint32_t render(TilePagePool &tiles, uint32_t maxUpdates);
-    void setGlobalColorStrength(float strength);
-    void setGlobalColorMap(Texture2D *texture);
-    void setHeightBlendEnabled(bool enabled);
-    void setBakeNormalEnabled(bool enabled);
-    void setCliffEnabled(bool enabled);
 
 private:
     friend struct LandscapePagingTestAccess;
+    bool initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+    bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
+    uint32_t sourceLevel(float size) const;
+    int allocate(VTPageAddress address);
+    void publish(uint32_t slot);
+    LandscapeData _data;
+    VTPageLayout _layout;
+    uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
+    ccstd::vector<Page> _pages;
+    ccstd::vector<uint32_t> _active;
+    ccstd::unordered_map<uint64_t, uint32_t> _lookup;
 
-    // A fixed, bounded reference grid keeps projection height/axis selection independent
-    // of camera distance and CDLOD morph. Reuse at most a quarter of the source pool.
-    static uint32_t cliffReferenceLevel(const LandscapeData &data) {
-        uint32_t level = data.minTileLevel;
-        const uint64_t sectors = static_cast<uint64_t>(data.sectorsX) * data.sectorsZ;
-        while (level < data.maxLevel && sectors * (1ULL << (2U * (data.maxLevel - level))) > config::PAGE_POOL_LAYERS / 4U) {
-            ++level;
-        }
-        return level;
-    }
-
-    // Initialization owns a complete resource set; a failed attempt is released
-    // before retrying with an uncompressed atlas.
-    bool initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, gfx::Device *device);
-    bool initAtlas(gfx::Device *device);
-    bool initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device);
-    bool initNormalSourceTable(TilePagePool &tiles, gfx::Device *device);
-    bool initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device);
-    bool initPageDrawResources(gfx::Device *device);
-    bool initMipPasses(gfx::Device *device);
-    bool initCommandResources(gfx::Device *device);
-
-    // Source bindings and debug settings feed subsequent composition batches.
-    void bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
-    void syncCliffSources(TilePagePool &tiles);
-    void applyGlobalColorMap();
-
-    // The composition target is a full atlas or one reusable scratch page.
-    uint32_t compositionSize() const { return _compress ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE; }
-    gfx::Framebuffer *compositionFramebuffer() const;
-    gfx::RenderPass *compositionRenderPass() const;
-
-    // Exactly the three vec4 attributes consumed by the compose/mip shaders.
-    struct PageInstance {
-        Vec4 atlas; // physical slot, decal count, unused ZW
-        Vec4 region;
-        Vec4 splatSource;
-    };
-    static_assert(sizeof(PageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
-
-    struct PageInputs {
-        Vec4 region; // output page: landscape-local XZ origin, size, unused
-        Vec4 splatSource; // input tile: landscape-local XZ origin, size, array layer
-        std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT> normalSources;
-    };
-    bool resolvePageInputs(VTPageAddress page, const TilePagePool &tiles, PageInputs &output) const;
-    void collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates);
-    void uploadPageInputs();
-    void submitPageBatch();
-    void recordCompressedPages();
-    void recordCompositionAndMips(const PageInstance *instances, uint32_t instanceCount);
-    void recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount);
-
-    // Optional compressed output: record encoding and copies after all page mips.
-    bool initCompression(gfx::Device *device);
-    void destroyCompression();
-    void recordCompression(uint32_t slot);
-    void recordAtlasTransition(bool writing);
-
-    // Each mip has its own descriptors: recording a later mip must not overwrite
-    // the preceding pass's source texture bindings.
-    struct MipPass {
-        IntrusivePtr<Material> material;
-        IntrusivePtr<gfx::PipelineState> pipelineState;
-        IntrusivePtr<gfx::Texture> albedo;
-        IntrusivePtr<gfx::Texture> normal;
-        IntrusivePtr<gfx::Texture> sourceAlbedo;
-        IntrusivePtr<gfx::Texture> sourceNormal;
-        IntrusivePtr<gfx::Framebuffer> framebuffer;
-    };
-
-    // Applied shader state. LandscapeSchedule decides when composition can run.
-    bool _bakeNormalEnabled{true};
-    bool _cliffEnabled{true};
-    struct CliffReference {
-        bool ready{false};
-        uint32_t level{0};
-        uint32_t columns{0};
-        uint32_t rows{0};
-        Vec4 params; // shader state, height scale/bias, optional material ID + 1
-        LandscapeData data;
-        IntrusivePtr<gfx::Texture> texture;
-        ccstd::vector<Vec4> sources;
-    } _cliff;
-    VirtualTexture _pages;
-    IntrusivePtr<gfx::Texture> _gridMappings;
-    ccstd::vector<uint8_t> _gridMappingData;
-    ccstd::vector<uint32_t> _freeGridMappings;
-    uint32_t _gridMappingSize{0};
-    uint32_t _gridMappingCount{0};
-    // Render target: full atlas in RGBA8 mode, one reusable page in compressed mode.
-    IntrusivePtr<RenderTexture> _atlas;
-    // Compression uses _atlas as reusable single-page RGBA scratch storage.
-    bool _compress{false};
-    std::array<IntrusivePtr<Texture2D>, 2> _compressedAtlas;
-    IntrusivePtr<gfx::Buffer> _compressedBlocks;
-    IntrusivePtr<gfx::Shader> _compressShader;
-    IntrusivePtr<gfx::DescriptorSetLayout> _compressLayout;
-    IntrusivePtr<gfx::DescriptorSetLayout> _emptyLayout;
-    IntrusivePtr<gfx::PipelineLayout> _compressPipelineLayout;
-    std::array<IntrusivePtr<gfx::Buffer>, config::VT_MIP_LEVELS> _compressUniforms;
-    std::array<IntrusivePtr<gfx::DescriptorSet>, config::VT_MIP_LEVELS> _compressSets;
-    IntrusivePtr<gfx::PipelineState> _compressPipeline;
-    gfx::Sampler *_sampler{nullptr}; // device-owned
-    IntrusivePtr<RenderingSubMesh> _mesh;
-    IntrusivePtr<Material> _material;
-    std::array<MipPass, config::VT_MIP_LEVELS - 1> _mipPasses;
-    IntrusivePtr<gfx::Buffer> _instances;
-    IntrusivePtr<gfx::Texture> _normalSources;
-    ccstd::vector<Vec4> _normalSourceData;
-    DecalRenderer *_decals{nullptr}; // borrowed; owner destroys VT first
-    IntrusivePtr<gfx::InputAssembler> _inputAssembler;
+    VTPageTable _pageTable;
+    std::unique_ptr<VTPageComposer> _composer;
+    std::unique_ptr<VTPageMipGenerator> _mipGenerator;
+    std::unique_ptr<VTPageCompressor> _compressor;
+    ccstd::vector<VTPageInstance> _batch;
     IntrusivePtr<gfx::CommandBuffer> _commands;
-    IntrusivePtr<gfx::PipelineState> _pipelineState;
-    IntrusivePtr<gfx::RenderPass> _initialPass;
-    ccstd::vector<uint32_t> _batchSlots;
-    ccstd::vector<PageInstance> _batchInstances;
+    gfx::Sampler *_sampler{nullptr}; // device-owned
     bool _needsClear{true};
-    // RGB is raw UNORM gain (128 = neutral); alpha masks regional influence.
-    IntrusivePtr<Texture2D> _globalColorMap;
-    IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
-    gfx::Sampler *_globalColorSampler{nullptr}; // device-owned
-    float _globalColorStrength{0.1F};
-    Vec4 _globalColorParams; // inverse landscape width/depth, effective strength, unused
+    bool _refineFarDetail{true};
 };
-} // namespace landscape
-} // namespace cc
+} // namespace cc::landscape

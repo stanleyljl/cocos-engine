@@ -52,14 +52,11 @@ module.exports = {
                     showRanges: {
                         tooltip: 'Show LOD distance ranges and sector boundaries.',
                     },
-                    cliffEnabled: {
-                        tooltip: 'Enable triplanar projection for cliffs and cache the result in RVT.',
-                    },
                     heightBlendEnabled: {
                         tooltip: 'Enable height blending; disable to use linear weight blending. Changes regenerate VT.',
                     },
-                    bakeNormalEnabled: {
-                        tooltip: 'Bake terrain normals into VT; disable to use normals that vary with geometry LOD.',
+                    refineFarDetail: {
+                        tooltip: 'Use detailed terrain normals at VT level 6 and above. When disabled, all levels use base precision. Normals are always baked into VT.',
                     },
                     decal3DEnabled: {
                         tooltip: 'Show nearby 3D decal meshes; disabling keeps flat RVT decals.',

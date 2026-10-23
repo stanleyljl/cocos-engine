@@ -24,160 +24,480 @@
 #include "landscape/VTRenderer.h"
 
 #include <algorithm>
-
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include "base/Log.h"
-#include "base/Macros.h"
+#include "core/Root.h"
 #include "core/assets/Material.h"
-#include "core/assets/EffectAsset.h"
 #include "core/assets/RenderTexture.h"
-#include "core/assets/RenderingSubMesh.h"
 #include "core/assets/Texture2D.h"
-#include "landscape/DecalRenderer.h"
-#include "landscape/GridMesh.h"
 #include "landscape/LandscapeAsset.h"
-#include "landscape/LandscapeConfig.h"
 #include "landscape/MaterialLibrary.h"
 #include "landscape/TilePagePool.h"
-#include "landscape/VirtualTexture.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
-#include "renderer/gfx-base/GFXDescriptorSetLayout.h"
-#include "renderer/gfx-base/GFXPipelineLayout.h"
-#include "renderer/gfx-base/GFXShader.h"
 #include "renderer/gfx-base/GFXDevice.h"
-#include "renderer/gfx-base/GFXFramebuffer.h"
-#include "renderer/gfx-base/GFXInputAssembler.h"
-#include "renderer/gfx-base/GFXPipelineState.h"
 #include "renderer/gfx-base/GFXQueue.h"
-#include "renderer/gfx-base/GFXRenderPass.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "scene/Pass.h"
 #include "scene/RenderWindow.h"
 
-namespace cc {
-namespace landscape {
-namespace {
-constexpr gfx::Format COMPRESSED_FORMAT = gfx::Format::ASTC_RGBA_4X4;
-constexpr const char *COMPRESSION_PROGRAM = "vt-astc-cs";
-constexpr const char *COMPRESSION_NAME = "ASTC 4x4";
-} // namespace
-
+namespace cc::landscape {
 VTRenderer::VTRenderer() = default;
-VTRenderer::~VTRenderer() { destroy(); }
+VTRenderer::~VTRenderer() {
+    destroy();
+}
 
 bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals) {
-    CC_ASSERT(_material == nullptr && _atlas == nullptr);
-    auto *device = Root::getInstance()->getDevice();
     if (!tiles.valid() || !materials.valid()) {
         return false;
     }
-#if CC_PLATFORM == CC_PLATFORM_WINDOWS
-    _compress = false;
-#else
-    const auto formatFeatures = device->getFormatFeatures(COMPRESSED_FORMAT);
-    _compress = device->hasFeature(gfx::Feature::COMPUTE_SHADER) &&
-                hasAllFlags(formatFeatures, gfx::FormatFeature::SAMPLED_TEXTURE | gfx::FormatFeature::LINEAR_FILTER);
-#endif
-    if (!initResources(asset, tiles, materials, decals, device)) {
-        const bool retryUncompressed = _compress;
+    const bool compressed = VTPageCompressor::supported();
+    if (!initResources(asset, tiles, materials, decals, compressed)) {
         destroy();
-        if (!retryUncompressed || !initResources(asset, tiles, materials, decals, device)) {
+        if (!compressed || !initResources(asset, tiles, materials, decals, false)) {
             destroy();
             return false;
         }
-        CC_LOG_WARNING("[Landscape] %s initialization failed; using RGBA8 VT atlas", COMPRESSION_NAME);
+        CC_LOG_WARNING("[Landscape] ASTC 4x4 initialization failed; using RGBA8 VT atlas");
     }
-    CC_LOG_INFO("[Landscape] VT atlas: %s", _compress ? COMPRESSION_NAME : "RGBA8");
-    _batchSlots.reserve(config::VT_PAGE_COUNT);
-    _batchInstances.reserve(config::VT_PAGE_COUNT);
+    CC_LOG_INFO("[Landscape] VT atlas: %s", _compressor ? "ASTC 4x4" : "RGBA8");
+    _batch.reserve(config::VT_PAGE_COUNT);
     return true;
 }
 
-// One complete attempt, also used after releasing a failed compressed setup.
-bool VTRenderer::initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, gfx::Device *device) {
-    _decals = &decals;
-    // Storage first, then its source bindings, then draw/command resources.
-    if (!_pages.init(asset.data()) || !initAtlas(device) || !ensureGridMappingCapacity(1)) {
+bool VTRenderer::initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+    _composer = std::make_unique<VTPageComposer>();
+    _mipGenerator = std::make_unique<VTPageMipGenerator>();
+    if (!initPages(asset.data()) || !_pageTable.ensureCapacity(1) ||
+        !_composer->init(asset, tiles, materials, decals, compressed) || !_mipGenerator->init(*_composer, compressed)) {
         return false;
     }
-    if (!initComposeMaterial(asset, tiles, materials, device) ||
-        !_decals->bindComposeMaterial(_material, materials) ||
-        !initNormalSourceTable(tiles, device) || !initCliffReference(asset, tiles, device)) {
-        return false;
+    if (compressed) {
+        _compressor = std::make_unique<VTPageCompressor>();
+        if (!_compressor->init(Root::getInstance()->getDevice(), *_composer->target())) {
+            return false;
+        }
     }
-    _material->getPasses()->front()->update();
-    return initPageDrawResources(device) && initMipPasses(device) &&
-           (!_compress || initCompression(device)) && initCommandResources(device);
-}
-
-bool VTRenderer::initAtlas(gfx::Device *device) {
-    if (device->getCapabilities().maxColorRenderTargets < 2 ||
-        device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
-        return false;
-    }
+    auto *device = Root::getInstance()->getDevice();
     gfx::SamplerInfo sampler;
     sampler.minFilter = sampler.magFilter = sampler.mipFilter = gfx::Filter::LINEAR;
     sampler.maxAnisotropy = config::VT_MAX_ANISOTROPY;
     sampler.addressU = sampler.addressV = sampler.addressW = gfx::Address::CLAMP;
     _sampler = device->getSampler(sampler);
-    gfx::RenderPassInfo passInfo;
-    gfx::ColorAttachment color;
-    color.format = gfx::Format::RGBA8;
-    color.loadOp = gfx::LoadOp::LOAD;
-    color.storeOp = gfx::StoreOp::STORE;
-    gfx::GeneralBarrierInfo barrier;
-    barrier.prevAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    barrier.nextAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    if (_compress) {
-        barrier.prevAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
-        barrier.nextAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
-    }
-    color.barrier = device->getGeneralBarrier(barrier);
-    passInfo.colorAttachments = {color, color};
-    // No depth attachment: page rectangles never overlap.
-    IRenderTextureCreateInfo info;
-    info.name = "landscape-vt-atlas";
-    info.width = compositionSize();
-    info.height = compositionSize();
-    info.passInfo = passInfo;
-    info.colorMipLevels = config::VT_MIP_LEVELS;
-    _atlas = ccnew RenderTexture();
-    _atlas->initialize(info);
-    const auto *window = _atlas->getWindow();
-    if (!window || !window->getFramebuffer()) {
-        return false;
-    }
-    const auto *framebuffer = window->getFramebuffer();
-    const auto &textures = framebuffer->getColorTextures();
-    return textures.size() == 2 && textures[0] && textures[1] && framebuffer->getRenderPass();
+    _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
+    return _commands != nullptr;
 }
 
-gfx::Framebuffer *VTRenderer::compositionFramebuffer() const {
-    return _atlas->getWindow()->getFramebuffer();
+uint32_t VTRenderer::render(TilePagePool &tiles, uint32_t maxUpdates) {
+    if (maxUpdates == 0) {
+        return 0;
+    }
+    // Select dirty reserved pages and prepare inputs only when every source is resident.
+    _batch.clear();
+    for (const uint32_t slot : _active) {
+        const auto &page = _pages[slot];
+        if (!page.needsComposition()) {
+            continue;
+        }
+        VTPageInstance instance;
+        const auto inputs = sources(page.address, getRefineFarDetail());
+        if (!_composer->prepareInputs(slot, region(page.address), inputs, tiles, instance)) {
+            continue;
+        }
+        _batch.push_back(instance);
+        if (_batch.size() == maxUpdates) {
+            break;
+        }
+    }
+    if (_batch.empty()) {
+        return 0;
+    }
+    _composer->uploadInputs();
+
+    _commands->begin();
+    if (_compressor) {
+        _compressor->begin(*_commands, _needsClear);
+        // Finish composition, mips and compression before reusing the scratch page.
+        for (const auto &instance : _batch) {
+            _composer->record(*_commands, &instance, 1, _needsClear);
+            _mipGenerator->record(*_commands, *_composer, 1, _needsClear);
+            _needsClear = false;
+            _compressor->record(*_commands, instance.physicalSlot());
+        }
+        _compressor->end(*_commands);
+    } else {
+        const auto count = static_cast<uint32_t>(_batch.size());
+        _composer->record(*_commands, _batch.data(), count, _needsClear);
+        _mipGenerator->record(*_commands, *_composer, count, _needsClear);
+        _needsClear = false;
+    }
+    _commands->end();
+
+    // Submit every stage on the same queue before making these pages drawable.
+    auto *device = Root::getInstance()->getDevice();
+    gfx::CommandBuffer *command = _commands.get();
+    device->flushCommands(&command, 1);
+    device->getQueue()->submit(&command, 1);
+#if CC_DEBUG && CC_LANDSCAPE_DEBUG
+    const auto recomposed = std::count_if(_batch.begin(), _batch.end(), [this](const VTPageInstance &instance) {
+        return page(instance.physicalSlot()).state == State::STALE;
+    });
+    if (recomposed > 0) {
+        CC_LOG_INFO("[Landscape] VT recomposed: %zu stale pages submitted (%s)",
+                    static_cast<size_t>(recomposed), _compressor ? "ASTC 4x4" : "RGBA8");
+    }
+#endif
+    for (const auto &instance : _batch) {
+        publish(instance.physicalSlot());
+    }
+    return static_cast<uint32_t>(_batch.size());
 }
-gfx::RenderPass *VTRenderer::compositionRenderPass() const {
-    return compositionFramebuffer()->getRenderPass();
-}
+
 TextureBase *VTRenderer::atlas() const {
-    return _compress ? static_cast<TextureBase *>(_compressedAtlas[0].get()) : _atlas.get();
+    return _compressor ? static_cast<TextureBase *>(_compressor->atlas()) : _composer->target();
 }
-
 gfx::Texture *VTRenderer::albedo() const {
-    if (_compress) {
-        return _compressedAtlas[0]->getGFXTexture();
-    }
-    return _atlas->getWindow()->getColorTexture(0);
+    return _compressor ? _compressor->albedo() : _composer->target()->getWindow()->getColorTexture(0);
 }
 gfx::Texture *VTRenderer::normalRoughnessAO() const {
-    if (_compress) {
-        return _compressedAtlas[1]->getGFXTexture();
-    }
-    return _atlas->getWindow()->getColorTexture(1);
+    return _compressor ? _compressor->normalRoughnessAO() : _composer->target()->getWindow()->getColorTexture(1);
 }
 
-bool VTRenderer::ensureGridMappingCapacity(uint32_t count) {
-    constexpr uint32_t ENTRIES = std::tuple_size<decltype(VTGridMapping::cells)>::value;
-    uint32_t size = std::max(256U, _gridMappingSize);
+void VTRenderer::setGlobalColorMap(Texture2D *texture) {
+    _composer->setGlobalColorMap(texture);
+    invalidate();
+}
+
+void VTRenderer::setGlobalColorStrength(float strength) {
+    if (_composer->setGlobalColorStrength(strength)) {
+        invalidate();
+    }
+#if CC_DEBUG && CC_LANDSCAPE_DEBUG
+    auto *pass = _composer->material()->getPasses()->front().get();
+    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
+    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
+    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
+    const auto stale = std::count_if(activeSlots().begin(), activeSlots().end(), [this](uint32_t slot) {
+        return page(slot).state == State::STALE;
+    });
+    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
+                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
+                static_cast<size_t>(stale), activeSlots().size());
+#endif
+}
+
+void VTRenderer::setHeightBlendEnabled(bool enabled) {
+    if (_composer->setHeightBlendEnabled(enabled)) {
+        invalidate();
+    }
+}
+
+void VTRenderer::setRefineFarDetail(bool enabled) {
+    if (_refineFarDetail == enabled) {
+        return;
+    }
+    _refineFarDetail = enabled;
+    for (auto &page : _pages) {
+        if (page.address.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL && page.state == State::READY) {
+            page.state = State::STALE;
+        }
+    }
+}
+
+
+void VTRenderer::destroy() {
+    _commands = nullptr;
+    _compressor.reset();
+    _mipGenerator.reset();
+    _composer.reset();
+    _pageTable.destroy();
+    _pages.clear();
+    _active.clear();
+    _lookup.clear();
+    _reservation = 0;
+    _batch.clear();
+    _sampler = nullptr;
+    _needsClear = true;
+    _refineFarDetail = true;
+}
+
+VTPageLayout::VTPageLayout(float sectorSize) : _sectorSize(sectorSize) {
+    assert(sectorSize > 0);
+    while (_rootLevel < 27U && sectorSize / static_cast<float>(1U << (_rootLevel + 1U)) >= 1.0F) {
+        ++_rootLevel;
+    }
+}
+
+uint32_t VTPageLayout::levelForDistance(float distance) const {
+    // Start with the sector page and refine while the next level meets the
+    // requested size. Most mapping queries are for distant, coarse pages.
+    uint32_t level = _rootLevel;
+    float nextSize = _sectorSize * 0.5F;
+    const float target = distance * 0.5F;
+    while (level > 0 && nextSize >= target) {
+        --level;
+        nextSize *= 0.5F;
+    }
+    return level;
+}
+
+VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const {
+    VTGridMapping result;
+    const float heightDistance = std::max({minY - camera.y, camera.y - maxY, 0.0F});
+    const LandscapeRegion firstCell{region.x, region.z, region.size / static_cast<float>(VTGridMapping::SIDE)};
+    constexpr uint32_t half = VTGridMapping::SIDE / 2;
+    // Four aligned quadrants; only subdivide where material resolution needs it.
+    for (uint32_t z = 0; z < VTGridMapping::SIDE; z += half) {
+        for (uint32_t x = 0; x < VTGridMapping::SIDE; x += half) {
+            mapCells(firstCell, camera, heightDistance, x, z, half, result);
+        }
+    }
+    return result;
+}
+
+void VTPageLayout::mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const {
+    const float cellSize = firstCell.size;
+    const float x = firstCell.x + left * cellSize;
+    const float z = firstCell.z + bottom * cellSize;
+    const float size = side * cellSize;
+    const float dx = std::max({x - camera.x, camera.x - (x + size), 0.0F});
+    const float dz = std::max({z - camera.z, camera.z - (z + size), 0.0F});
+    const uint32_t desiredLevel = levelForDistance(std::sqrt(dx * dx + heightDistance * heightDistance + dz * dz));
+    if (side > 1 && pageSize(desiredLevel) < size) {
+        const uint32_t half = side / 2;
+        for (uint32_t row = bottom; row < bottom + side; row += half) {
+            for (uint32_t column = left; column < left + side; column += half) {
+                mapCells(firstCell, camera, heightDistance, column, row, half, mapping);
+            }
+        }
+        return;
+    }
+    // Odd vertices collapse to the preceding even vertex during morph/stitching.
+    // One page must cover the whole trajectory, including the cell's far edge.
+    const auto page = coveringPage(desiredLevel,
+                                  {x - (left & 1U) * cellSize, z - (bottom & 1U) * cellSize},
+                                  {x + size, z + size});
+    const auto found = std::find_if(mapping.pages.begin(), mapping.pages.end(), [page](const auto &entry) {
+        return entry.key() == page.key();
+    });
+    const size_t index = static_cast<size_t>(found - mapping.pages.begin());
+    assert(index < VTGridMapping::CELL_COUNT);
+    if (found == mapping.pages.end()) {
+        mapping.pages.push_back(page);
+    }
+    for (uint32_t row = bottom; row < bottom + side; ++row) {
+        std::fill_n(mapping.cells.begin() + row * VTGridMapping::SIDE + left, side, static_cast<uint8_t>(index));
+    }
+}
+
+VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
+    assert(desiredLevel <= _rootLevel);
+    for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
+        const float size = pageSize(level);
+        const VTPageAddress page{level,
+                                 static_cast<uint32_t>(std::floor(min.x / size + 1e-7F)),
+                                 static_cast<uint32_t>(std::floor(min.z / size + 1e-7F))};
+        if (max.x <= (page.x + 1.0F) * size + size * 1e-7F &&
+            max.z <= (page.z + 1.0F) * size + size * 1e-7F) {
+            return page;
+        }
+    }
+    assert(false && "VT coverage must not cross sector boundaries");
+    return {};
+}
+
+void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
+    // Return each input once, in sampling order. Base-precision normal entries
+    // share one tile, which may also provide the splat data.
+    const auto append = [&output](NodeAddress source) {
+        const auto key = source.key();
+        const auto duplicate = std::find_if(output.begin(), output.end(), [key](NodeAddress entry) {
+            return entry.key() == key;
+        });
+        if (duplicate == output.end()) {
+            output.push_back(source);
+        }
+    };
+    append(splat);
+    for (const auto source : normals) {
+        append(source);
+    }
+}
+
+uint32_t VTRenderer::sourceLevel(float size) const {
+    uint32_t level = _data.minTileLevel;
+    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
+        ++level;
+    }
+    return level;
+}
+
+VTPageSources VTRenderer::sources(VTPageAddress page, bool refineFarDetail) const {
+    const float size = _layout.pageSize(page.level);
+    VTPageSources result;
+    result.splat = _data.nodeAtClamped(sourceLevel(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
+    // Base precision uses one tile for the page interior. Far detail matches
+    // source height density to the output page, using up to 2x2 interior tiles.
+    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
+    const bool detailed = refineFarDetail && page.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL;
+    const uint32_t level = detailed ? sourceLevel(target) : result.splat.level;
+    // Select only the four interior quadrants. Source padding supplies the
+    // gutters, so neither precision reserves additional neighboring tiles.
+    std::array<uint32_t, 2> columns;
+    std::array<uint32_t, 2> rows;
+    for (uint32_t i = 0; i < 2; ++i) {
+        const auto source = _data.nodeAtClamped(level, {(page.x + 0.25F + i * 0.5F) * size, (page.z + 0.25F + i * 0.5F) * size});
+        columns[i] = source.x;
+        rows[i] = source.z;
+    }
+    for (uint32_t row = 0; row < 2; ++row) {
+        for (uint32_t col = 0; col < 2; ++col) {
+            result.normals[row * 2 + col] = {level, columns[col], rows[row]};
+        }
+    }
+    return result;
+}
+
+bool VTRenderer::initPages(const LandscapeData &data, uint32_t capacity) {
+    if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
+        return false;
+    }
+    _pages.clear();
+    _active.clear();
+    _lookup.clear();
+    _reservation = 0;
+    _data = data;
+    _layout = VTPageLayout(data.sectorSize);
+    _pages.resize(capacity);
+    return true;
+}
+bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
+    if (pages.size() > _pages.size()) {
+        return false;
+    }
+    for (const auto p : pages) {
+        if (p.level > _layout.rootLevel()) {
+            return false;
+        }
+        const uint64_t side = 1ULL << (_layout.rootLevel() - p.level);
+        if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
+            return false;
+        }
+    }
+    return true;
+}
+bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
+    if (!canReserve(pages)) {
+        return false;
+    }
+    ++_reservation;
+    // First protect resident pages and remember their slots before any eviction.
+    constexpr uint32_t MISSING = std::numeric_limits<uint32_t>::max();
+    _active.clear();
+    for (const auto address : pages) {
+        const auto found = _lookup.find(address.key());
+        if (found == _lookup.end()) {
+            _active.push_back(MISSING);
+            continue;
+        }
+        const auto slot = found->second;
+        _pages[slot].lastReserved = _reservation;
+        _active.push_back(slot);
+    }
+    // Fill only the missing slots, preserving demand order without another lookup.
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (_active[i] != MISSING) {
+            continue;
+        }
+        const int slot = allocate(pages[i]);
+        assert(slot >= 0);
+        _pages[slot].lastReserved = _reservation;
+        _active[i] = static_cast<uint32_t>(slot);
+    }
+    return true;
+}
+int VTRenderer::allocate(VTPageAddress address) {
+    int slot = -1;
+    uint64_t oldest = std::numeric_limits<uint64_t>::max();
+    for (uint32_t i = 0; i < _pages.size(); ++i) {
+        const auto &p = _pages[i];
+        if (p.state == State::EMPTY) {
+            slot = static_cast<int>(i);
+            break;
+        }
+        if (p.lastReserved != _reservation && p.lastReserved < oldest) {
+            oldest = p.lastReserved;
+            slot = static_cast<int>(i);
+        }
+    }
+    if (slot < 0) {
+        return -1;
+    }
+    auto &p = _pages[slot];
+    if (p.state != State::EMPTY) {
+        _lookup.erase(p.address.key());
+    }
+    p = Page{};
+    p.address = address;
+    p.state = State::DIRTY;
+    _lookup[address.key()] = static_cast<uint32_t>(slot);
+    return slot;
+}
+void VTRenderer::publish(uint32_t slot) {
+    auto &page = _pages[slot];
+    assert(page.lastReserved == _reservation && page.needsComposition());
+    page.state = State::READY;
+}
+
+
+void VTRenderer::invalidate() {
+    for (auto &p : _pages) {
+        if (p.state == State::READY) {
+            p.state = State::STALE;
+        }
+    }
+}
+void VTRenderer::invalidate(LandscapeRegion changed) {
+    for (auto &page : _pages) {
+        if (page.state != State::READY) {
+            continue;
+        }
+        const auto bounds = region(page.address);
+        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
+            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
+            continue;
+        }
+        page.state = State::STALE;
+    }
+}
+
+bool VTRenderer::ready() const {
+    return !_active.empty() && std::all_of(_active.begin(), _active.end(), [this](uint32_t slot) { return _pages[slot].state == State::READY; });
+}
+bool VTRenderer::needsComposition(VTPageAddress address) const {
+    const auto it = _lookup.find(address.key());
+    return it == _lookup.end() || _pages[it->second].state != State::READY;
+}
+int VTRenderer::resolve(VTPageAddress address) const {
+    const auto it = _lookup.find(address.key());
+    if (it == _lookup.end()) {
+        return -1;
+    }
+    const auto &p = _pages[it->second];
+    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
+}
+
+
+VTPageTable::VTPageTable() = default;
+VTPageTable::~VTPageTable() = default;
+
+bool VTPageTable::ensureCapacity(uint32_t count) {
+    constexpr uint32_t ENTRIES = VTGridMapping::CELL_COUNT;
+    uint32_t size = std::max(256U, _size);
     auto *device = Root::getInstance()->getDevice();
     while (static_cast<uint64_t>(size) * size < static_cast<uint64_t>(count) * ENTRIES) {
         size *= 2;
@@ -185,7 +505,7 @@ bool VTRenderer::ensureGridMappingCapacity(uint32_t count) {
             return false;
         }
     }
-    if (size == _gridMappingSize) {
+    if (size == _size) {
         return true;
     }
     gfx::TextureInfo info;
@@ -199,60 +519,59 @@ bool VTRenderer::ensureGridMappingCapacity(uint32_t count) {
         return false;
     }
     // Linear indices remain stable across growth; the shader uses textureSize.
-    _gridMappingData.resize(static_cast<size_t>(size) * size * 2, 0);
+    _entries.resize(static_cast<size_t>(size) * size);
     gfx::BufferTextureCopy copy;
     copy.texExtent = {size, size, 1};
-    const uint8_t *bytes[]{_gridMappingData.data()};
+    const uint8_t *bytes[]{reinterpret_cast<const uint8_t *>(_entries.data())};
     device->copyBuffersToTexture(bytes, texture, &copy, 1);
-    _gridMappings = std::move(texture);
-    _gridMappingSize = size;
+    _texture = std::move(texture);
+    _size = size;
     return true;
 }
 
-uint32_t VTRenderer::allocateGridMapping() {
-    if (!_freeGridMappings.empty()) {
-        const uint32_t slot = _freeGridMappings.back();
-        _freeGridMappings.pop_back();
+uint32_t VTPageTable::allocate() {
+    if (!_freeSlots.empty()) {
+        const uint32_t slot = _freeSlots.back();
+        _freeSlots.pop_back();
         return slot;
     }
-    CC_ASSERT(static_cast<size_t>(_gridMappingCount + 1) * 512 <= _gridMappingData.size());
-    return _gridMappingCount++;
+    CC_ASSERT(static_cast<size_t>(_count + 1) * VTGridMapping::CELL_COUNT <= _entries.size());
+    return _count++;
 }
 
-void VTRenderer::releaseGridMapping(uint32_t slot) {
-    CC_ASSERT(slot < _gridMappingCount);
-    _freeGridMappings.push_back(slot);
+void VTPageTable::release(uint32_t slot) {
+    CC_ASSERT(slot < _count);
+    _freeSlots.push_back(slot);
 }
 
-bool VTRenderer::updateGridMapping(uint32_t slot, const VTGridMapping &mapping) {
+bool VTPageTable::update(uint32_t slot, const VTGridMapping &mapping, const VTRenderer &pages) {
     static_assert(config::VT_PAGE_COUNT <= 256, "RG8 mappings store an 8-bit physical slot");
-    CC_ASSERT(slot < _gridMappingCount);
-    std::array<uint8_t, 256> physicalSlots{};
+    CC_ASSERT(slot < _count);
+    std::array<uint8_t, VTGridMapping::CELL_COUNT> physicalSlots{};
     CC_ASSERT(mapping.pages.size() <= physicalSlots.size());
     for (size_t i = 0; i < mapping.pages.size(); ++i) {
-        const int physical = _pages.resolve(mapping.pages[i]);
+        const int physical = pages.resolve(mapping.pages[i]);
         CC_ASSERTF(physical >= 0, "[Landscape] exact VT page must be published before drawing");
         physicalSlots[i] = static_cast<uint8_t>(physical);
     }
-    std::array<uint8_t, 512> encoded;
+    std::array<Entry, VTGridMapping::CELL_COUNT> encoded;
     for (size_t i = 0; i < mapping.cells.size(); ++i) {
         const uint8_t page = mapping.cells[i];
         CC_ASSERT(page < mapping.pages.size());
-        encoded[i * 2] = physicalSlots[page];
-        encoded[i * 2 + 1] = static_cast<uint8_t>(mapping.pages[page].level);
+        encoded[i] = {physicalSlots[page], static_cast<uint8_t>(mapping.pages[page].level)};
     }
     const size_t offset = static_cast<size_t>(slot) * encoded.size();
-    auto *destination = _gridMappingData.data() + offset;
+    auto *destination = _entries.data() + offset;
     // A neighbor can dirty only the stitch mask. Avoid uploading an unchanged
     // material table; the CPU mirror also remains valid across texture growth.
-    if (std::equal(encoded.begin(), encoded.end(), destination)) {
+    if (std::memcmp(encoded.data(), destination, sizeof(encoded)) == 0) {
         return false;
     }
     std::copy(encoded.begin(), encoded.end(), destination);
     return true;
 }
 
-void VTRenderer::uploadGridMappings(ccstd::vector<uint32_t> slots) {
+void VTPageTable::upload(ccstd::vector<uint32_t> slots) {
     if (slots.empty()) {
         return;
     }
@@ -261,676 +580,33 @@ void VTRenderer::uploadGridMappings(ccstd::vector<uint32_t> slots) {
     ccstd::vector<const uint8_t *> buffers;
     copies.reserve(slots.size());
     buffers.reserve(slots.size());
-    constexpr uint32_t cells = std::tuple_size<decltype(VTGridMapping::cells)>::value;
+    constexpr uint32_t cells = VTGridMapping::CELL_COUNT;
     for (size_t i = 0; i < slots.size(); ++i) {
-        CC_ASSERT(slots[i] < _gridMappingCount);
+        CC_ASSERT(slots[i] < _count);
         const uint32_t first = slots[i] * cells;
         uint32_t width = cells;
         // Adjacent tables share one upload, but never cross a texture row.
         while (i + 1 < slots.size() && slots[i + 1] == slots[i] + 1 &&
-               slots[i + 1] * cells / _gridMappingSize == first / _gridMappingSize) {
+               slots[i + 1] * cells / _size == first / _size) {
             ++i;
-            CC_ASSERT(slots[i] < _gridMappingCount);
+            CC_ASSERT(slots[i] < _count);
             width += cells;
         }
         gfx::BufferTextureCopy copy;
-        copy.texOffset = {static_cast<int32_t>(first % _gridMappingSize), static_cast<int32_t>(first / _gridMappingSize), 0};
+        copy.texOffset = {static_cast<int32_t>(first % _size), static_cast<int32_t>(first / _size), 0};
         copy.texExtent = {width, 1, 1};
         copies.push_back(copy);
-        buffers.push_back(_gridMappingData.data() + static_cast<size_t>(first) * 2);
+        buffers.push_back(reinterpret_cast<const uint8_t *>(_entries.data() + first));
     }
-    Root::getInstance()->getDevice()->copyBuffersToTexture(buffers.data(), _gridMappings, copies.data(), static_cast<uint32_t>(copies.size()));
+    Root::getInstance()->getDevice()->copyBuffersToTexture(buffers.data(), _texture, copies.data(), static_cast<uint32_t>(copies.size()));
 }
 
-void VTRenderer::requiredSources(ccstd::vector<NodeAddress> &sources) const {
-    // Fixed projection references stay resident across debug toggles, so enabling
-    // projection cannot invalidate an already admitted source-capacity budget.
-    for (uint32_t z = 0; z < _cliff.rows; ++z) {
-        for (uint32_t x = 0; x < _cliff.columns; ++x) {
-            sources.push_back({_cliff.level, x, z});
-        }
-    }
+void VTPageTable::destroy() {
+    _texture = nullptr;
+    _entries.clear();
+    _freeSlots.clear();
+    _size = 0;
+    _count = 0;
 }
 
-void VTRenderer::bindComposeTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
-    _material->setPropertyGFXTexture(name, texture);
-    auto *pass = _material->getPasses()->front().get();
-    const auto handle = pass->getHandle(name);
-    if (handle) {
-        pass->bindSampler(scene::Pass::getBindingFromHandle(handle), sampler);
-    }
-}
-
-bool VTRenderer::initComposeMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device) {
-    const auto &data = asset.data();
-    _mesh = GridMesh::createVTQuad(device);
-    _material = ccnew Material();
-    IMaterialInfo info;
-    info.effectName = ccstd::string{"landscape/builtin-landscape-vt-compose"};
-    info.defines = IMaterialInfo::DefinesType{MacroRecord{{"LANDSCAPE_HEIGHT_UNORM", tiles.heightIsUnorm()}, {"LANDSCAPE_VT_COMPACT", _compress}}};
-    _material->initialize(info);
-    if (!_mesh || !_material->getPasses() || _material->getPasses()->empty()) {
-        return false;
-    }
-    auto *pass = _material->getPasses()->front().get();
-    const char *requiredProperties[] = {
-        "rvtNormalParams",
-        "vtLayout",
-        "splatmap",
-        "albedoHeightMap",
-        "normalRoughnessAOMap",
-        "materialParams",
-        "globalColorMap",
-        "globalColorParams",
-        "heightBlendParams",
-        "terrainNormalMap",
-        "normalSourceMap",
-        "cliffSourceMap",
-        "terrainHeightMap",
-        "cliffParams",
-        "cliffLayout",
-        "cliffMaterialParams",
-    };
-    for (const char *name : requiredProperties) {
-        if (pass->getHandle(name) == 0U) {
-            CC_LOG_WARNING("[Landscape] VT effect is missing %s; rebuild project effects", name);
-            return false;
-        }
-    }
-    bindComposeTexture("splatmap", tiles.splatArray(), tiles.splatSampler());
-    bindComposeTexture("terrainNormalMap", tiles.normalArray(), tiles.heightSampler());
-    bindComposeTexture("terrainHeightMap", tiles.heightArray(), tiles.heightSampler());
-    bindComposeTexture("albedoHeightMap", materials.albedoHeight(), materials.repeatSampler());
-    bindComposeTexture("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.repeatSampler());
-    if (data.width() <= 0.0F || data.depth() <= 0.0F || !materials.whiteTexture() || !materials.clampSampler()) {
-        return false;
-    }
-    _fallbackGlobalColorMap = materials.whiteTexture();
-    _globalColorSampler = materials.clampSampler();
-    _globalColorParams = Vec4{1.0F / data.width(), 1.0F / data.depth(), 0.0F, 0.0F};
-    applyGlobalColorMap();
-    _material->setPropertyVec4Array("materialParams", materials.materialParams());
-    _material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(compositionSize()),
-                                                static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
-                                                device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
-    _material->setPropertyVec4("rvtNormalParams", Vec4{_bakeNormalEnabled ? 1.0F : 0.0F, 0, 0, 0});
-    return true;
-}
-
-bool VTRenderer::initNormalSourceTable(TilePagePool &tiles, gfx::Device *device) {
-    gfx::TextureInfo indexInfo;
-    indexInfo.type = gfx::TextureType::TEX2D;
-    indexInfo.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
-    indexInfo.height = config::VT_PAGE_COUNT;
-    indexInfo.format = gfx::Format::RGBA32F;
-    indexInfo.width = config::VT_NORMAL_SOURCE_COUNT;
-    _normalSources = device->createTexture(indexInfo);
-    if (!_normalSources) {
-        return false;
-    }
-    _normalSourceData.resize(config::VT_PAGE_COUNT * config::VT_NORMAL_SOURCE_COUNT);
-    bindComposeTexture("normalSourceMap", _normalSources, tiles.splatSampler());
-    return true;
-}
-
-bool VTRenderer::initCliffReference(const LandscapeAsset &asset, TilePagePool &tiles, gfx::Device *device) {
-    const auto &data = asset.data();
-    gfx::TextureInfo indexInfo;
-    indexInfo.type = gfx::TextureType::TEX2D;
-    indexInfo.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
-    indexInfo.format = gfx::Format::RGBA32F;
-    _cliff.data = data;
-    _cliff.level = cliffReferenceLevel(data);
-    _cliff.columns = data.nodesX(_cliff.level);
-    _cliff.rows = data.nodesZ(_cliff.level);
-    indexInfo.width = _cliff.columns;
-    indexInfo.height = _cliff.rows;
-    _cliff.texture = device->createTexture(indexInfo);
-    if (!_cliff.texture) {
-        return false;
-    }
-    _cliff.sources.resize(static_cast<size_t>(_cliff.columns) * _cliff.rows);
-    bindComposeTexture("cliffSourceMap", _cliff.texture, tiles.splatSampler());
-    const float referenceSize = data.nodeSize(_cliff.level);
-    const auto &cliffMaterial = asset.cliffMaterial();
-    _cliff.params = Vec4{0, data.heightScale, data.heightBias, static_cast<float>(cliffMaterial.layer + 1)};
-    _material->setPropertyVec4("cliffMaterialParams", Vec4{cliffMaterial.maxNormalY,
-                                                           cliffMaterial.globalColorInfluence, 0, 0});
-    _material->setPropertyVec4("cliffParams", _cliff.params);
-    _material->setPropertyVec4("cliffLayout", Vec4{referenceSize, 0, 0, 0});
-    return true;
-}
-
-bool VTRenderer::initPageDrawResources(gfx::Device *device) {
-    auto *pass = _material->getPasses()->front().get();
-    constexpr uint32_t STRIDE = sizeof(PageInstance);
-    _instances = device->createBuffer({gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
-                                       gfx::MemoryUsageBit::DEVICE, config::VT_PAGE_COUNT * STRIDE, STRIDE});
-    gfx::InputAssemblerInfo iaInfo;
-    iaInfo.attributes = _mesh->getAttributes();
-    iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtPage", gfx::Format::RGBA32F, false, 1, true, 1});
-    iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtRegion", gfx::Format::RGBA32F, false, 1, true, 2});
-    iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtSource", gfx::Format::RGBA32F, false, 1, true, 3});
-    iaInfo.vertexBuffers = _mesh->getVertexBuffers();
-    iaInfo.vertexBuffers.push_back(_instances.get());
-    iaInfo.indexBuffer = _mesh->getIndexBuffer();
-    _inputAssembler = device->createInputAssembler(iaInfo);
-    auto *shader = pass->getShaderVariant();
-    if (!shader) {
-        return false;
-    }
-    _pipelineState = device->createPipelineState({shader, pass->getPipelineLayout(), compositionRenderPass(), {iaInfo.attributes}, *pass->getRasterizerState(), *pass->getDepthStencilState(), *pass->getBlendState(), pass->getPrimitive(), pass->getDynamicStates()});
-    return _instances && _inputAssembler && _pipelineState;
-}
-
-bool VTRenderer::initMipPasses(gfx::Device *device) {
-    IMaterialInfo info;
-    info.effectName = ccstd::string{"landscape/builtin-landscape-vt-compose"};
-    info.technique = 1;
-    info.defines = IMaterialInfo::DefinesType{MacroRecord{{"LANDSCAPE_VT_COMPACT", _compress}}};
-    const auto view = [device](gfx::Texture *texture, uint32_t base, uint32_t count) {
-        gfx::TextureViewInfo info;
-        info.texture = texture;
-        info.format = texture->getFormat();
-        info.baseLevel = base;
-        info.levelCount = count;
-        return device->createTexture(info);
-    };
-    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
-        auto &mip = _mipPasses[level - 1];
-        mip.albedo = view(_atlas->getWindow()->getColorTexture(0), level, 1);
-        mip.normal = view(_atlas->getWindow()->getColorTexture(1), level, 1);
-        // Prefix views exclude the destination, preserving absolute mip indices.
-        mip.sourceAlbedo = view(_atlas->getWindow()->getColorTexture(0), 0, level);
-        mip.sourceNormal = view(_atlas->getWindow()->getColorTexture(1), 0, level);
-        if (!mip.albedo || !mip.normal || !mip.sourceAlbedo || !mip.sourceNormal) {
-            return false;
-        }
-        mip.framebuffer = device->createFramebuffer({compositionRenderPass(), {mip.albedo, mip.normal}, nullptr});
-        if (!mip.framebuffer) {
-            return false;
-        }
-        // Technique 1 filters the completed pages, never re-evaluates materials.
-        auto &mipMaterial = _mipPasses[level - 1].material;
-        mipMaterial = ccnew Material();
-        mipMaterial->initialize(info);
-        if (!mipMaterial->getPasses() || mipMaterial->getPasses()->empty()) {
-            return false;
-        }
-        auto *mipPass = mipMaterial->getPasses()->front().get();
-        if (!mipPass->getHandle("mipLayout") || !mipPass->getHandle("sourceAlbedo") || !mipPass->getHandle("sourceNormal")) {
-            CC_LOG_ERROR("[Landscape] VT mip technique is missing; rebuild project effects");
-            return false;
-        }
-        // Read the preceding level; the source view excludes the destination.
-        mipMaterial->setPropertyGFXTexture("sourceAlbedo", mip.sourceAlbedo.get());
-        mipMaterial->setPropertyGFXTexture("sourceNormal", mip.sourceNormal.get());
-        mipMaterial->setPropertyVec4("mipLayout", Vec4{static_cast<float>(compositionSize() >> (level - 1)),
-                                                       static_cast<float>(config::VT_PAGE_RES >> (level - 1)), static_cast<float>(level - 1),
-                                                       device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
-        mipPass->update();
-        auto *mipShader = mipPass->getShaderVariant();
-        if (!mipShader) {
-            return false;
-        }
-        _mipPasses[level - 1].pipelineState = device->createPipelineState({mipShader, mipPass->getPipelineLayout(), compositionRenderPass(), {_inputAssembler->getAttributes()}, *mipPass->getRasterizerState(), *mipPass->getDepthStencilState(), *mipPass->getBlendState(), mipPass->getPrimitive(), mipPass->getDynamicStates()});
-        if (!_mipPasses[level - 1].pipelineState) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool VTRenderer::initCompression(gfx::Device *device) {
-    for (auto &texture : _compressedAtlas) {
-        texture = ccnew Texture2D();
-        texture->reset({config::VT_ATLAS_SIZE, config::VT_ATLAS_SIZE, static_cast<PixelFormat>(COMPRESSED_FORMAT),
-                        config::VT_MIP_LEVELS, 0, config::VT_MIP_LEVELS - 1});
-        if (!texture->getGFXTexture()) {
-            return false;
-        }
-    }
-    // The legacy Material/ProgramLib path only builds graphics shaders. Create
-    // this compute pipeline directly, as ClusterLightCulling does, keeping the
-    // compiler-produced source in the dedicated compression effect.
-    auto *effect = EffectAsset::get("landscape/builtin-landscape-vt-compress");
-    if (!effect) {
-        return false;
-    }
-    const IShaderInfo *program = nullptr;
-    for (const auto &candidate : effect->getShaders()) {
-        if (candidate.name.find(COMPRESSION_PROGRAM) != ccstd::string::npos) {
-            program = &candidate;
-            break;
-        }
-    }
-    if (!program) {
-        return false;
-    }
-    const auto &source = device->getGfxAPI() == gfx::API::GLES3 ? program->glsl3.compute : program->glsl4.compute;
-    if (!source || source->empty()) {
-        return false;
-    }
-    gfx::ShaderInfo shaderInfo;
-    shaderInfo.name = COMPRESSION_PROGRAM;
-    shaderInfo.stages = {{gfx::ShaderStageFlagBit::COMPUTE, source.value()}};
-    shaderInfo.blocks = {{1, 0, "CompressionConstants", {{"compressionParams", gfx::Type::FLOAT4, 1}}, 1}};
-    shaderInfo.samplerTextures = {{1, 1, "sourceAlbedo", gfx::Type::SAMPLER2D, 1},
-                                  {1, 2, "sourceNormal", gfx::Type::SAMPLER2D, 1}};
-    shaderInfo.buffers = {{1, 3, "CompressedBlocks", 1, gfx::MemoryAccessBit::WRITE_ONLY}};
-    _compressShader = device->createShader(shaderInfo);
-    gfx::DescriptorSetLayoutInfo layoutInfo;
-    layoutInfo.bindings = {{0, gfx::DescriptorType::UNIFORM_BUFFER, 1, gfx::ShaderStageFlagBit::COMPUTE},
-                           {1, gfx::DescriptorType::SAMPLER_TEXTURE, 1, gfx::ShaderStageFlagBit::COMPUTE},
-                           {2, gfx::DescriptorType::SAMPLER_TEXTURE, 1, gfx::ShaderStageFlagBit::COMPUTE},
-                           {3, gfx::DescriptorType::STORAGE_BUFFER, 1, gfx::ShaderStageFlagBit::COMPUTE}};
-    _compressLayout = device->createDescriptorSetLayout(layoutInfo);
-    _emptyLayout = device->createDescriptorSetLayout({});
-    _compressPipelineLayout = device->createPipelineLayout({{_emptyLayout, _compressLayout}});
-    constexpr uint32_t BLOCKS = config::VT_PAGE_RES * config::VT_PAGE_RES / 16;
-    _compressedBlocks = device->createBuffer({gfx::BufferUsageBit::STORAGE | gfx::BufferUsageBit::TRANSFER_SRC,
-                                              gfx::MemoryUsageBit::DEVICE, BLOCKS * 32, 16});
-    if (!_compressShader || !_compressedBlocks || !_compressLayout || !_compressPipelineLayout) {
-        return false;
-    }
-    gfx::SamplerInfo samplerInfo;
-    samplerInfo.minFilter = samplerInfo.magFilter = gfx::Filter::POINT;
-    samplerInfo.mipFilter = gfx::Filter::NONE;
-    auto *sampler = device->getSampler(samplerInfo);
-    for (uint32_t level = 0; level < config::VT_MIP_LEVELS; ++level) {
-        auto &uniform = _compressUniforms[level];
-        uniform = device->createBuffer({gfx::BufferUsageBit::UNIFORM | gfx::BufferUsageBit::TRANSFER_DST,
-                                         gfx::MemoryUsageBit::DEVICE, sizeof(Vec4), sizeof(Vec4)});
-        const Vec4 params{static_cast<float>(level), 0, 0, 0};
-        uniform->update(&params, sizeof(params));
-        auto &set = _compressSets[level];
-        set = device->createDescriptorSet({_compressLayout});
-        set->bindBuffer(0, uniform);
-        set->bindTexture(1, _atlas->getWindow()->getColorTexture(0));
-        set->bindSampler(1, sampler);
-        set->bindTexture(2, _atlas->getWindow()->getColorTexture(1));
-        set->bindSampler(2, sampler);
-        set->bindBuffer(3, _compressedBlocks);
-        set->update();
-    }
-    gfx::PipelineStateInfo pipelineInfo;
-    pipelineInfo.shader = _compressShader;
-    pipelineInfo.pipelineLayout = _compressPipelineLayout;
-    pipelineInfo.bindPoint = gfx::PipelineBindPoint::COMPUTE;
-    _compressPipeline = device->createPipelineState(pipelineInfo);
-    return _compressPipeline != nullptr;
-}
-
-void VTRenderer::recordAtlasTransition(bool writing) {
-    auto *device = Root::getInstance()->getDevice();
-    gfx::TextureBarrierInfo info;
-    info.prevAccesses = writing ? (_needsClear ? gfx::AccessFlagBit::NONE : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE)
-                               : gfx::AccessFlagBit::TRANSFER_WRITE;
-    info.nextAccesses = writing ? gfx::AccessFlagBit::TRANSFER_WRITE : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    info.discardContents = writing && _needsClear;
-    info.range.levelCount = config::VT_MIP_LEVELS;
-    info.range.numSlices = 1;
-    const gfx::TextureBarrier *barriers[] = {device->getTextureBarrier(info), device->getTextureBarrier(info)};
-    // Texture2D exposes a sampling view; transfers target its underlying image.
-    const gfx::Texture *textures[] = {albedo()->getViewInfo().texture, normalRoughnessAO()->getViewInfo().texture};
-    _commands->pipelineBarrier(nullptr, nullptr, nullptr, 0, barriers, textures, 2);
-}
-
-void VTRenderer::recordCompression(uint32_t slot) {
-    auto *device = Root::getInstance()->getDevice();
-    for (uint32_t level = 0; level < config::VT_MIP_LEVELS; ++level) {
-        const uint32_t size = config::VT_PAGE_RES >> level;
-        const uint32_t blocks = size / 4;
-        auto *barrier = device->getGeneralBarrier({gfx::AccessFlagBit::TRANSFER_READ, gfx::AccessFlagBit::COMPUTE_SHADER_WRITE});
-        _commands->pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-        _commands->bindPipelineState(_compressPipeline);
-        _commands->bindDescriptorSet(1, _compressSets[level]);
-        gfx::DispatchInfo dispatch;
-        dispatch.groupCountX = (blocks + 7) / 8;
-        dispatch.groupCountY = (blocks + 7) / 8;
-        dispatch.groupCountZ = 1;
-        _commands->dispatch(dispatch);
-        barrier = device->getGeneralBarrier({gfx::AccessFlagBit::COMPUTE_SHADER_WRITE, gfx::AccessFlagBit::TRANSFER_READ});
-        _commands->pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-        gfx::BufferTextureCopy copy;
-        copy.texExtent = {size, size, 1};
-        copy.texOffset = {static_cast<int32_t>((slot % config::VT_PAGES_PER_SIDE) * size),
-                          static_cast<int32_t>((slot / config::VT_PAGES_PER_SIDE) * size), 0};
-        copy.texSubres.mipLevel = level;
-        _commands->copyBufferToTexture(_compressedBlocks, albedo()->getViewInfo().texture, &copy, 1);
-        copy.buffOffset = blocks * blocks * 16;
-        _commands->copyBufferToTexture(_compressedBlocks, normalRoughnessAO()->getViewInfo().texture, &copy, 1);
-    }
-}
-
-bool VTRenderer::initCommandResources(gfx::Device *device) {
-    _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
-    gfx::RenderPassInfo initialInfo;
-    initialInfo.colorAttachments = compositionRenderPass()->getColorAttachments();
-    for (auto &color : initialInfo.colorAttachments) {
-        color.loadOp = gfx::LoadOp::CLEAR;
-        color.barrier = device->getGeneralBarrier({gfx::AccessFlagBit::NONE,
-            _compress ? gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE | gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE
-                      : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE});
-    }
-    _initialPass = device->createRenderPass(initialInfo);
-    return _commands && _initialPass;
-}
-
-void VTRenderer::setGlobalColorMap(Texture2D *texture) {
-    _globalColorMap = texture;
-    // Rebinding the same asset also supports replacement of its GPU texture.
-    applyGlobalColorMap();
-    _pages.invalidate();
-}
-
-void VTRenderer::applyGlobalColorMap() {
-    auto *texture = _globalColorMap ? _globalColorMap->getGFXTexture() : nullptr;
-    _globalColorParams.z = texture ? _globalColorStrength : 0.0F;
-    bindComposeTexture("globalColorMap", texture ? texture : _fallbackGlobalColorMap.get(), _globalColorSampler);
-    _material->setPropertyVec4("globalColorParams", _globalColorParams);
-}
-
-void VTRenderer::setGlobalColorStrength(float strength) {
-    const float clampedStrength = std::clamp(strength, 0.0F, 1.0F);
-    if (_globalColorStrength != clampedStrength) {
-        _globalColorStrength = clampedStrength;
-        const float previous = _globalColorParams.z;
-        applyGlobalColorMap();
-        if (previous != _globalColorParams.z) {
-            // STALE pages retain their pixels until the schedule resumes composition.
-            _pages.invalidate();
-        }
-    }
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    auto *pass = _material->getPasses()->front().get();
-    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
-    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
-    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
-    const auto stale = std::count_if(_pages.activeSlots().begin(), _pages.activeSlots().end(), [this](uint32_t slot) {
-        return _pages.page(slot).state == VirtualTexture::State::STALE;
-    });
-    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
-                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
-                static_cast<size_t>(stale), _pages.activeSlots().size());
-#endif
-}
-
-void VTRenderer::setBakeNormalEnabled(bool enabled) {
-    if (_bakeNormalEnabled == enabled) {
-        return;
-    }
-    _bakeNormalEnabled = enabled;
-    _material->setPropertyVec4("rvtNormalParams", Vec4{enabled ? 1.0F : 0.0F, 0, 0, 0});
-    _pages.invalidate();
-}
-
-void VTRenderer::setCliffEnabled(bool enabled) {
-    if (_cliffEnabled == enabled) {
-        return;
-    }
-    _cliffEnabled = enabled;
-    // An authored material override needs the same slope mask with projection disabled. Keep
-    // its references pinned; negative X means ready with planar projection.
-    if (_cliff.params.w <= 0.0F) {
-        _cliff.ready = false;
-    }
-    _cliff.params.x = _cliff.ready ? (enabled ? 1.0F : -1.0F) : 0.0F;
-    _material->setPropertyVec4("cliffParams", _cliff.params);
-    _pages.invalidate();
-}
-
-void VTRenderer::syncCliffSources(TilePagePool &tiles) {
-    if (_cliff.ready || (!_cliffEnabled && _cliff.params.w <= 0.0F)) {
-        return;
-    }
-    bool ready = true;
-    const float size = _cliff.data.nodeSize(_cliff.level);
-    for (uint32_t z = 0; z < _cliff.rows; ++z) {
-        for (uint32_t x = 0; x < _cliff.columns; ++x) {
-            const int layer = tiles.resident({_cliff.level, x, z});
-            ready &= layer >= 0;
-            const auto region = _cliff.data.nodeRegion({_cliff.level, x, z});
-            _cliff.sources[z * _cliff.columns + x] = Vec4{region.x, region.z, region.size, static_cast<float>(layer)};
-        }
-    }
-    if (!ready) {
-        return;
-    }
-    // Publish once, after the entire fixed reference is resident. No per-camera
-    // source LOD switches, partial-resolution seams or repeated VT invalidation.
-    gfx::BufferTextureCopy region;
-    region.texExtent.width = _cliff.columns;
-    region.texExtent.height = _cliff.rows;
-    region.texExtent.depth = 1;
-    const uint8_t *buffers[]{reinterpret_cast<const uint8_t *>(_cliff.sources.data())};
-    Root::getInstance()->getDevice()->copyBuffersToTexture(buffers, _cliff.texture, &region, 1);
-    _cliff.ready = true;
-    _cliff.params.x = _cliffEnabled ? 1.0F : -1.0F;
-    _material->setPropertyVec4("cliffParams", _cliff.params);
-    // The enabling setting already invalidates pages. Resolving its fixed inputs
-    // only makes pending composition executable; it does not create new work.
-    CC_LOG_INFO("[Landscape] Cliff reference ready: L%u, %ux%u tiles, %.2f m sample spacing",
-                _cliff.level, _cliff.columns, _cliff.rows, size / (config::SOURCE_TILE_RESOLUTION - 1U));
-}
-
-void VTRenderer::setHeightBlendEnabled(bool enabled) {
-    auto *pass = _material->getPasses()->front().get();
-    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("heightBlendParams")));
-    const float strength = enabled ? 1.0F : 0.0F;
-    if (params.x == strength) {
-        return;
-    }
-    // Keep the effect's scale/sharpness when toggling the global blend mode.
-    params.x = strength;
-    _material->setPropertyVec4("heightBlendParams", params);
-    // Recomposition reserves its source tiles through the normal scheduling path.
-    _pages.invalidate();
-}
-
-uint32_t VTRenderer::render(TilePagePool &tiles, uint32_t maxUpdates) {
-    syncCliffSources(tiles);
-    if (maxUpdates == 0 || !sourcesReady()) {
-        return 0;
-    }
-    collectPageBatch(tiles, maxUpdates);
-    if (_batchSlots.empty()) {
-        return 0;
-    }
-    submitPageBatch();
-    // Publish only after composition and ALL mip levels are on the same queue.
-    _pages.publish(_batchSlots);
-    return static_cast<uint32_t>(_batchSlots.size());
-}
-
-bool VTRenderer::resolvePageInputs(VTPageAddress page, const TilePagePool &tiles, PageInputs &output) const {
-    const auto sources = _pages.sources(page, _bakeNormalEnabled);
-    const auto splat = tiles.resolve(sources.splat);
-    if (splat.layer < 0) {
-        return false;
-    }
-    const auto region = _pages.region(page);
-    output.region = {region.x, region.z, region.size, 0};
-    output.splatSource = tiles.shaderParams(splat);
-    for (size_t i = 0; i < sources.normals.size(); ++i) {
-        const auto tile = tiles.resolve(sources.normals[i]);
-        if (tile.layer < 0) {
-            return false;
-        }
-        output.normalSources[i] = tiles.shaderParams(tile);
-    }
-    return true;
-}
-
-void VTRenderer::collectPageBatch(const TilePagePool &tiles, uint32_t maxUpdates) {
-    // Source slots can change between batches. Resolve only for this submission,
-    // so no cached input bindings or separate input-readiness state can go stale.
-    _batchSlots.clear();
-    _batchInstances.clear();
-    for (const uint32_t slot : _pages.activeSlots()) {
-        const auto &page = _pages.page(slot);
-        if (!page.needsComposition()) {
-            continue;
-        }
-        PageInputs inputs;
-        if (!resolvePageInputs(page.address, tiles, inputs)) {
-            continue;
-        }
-        const uint32_t decalCount = _decals->collectPageDecals(slot, inputs.region);
-        _batchSlots.push_back(slot);
-        _batchInstances.push_back({Vec4{static_cast<float>(slot), static_cast<float>(decalCount), 0, 0},
-                                  inputs.region, inputs.splatSource});
-        std::copy(inputs.normalSources.begin(), inputs.normalSources.end(),
-                  _normalSourceData.begin() + slot * config::VT_NORMAL_SOURCE_COUNT);
-        if (_batchInstances.size() == maxUpdates) {
-            break;
-        }
-    }
-}
-
-void VTRenderer::uploadPageInputs() {
-    _decals->updateComposeMaterial(_material);
-    _decals->uploadPageDecals();
-    gfx::BufferTextureCopy indexCopy;
-    indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, config::VT_PAGE_COUNT, 1};
-    const uint8_t *normalBytes[]{reinterpret_cast<const uint8_t *>(_normalSourceData.data())};
-    Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSources, &indexCopy, 1);
-
-    _material->getPasses()->front()->update();
-}
-
-void VTRenderer::submitPageBatch() {
-    uploadPageInputs();
-    _commands->begin();
-    if (_compress) {
-        recordCompressedPages();
-    } else {
-        recordCompositionAndMips(_batchInstances.data(), static_cast<uint32_t>(_batchInstances.size()));
-    }
-    _commands->end();
-    gfx::CommandBuffer *command = _commands.get();
-    auto *device = Root::getInstance()->getDevice();
-    device->flushCommands(&command, 1);
-    device->getQueue()->submit(&command, 1);
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    const auto recomposed = std::count_if(_batchSlots.begin(), _batchSlots.end(), [this](uint32_t slot) {
-        return _pages.page(slot).state == VirtualTexture::State::STALE;
-    });
-    if (recomposed > 0) {
-        CC_LOG_INFO("[Landscape] VT recomposed: %zu stale pages submitted (%s)",
-                    static_cast<size_t>(recomposed), _compress ? COMPRESSION_NAME : "RGBA8");
-    }
-#endif
-}
-
-void VTRenderer::recordCompressedPages() {
-    recordAtlasTransition(true);
-    // The compressed path reuses one scratch page, then copies its encoded
-    // blocks to the final atlas before drawing the next page.
-    for (size_t i = 0; i < _batchInstances.size(); ++i) {
-        recordCompositionAndMips(&_batchInstances[i], 1);
-        recordCompression(_batchSlots[i]);
-    }
-    recordAtlasTransition(false);
-}
-
-void VTRenderer::recordCompositionAndMips(const PageInstance *instances, uint32_t instanceCount) {
-    // Updating the vertex buffer is ordered after the preceding page's draws.
-    const auto *barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
-        {gfx::AccessFlagBit::VERTEX_BUFFER, gfx::AccessFlagBit::TRANSFER_WRITE});
-    _commands->pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-    _commands->updateBuffer(_instances, instances, instanceCount * sizeof(PageInstance));
-    barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
-        {gfx::AccessFlagBit::TRANSFER_WRITE, gfx::AccessFlagBit::VERTEX_BUFFER});
-    _commands->pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-    recordPagePass(_material, _pipelineState, compositionFramebuffer(), compositionSize(), instanceCount);
-    for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
-        const auto &mip = _mipPasses[level - 1];
-        recordPagePass(mip.material, mip.pipelineState, mip.framebuffer.get(), compositionSize() >> level, instanceCount);
-    }
-    // Only the first batch uses the initial pass with no prior attachment access.
-    _needsClear = false;
-}
-
-void VTRenderer::recordPagePass(Material *material, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount) {
-    const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 0.5F, 1, 1}};
-    _commands->beginRenderPass(_needsClear ? _initialPass.get() : compositionRenderPass(), framebuffer,
-                               gfx::Rect{0, 0, atlasSize, atlasSize}, colors, 1.0F, 0);
-    auto *pass = material->getPasses()->front().get();
-    _commands->bindPipelineState(pipelineState);
-    _commands->bindDescriptorSet(static_cast<uint32_t>(pipeline::SetIndex::MATERIAL), pass->getDescriptorSet());
-    _commands->bindInputAssembler(_inputAssembler);
-    auto draw = _inputAssembler->getDrawInfo();
-    draw.instanceCount = instanceCount;
-    _commands->draw(draw);
-    _commands->endRenderPass();
-}
-
-void VTRenderer::destroyCompression() {
-    _compressPipeline = nullptr;
-    _compressSets = {};
-    _compressUniforms = {};
-    _compressPipelineLayout = nullptr;
-    _compressLayout = nullptr;
-    _emptyLayout = nullptr;
-    _compressShader = nullptr;
-    _compressedBlocks = nullptr;
-    for (auto &texture : _compressedAtlas) {
-        if (texture) {
-            texture->destroy();
-        }
-        texture = nullptr;
-    }
-    _compress = false;
-}
-
-void VTRenderer::destroy() {
-    destroyCompression();
-    _cliff = {};
-    _normalSources = nullptr;
-    _normalSourceData.clear();
-    _decals = nullptr;
-    _globalColorMap = nullptr;
-    _fallbackGlobalColorMap = nullptr;
-    _globalColorSampler = nullptr;
-    _globalColorStrength = 0.1F;
-    _globalColorParams = Vec4{};
-    _commands = nullptr;
-    _pipelineState = nullptr;
-    for (auto &mip : _mipPasses) {
-        mip.pipelineState = nullptr;
-    }
-    _initialPass = nullptr;
-    _inputAssembler = nullptr;
-    _instances = nullptr;
-    if (_mesh) {
-        _mesh->destroy();
-    }
-    _mesh = nullptr;
-    if (_material) {
-        _material->destroy();
-    }
-    _material = nullptr;
-    for (auto &mip : _mipPasses) {
-        if (mip.material) {
-            mip.material->destroy();
-        }
-        mip = MipPass{};
-    }
-    if (_atlas) {
-        _atlas->destroy();
-    }
-    _atlas = nullptr;
-    _sampler = nullptr;
-    _pages = VirtualTexture{};
-    _gridMappings = nullptr;
-    _gridMappingData.clear();
-    _freeGridMappings.clear();
-    _gridMappingSize = 0;
-    _gridMappingCount = 0;
-    _batchSlots.clear();
-    _batchInstances.clear();
-    _needsClear = true;
-}
-} // namespace landscape
-} // namespace cc
+} // namespace cc::landscape

@@ -17,12 +17,6 @@ CCEffect %{
         - blend: false
       properties:
         vtLayout: { value: [4352, 272, 8, 1] }
-        rvtNormalParams: { value: [1, 0, 0, 0] }
-        cliffParams: { value: [0, 1, 0, 0] }
-        cliffLayout: { value: [1, 0, 0, 0] }
-        cliffMaterialParams: { value: [0, 1, 0, 0] }
-        cliffSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
-        terrainHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         materialParams: { value: [0.1, 1, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
@@ -137,18 +131,16 @@ CCProgram vt-mip-fs %{
 CCProgram vt-compose-uniforms %{
   // Must match config::SOURCE_TILE_RESOLUTION.
   #define LANDSCAPE_TILE_RESOLUTION 129
+  // Must match config::SOURCE_NORMAL_BORDER; the interior keeps the height grid.
+  #define LANDSCAPE_NORMAL_BORDER 8
   uniform Constants {
     vec4 vtLayout; // atlas size, slot size, border, texture-to-clip Y sign
-    vec4 rvtNormalParams; // bake terrain normals, unused YZW
     vec4 materialParams[32]; // repeats/m, biome influence, unused, unused
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
     vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
     vec4 decalParams; // placed decal count
     vec4 decalLayerParams[32]; // config::DECAL_LIBRARY_MAX; X: modulate terrain color
-    vec4 cliffParams; // reference state: 0 pending, +1 triplanar, -1 planar; height scale/bias; override layer + 1
-    vec4 cliffLayout; // reference tile size, unused YZW
-    vec4 cliffMaterialParams; // override maximum normal Y, global color influence, reserved
   };
 }%
 
@@ -197,7 +189,6 @@ CCProgram vt-compose-vs %{
 }%
 
 CCProgram vt-compose-fs %{
-  #pragma define-meta LANDSCAPE_HEIGHT_UNORM
   precision highp float;
   precision highp int;
   #include <vt-compose-uniforms>
@@ -206,8 +197,6 @@ CCProgram vt-compose-fs %{
   uniform highp usampler2DArray splatmap;
   uniform highp sampler2DArray terrainNormalMap;
   uniform highp sampler2D normalSourceMap;
-  uniform highp sampler2D cliffSourceMap;
-  uniform highp sampler2DArray terrainHeightMap;
   uniform highp sampler2DArray albedoHeightMap;
   uniform highp sampler2DArray normalRoughnessAOMap;
   uniform sampler2D globalColorMap;
@@ -243,13 +232,14 @@ CCProgram vt-compose-fs %{
       * sharpness + 0.5, 0.0, 1.0);
   }
 
-  vec2 sourceUV(vec2 xz, vec4 source) {
-    vec2 uv = clamp((xz - source.xy) / source.z, vec2(0.0), vec2(1.0));
-    return (uv * (float(LANDSCAPE_TILE_RESOLUTION) - 1.0) + 0.5) / float(LANDSCAPE_TILE_RESOLUTION);
+  vec2 normalSourceUV(vec2 xz, vec4 source) {
+    // Do not clamp to the interior: VT gutters read the source's real-neighbor padding.
+    vec2 pixel = (xz - source.xy) / source.z * float(LANDSCAPE_TILE_RESOLUTION - 1);
+    return (pixel + float(LANDSCAPE_NORMAL_BORDER) + 0.5) / float(LANDSCAPE_TILE_RESOLUTION + 2 * LANDSCAPE_NORMAL_BORDER);
   }
 
   vec3 sourceNormal(vec2 xz, vec4 source) {
-    vec2 n = textureLod(terrainNormalMap, vec3(sourceUV(xz, source), source.w), 0.0).rg * 2.0 - 1.0;
+    vec2 n = textureLod(terrainNormalMap, vec3(normalSourceUV(xz, source), source.w), 0.0).rg * 2.0 - 1.0;
     return normalize(vec3(n.x, sqrt(max(1.0 - dot(n, n), 0.0)), n.y));
   }
 
@@ -258,46 +248,9 @@ CCProgram vt-compose-fs %{
     return dot(t, t) > 1e-10 ? normalize(t) : vec3(1.0, 0.0, 0.0);
   }
 
-  // Rotate a projection frame onto the terrain (shortest arc). A flat normal
-  // texture must recover the terrain normal on ALL signed axes, not axis normals.
-  vec3 projectionTangent(vec3 t, vec3 axis, vec3 n) {
-    return normalize(t - (axis + n) * (dot(t, n) / max(1.0 + dot(axis, n), 0.001)));
-  }
-
   vec3 decodeNormal(vec2 encoded) {
     vec2 xy = encoded * 2.0 - 1.0;
     return normalize(vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
-  }
-
-  struct ProjectionFrame {
-    vec2 uv;
-    vec2 dx;
-    vec2 dy;
-    vec3 tangent;
-    vec3 bitangent;
-  };
-
-  ProjectionFrame projectionFrame(int axis, vec3 position, vec3 positionDx, vec3 positionDy, vec3 referenceNormal, vec3 shadingNormal, vec3 terrainFrameTangent) {
-    ProjectionFrame frame;
-    frame.uv = vec2(position.x, -position.z);
-    frame.dx = vec2(positionDx.x, -positionDx.z);
-    frame.dy = vec2(positionDy.x, -positionDy.z);
-    frame.tangent = terrainFrameTangent;
-    if (axis == 0) {
-      float direction = referenceNormal.x < 0.0 ? -1.0 : 1.0;
-      frame.uv = vec2(-direction * position.z, position.y);
-      frame.dx = vec2(-direction * positionDx.z, positionDx.y);
-      frame.dy = vec2(-direction * positionDy.z, positionDy.y);
-      frame.tangent = projectionTangent(vec3(0.0, 0.0, -direction), vec3(direction, 0.0, 0.0), shadingNormal);
-    } else if (axis == 2) {
-      float direction = referenceNormal.z < 0.0 ? -1.0 : 1.0;
-      frame.uv = vec2(direction * position.x, position.y);
-      frame.dx = vec2(direction * positionDx.x, positionDx.y);
-      frame.dy = vec2(direction * positionDy.x, positionDy.y);
-      frame.tangent = projectionTangent(vec3(direction, 0.0, 0.0), vec3(0.0, 0.0, direction), shadingNormal);
-    }
-    frame.bitangent = cross(shadingNormal, frame.tangent);
-    return frame;
   }
 
   struct ComposedSurface {
@@ -372,44 +325,11 @@ CCProgram vt-compose-fs %{
     }
   }
 
-  // Keep the fixed slope reference separate from the shading-normal LOD.
-  void prepareTerrainProjection(out vec3 position, out vec3 referenceNormal, out vec3 shadingNormal, out vec3 axisWeights) {
-    shadingNormal = vec3(0.0, 1.0, 0.0);
-    if (rvtNormalParams.x > 0.5) {
-      ivec2 cell = clamp(ivec2(floor((v_localXZ - v_region.xy) / v_region.z * 2.0)) + ivec2(1), ivec2(0), ivec2(3));
-      vec4 source = texelFetch(normalSourceMap, ivec2(cell.y * 4 + cell.x, int(v_decalPage.x)), 0);
-      shadingNormal = sourceNormal(v_localXZ, source);
-    }
-    referenceNormal = shadingNormal;
-    position = vec3(v_localXZ.x, 0.0, v_localXZ.y);
-    axisWeights = vec3(0.0, 1.0, 0.0);
-    if (abs(cliffParams.x) > 0.5) {
-      ivec2 cell = clamp(ivec2(floor(v_localXZ / cliffLayout.x)),
-          ivec2(0), textureSize(cliffSourceMap, 0) - ivec2(1));
-      vec4 source = texelFetch(cliffSourceMap, cell, 0);
-      referenceNormal = sourceNormal(v_localXZ, source);
-      if (rvtNormalParams.x < 0.5) {
-        shadingNormal = referenceNormal;
-      }
-      // Planar slope overrides need the reference normal, but not its height.
-      // Keep this uniform branch ahead of position derivatives in main().
-      if (cliffParams.x > 0.5) {
-        // Unlike geometry/normal LOD sources, this reference never changes with
-        // camera distance. Decode the height format selected by LandscapeRenderer.
-        vec2 h = textureLod(terrainHeightMap, vec3(sourceUV(v_localXZ, source), source.w), 0.0).rg;
-        #if LANDSCAPE_HEIGHT_UNORM
-        position.y = h.r * cliffParams.y + cliffParams.z;
-        #else
-        position.y = dot(h, vec2(256.0, 1.0)) / 257.0 * cliffParams.y + cliffParams.z;
-        #endif
-        float cliff = 1.0 - smoothstep(0.55, 0.8, referenceNormal.y);
-        axisWeights = pow(abs(referenceNormal), vec3(4.0)) * vec3(cliff, 1.0, cliff);
-        // Skip negligible projections in the VT pass. Flat ground uses one pair
-        // of material samples; slopes usually need two, corner cases at most three.
-        axisWeights *= step(vec3(0.001), axisWeights);
-        axisWeights /= max(dot(axisWeights, vec3(1.0)), 0.00001);
-      }
-    }
+  vec3 sampleTerrainNormal() {
+    // Gutters retain the nearest interior quadrant and read its padded normal tile.
+    ivec2 cell = clamp(ivec2(floor((v_localXZ - v_region.xy) / v_region.z * 2.0)), ivec2(0), ivec2(1));
+    vec4 source = texelFetch(normalSourceMap, ivec2(cell.y * 2 + cell.x, int(v_decalPage.x)), 0);
+    return sourceNormal(v_localXZ, source);
   }
 
   // Three triangle corners each store a material pair. Keep those pairs for
@@ -473,26 +393,55 @@ CCProgram vt-compose-fs %{
     return blend;
   }
 
-  void main() {
-    MaterialBlend blend = sampleMaterialBlend();
-    vec3 position;
-    vec3 referenceNormal;
-    vec3 shadingNormal;
-    vec3 axisWeights;
-    prepareTerrainProjection(position, referenceNormal, shadingNormal, axisWeights);
-    // Asset-defined slope coverage is independent of projection mode.
-    bool useCliffMaterial = abs(cliffParams.x) > 0.5 && cliffParams.w > 0.0 && referenceNormal.y < cliffMaterialParams.x;
-    if (useCliffMaterial) {
-      blend.layers[0] = int(cliffParams.w) - 1;
-      for (int i = 0; i < 3; ++i) {
-        blend.weights[i] = i == 0 ? 1.0 : 0.0;
-      }
-      for (int i = 0; i < 6; ++i) {
-        blend.sampleIndices[i] = 0;
+  // All terrain materials use the same XZ projection, including steep slopes.
+  void composeMaterial(MaterialBlend blend, vec3 shadingNormal, vec3 tangent, vec3 bitangent, vec3 modulation, inout ComposedSurface surface) {
+    vec2 uv = vec2(v_localXZ.x, -v_localXZ.y);
+    vec2 dx = dFdx(uv);
+    vec2 dy = dFdy(uv);
+    vec3 weights = vec3(0.0);
+    vec4 albedoHeights[3];
+    // Fetch each contributing material's color/height once. Pure endpoints
+    // cannot acquire a previously absent layer during height blending.
+    for (int i = 0; i < 3; ++i) {
+      albedoHeights[i] = vec4(0.0);
+      if (blend.weights[i] > 0.0) {
+        float scale = materialParams[blend.layers[i]].x;
+        vec3 coord = vec3(uv * scale, float(blend.layers[i]));
+        albedoHeights[i] = textureGrad(albedoHeightMap, coord, dx * scale, dy * scale);
       }
     }
-    vec3 positionDx = dFdx(position);
-    vec3 positionDy = dFdy(position);
+    // Apply height blending to each original pair BEFORE spatial interpolation.
+    // Shared vertex pairs agree across triangle edges and imported tile borders.
+    for (int i = 0; i < 3; ++i) {
+      int bottom = blend.sampleIndices[i*2];
+      int top = blend.sampleIndices[i*2+1];
+      float weight = blend.pairWeights[i];
+      if (bottom != top && blend.spatialWeights[i] > 0.0) {
+        weight = heightBlend(weight, albedoHeights[bottom].a, albedoHeights[top].a);
+      }
+      weights[bottom] += blend.spatialWeights[i] * (1.0-weight);
+      weights[top] += blend.spatialWeights[i] * weight;
+    }
+    for (int i = 0; i < 3; ++i) {
+      if (weights[i] > 0.0) {
+        float scale = materialParams[blend.layers[i]].x;
+        vec3 coord = vec3(uv * scale, float(blend.layers[i]));
+        vec4 ah = albedoHeights[i];
+        vec4 nra = textureGrad(normalRoughnessAOMap, coord, dx * scale, dy * scale);
+        vec3 albedo = applyBiomeColor(SRGBToLinear(ah.rgb), modulation, materialParams[blend.layers[i]].y);
+        surface.albedo += albedo * weights[i];
+        vec3 detail = decodeNormal(nra.rg);
+        vec3 localNormal = tangent * detail.x + bitangent * detail.y + shadingNormal * detail.z;
+        surface.normal += localNormal * weights[i];
+        surface.roughness += nra.b * weights[i];
+        surface.ao += nra.a * weights[i];
+      }
+    }
+  }
+
+  void main() {
+    MaterialBlend blend = sampleMaterialBlend();
+    vec3 shadingNormal = sampleTerrainNormal();
     vec3 frameTangent = terrainTangent(shadingNormal);
     vec3 frameBitangent = cross(shadingNormal, frameTangent);
     ComposedSurface surface;
@@ -504,71 +453,21 @@ CCProgram vt-compose-fs %{
     // Do not decode sRGB. Alpha is regional coverage, independent of material influence.
     // Source rows follow +Z, matching height/splat tiles and VT page borders.
     vec3 modulation = vec3(0.0);
-    float biomeStrength = globalColorParams.z * (useCliffMaterial ? cliffMaterialParams.y : 1.0);
+    float biomeStrength = globalColorParams.z;
     if (biomeStrength > 0.0) {
       vec4 biome = texture(globalColorMap, v_localXZ * globalColorParams.xy);
       modulation = (biome.rgb * (255.0 / 128.0) - vec3(1.0)) * (biome.a * biomeStrength);
     }
-    for (int projection = 0; projection < 3; ++projection) {
-      float axisWeight = axisWeights[projection];
-      if (axisWeight <= 0.0) {
-        continue;
-      }
-      ProjectionFrame frame = projectionFrame(projection, position, positionDx, positionDy,
-                                              referenceNormal, shadingNormal, frameTangent);
-      vec3 weights = vec3(0.0);
-      vec4 albedoHeights[3];
-      // Fetch each contributing material's color/height once. Pure endpoints
-      // cannot acquire a previously absent layer during height blending.
-      for (int i = 0; i < 3; ++i) {
-        albedoHeights[i] = vec4(0.0);
-        if (blend.weights[i] > 0.0) {
-          float scale = materialParams[blend.layers[i]].x;
-          vec3 coord = vec3(frame.uv * scale, float(blend.layers[i]));
-          albedoHeights[i] = textureGrad(albedoHeightMap, coord, frame.dx * scale, frame.dy * scale);
-        }
-      }
-      // Apply height blending to each original pair BEFORE spatial interpolation.
-      // Shared vertex pairs agree across triangle edges and imported tile borders.
-      for (int i = 0; i < 3; ++i) {
-        int bottom = blend.sampleIndices[i*2];
-        int top = blend.sampleIndices[i*2+1];
-        float weight = blend.pairWeights[i];
-        if (bottom != top && blend.spatialWeights[i] > 0.0) {
-          weight = heightBlend(weight, albedoHeights[bottom].a, albedoHeights[top].a);
-        }
-        weights[bottom] += blend.spatialWeights[i] * (1.0-weight);
-        weights[top] += blend.spatialWeights[i] * weight;
-      }
-      for (int i = 0; i < 3; ++i) {
-        if (weights[i] > 0.0) {
-          float scale = materialParams[blend.layers[i]].x;
-          vec3 coord = vec3(frame.uv * scale, float(blend.layers[i]));
-          vec4 ah = albedoHeights[i];
-          vec4 nra = textureGrad(normalRoughnessAOMap, coord, frame.dx * scale, frame.dy * scale);
-          vec3 albedo = applyBiomeColor(SRGBToLinear(ah.rgb), modulation, materialParams[blend.layers[i]].y);
-          surface.albedo += albedo * (weights[i] * axisWeight);
-          vec3 detail = decodeNormal(nra.rg);
-          vec3 localNormal = frame.tangent * detail.x + frame.bitangent * detail.y + shadingNormal * detail.z;
-          surface.normal += localNormal * (weights[i] * axisWeight);
-          surface.roughness += nra.b * (weights[i] * axisWeight);
-          surface.ao += nra.a * (weights[i] * axisWeight);
-        }
-      }
-    }
-    // Decals retain their existing terrain tangent-space convention, including
-    // when cached normals are disabled. Only the final output encoding depends on that setting.
+    composeMaterial(blend, shadingNormal, frameTangent, frameBitangent, modulation, surface);
+    // Blend decal normals in the terrain tangent frame, then store terrain-local normals.
     surface.normal = normalize(vec3(dot(surface.normal, frameTangent), dot(surface.normal, frameBitangent),
                                     dot(surface.normal, shadingNormal)));
     applyDecals(surface);
-    if (rvtNormalParams.x > 0.5) {
-      surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +
-                                 shadingNormal * surface.normal.z);
-    }
+    surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +
+                               shadingNormal * surface.normal.z);
     // Three signed components filter continuously, even when the composed
     // normal points below the horizon. Reuse the otherwise unused albedo alpha.
-    // OFF stores tangent space; ON stores terrain-local space. All pages are
-    // invalidated together when this convention changes.
+    // Every page uses terrain-local space, independent of its source precision.
     albedoOut = vec4(surface.albedo, surface.normal.y * 0.5 + 0.5);
     normalOut = vec4(surface.normal.xz * 0.5 + 0.5, surface.roughness, surface.ao);
   }

@@ -52,14 +52,11 @@ module.exports = {
                     showRanges: {
                         tooltip: '显示 LOD 距离范围和 Sector 边界。',
                     },
-                    cliffEnabled: {
-                        tooltip: '悬崖三平面投影，结果缓存到 RVT。',
-                    },
                     heightBlendEnabled: {
                         tooltip: '开启高度混合；关闭使用线性权重混合。切换后重新生成 VT。',
                     },
-                    bakeNormalEnabled: {
-                        tooltip: '将地形法线烘焙到 VT；关闭时使用随几何 LOD 变化的法线。',
+                    refineFarDetail: {
+                        tooltip: 'VT 层级 6 及以上使用精细地形法线；关闭时远近均使用基础精度。法线始终烘焙进 VT。',
                     },
                     decal3DEnabled: {
                         tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。',

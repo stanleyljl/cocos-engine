@@ -1637,10 +1637,10 @@ cocos_source_files(
                  cocos/landscape/TilePagePool.cpp
                  cocos/landscape/MaterialLibrary.h
                  cocos/landscape/MaterialLibrary.cpp
-                 cocos/landscape/VirtualTexture.h
-                 cocos/landscape/VirtualTexture.cpp
                  cocos/landscape/VTRenderer.h
                  cocos/landscape/VTRenderer.cpp
+                 cocos/landscape/VTPageProcessing.h
+                 cocos/landscape/VTPageProcessing.cpp
                  cocos/landscape/DecalRenderer.h
                  cocos/landscape/DecalRenderer.cpp
                  cocos/landscape/Quadtree.h

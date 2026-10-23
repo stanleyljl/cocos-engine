@@ -1,6 +1,9 @@
 # Landscape Asset Tools
 
-Source height, splat and normal tiles always use 129×129 samples. Paths and
+Source height and splat tiles use 129×129 samples. Normal tiles use 145×145:
+the same 129×129 interior plus eight real-neighbor samples on every side.
+Generate normals from the global height field before slicing; overlapping
+borders are identical, with clamping only at the landscape's outer boundary. Paths and
 formats are fixed in code; the manifest contains dataset dimensions, height ranges,
 materials and decals. `decalLibrary.nearDistance` and `farDistance` apply to all
 displaced decals in one Landscape; placements contain only `x`, `z`, `size`, `layer`.

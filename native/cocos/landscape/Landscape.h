@@ -66,9 +66,8 @@ struct LandscapeDebugData {
     bool showBox{false};
     bool unlit{false};
     bool showVTAtlas{false};
-    bool cliffEnabled{true};
     bool heightBlendEnabled{true};
-    bool bakeNormalEnabled{true};
+    bool refineFarDetail{true};
     bool decal3DEnabled{true};
     bool physicsWireframe{false};
 };

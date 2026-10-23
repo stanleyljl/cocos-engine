@@ -41,6 +41,9 @@ constexpr int VERTS_PER_NODE_SIDE = 17;
 constexpr float LOD_DISTANCE_RATIO = 2.0F;
 constexpr float MORPH_START_RATIO = 0.70F;
 constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
+// Normal interiors share the height grid; real neighboring samples cover VT gutters.
+constexpr uint32_t SOURCE_NORMAL_BORDER = 8;
+constexpr uint32_t SOURCE_NORMAL_RESOLUTION = SOURCE_TILE_RESOLUTION + 2 * SOURCE_NORMAL_BORDER;
 // L0-L8: maximum sector size = 4096 m at 1 m finest-grid spacing
 // (16 cells per node side * 2^8). Keep the shader/importer limits in sync.
 constexpr uint32_t MAX_LOD_LEVELS = 9;
@@ -56,14 +59,15 @@ constexpr uint32_t PAGE_UPLOAD_BUDGET = 8;
 constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
 constexpr uint32_t DECAL_LIBRARY_MAX = 32;
 constexpr uint32_t DECAL_INSTANCE_MAX = 512;
-// The compose block has one vec4 per material/instance/layer plus eight parameters.
-static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 8) * 16 <= 16384,
+// The compose block has one vec4 per material/instance/layer plus six parameters.
+static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 4) * 16 <= 16384,
               "VT compose constants must fit a 16 KB uniform block");
 static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 texels");
 
 // 256 usable texels per logical unit at the finest page. Keep 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
-constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 16; // 2x2 interior sources plus a one-source gutter ring.
+constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 4; // 2x2 interiors; padded sources also cover filtering gutters.
+constexpr uint32_t VT_NORMAL_DETAIL_MIN_LEVEL = 6;
 constexpr uint32_t VT_PAGE_BORDER = 8;
 constexpr uint32_t VT_MIP_LEVELS = 3; // interiors 256/128/64, borders 8/4/2
 constexpr uint32_t VT_MAX_ANISOTROPY = 4;
@@ -76,10 +80,12 @@ constexpr uint32_t VT_ATLAS_SIZE = VT_PAGE_RES * 16;
 constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
+static_assert(SOURCE_NORMAL_BORDER * VT_PAGE_INTERIOR >= 2 * (SOURCE_TILE_RESOLUTION - 1) * VT_PAGE_BORDER,
+              "Padded normals must cover VT gutters at half-page source precision");
 static_assert(MAX_SECTOR_COUNT <= VT_PAGE_COUNT, "VT must hold every sector root");
 // Root geometry/splat uses one source per sector; baked root normals use at
-// most four. The fixed cliff reference uses at most a quarter of the pool.
-static_assert(MAX_SECTOR_COUNT * 5U + PAGE_POOL_LAYERS / 4U <= PAGE_POOL_LAYERS,
+// most four, shared with neighboring root pages.
+static_assert(MAX_SECTOR_COUNT * 5U <= PAGE_POOL_LAYERS,
               "Source pool must hold root coverage and its composition inputs");
 static_assert(VT_PAGE_RES % (1U << (VT_MIP_LEVELS - 1)) == 0 &&
                   VT_PAGE_BORDER % (1U << (VT_MIP_LEVELS - 1)) == 0,

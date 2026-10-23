@@ -28,7 +28,7 @@ struct LandscapeSurfaceResult {
     float surfaceWeight{0.0F};
 };
 
-// CPU data only. Normals retain the source RGB8 XYZ, unlike the GPU's RG8 XZ.
+// CPU data only. Normals retain padded source RGB8 XYZ, unlike the GPU's RG8 XZ.
 struct LandscapeQueryTile {
     ccstd::vector<uint8_t> height;
     ccstd::vector<uint8_t> normal;

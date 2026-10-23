@@ -2,9 +2,23 @@
 #include "landscape/LandscapeAsset.h"
 #include "landscape/Quadtree.h"
 #include "landscape/TilePagePool.h"
+#include "landscape/VTPageProcessing.h"
 #include "landscape/VTRenderer.h"
-#include "landscape/VirtualTexture.h"
 #include "base/Log.h"
+#include "core/Root.h"
+#include "core/assets/Material.h"
+#include "core/assets/RenderTexture.h"
+#include "core/assets/RenderingSubMesh.h"
+#include "core/assets/Texture2D.h"
+#include "renderer/gfx-base/GFXCommandBuffer.h"
+#include "renderer/gfx-base/GFXFramebuffer.h"
+#include "renderer/gfx-base/GFXInputAssembler.h"
+#include "renderer/gfx-base/GFXPipelineState.h"
+#include "renderer/gfx-base/GFXDescriptorSet.h"
+#include "renderer/gfx-base/GFXDescriptorSetLayout.h"
+#include "renderer/gfx-base/GFXPipelineLayout.h"
+#include "renderer/gfx-base/GFXShader.h"
+#include "renderer/gfx-base/GFXRenderPass.h"
 #include "core/geometry/AABB.h"
 #include "renderer/gfx-base/GFXTexture.h"
 
@@ -14,11 +28,17 @@
 // a device or asset loader. Tree tests use explicit targets rather than camera
 // selection. Fail immediately if a test enters any of these unprovided paths.
 namespace cc {
+Root *Root::getInstance() {
+    std::abort();
+}
 LogLevel Log::slogLevel = LogLevel::INFO;
 void Log::logMessage(LogType, LogLevel, const char *, ...) {
     std::abort();
 }
 void gfx::Texture::initialize(const gfx::TextureInfo &) {
+    std::abort();
+}
+void gfx::CommandBuffer::initialize(const gfx::CommandBufferInfo &) {
     std::abort();
 }
 bool geometry::AABB::aabbFrustum(const geometry::Frustum &) const {
@@ -35,9 +55,92 @@ bool landscape::LandscapeAsset::takeReadyTile(TileData &) {
 }
 } // namespace cc
 
+// The CPU suite exercises VTRenderer's real residency algorithms without a GPU.
+// Device/processing entry points abort if reached; app regressions cover rendering.
+namespace cc::landscape {
+VTPageComposer::VTPageComposer() {
+    std::abort();
+}
+bool VTPageComposer::init(const LandscapeAsset &, TilePagePool &, const MaterialLibrary &, DecalRenderer &, bool) {
+    std::abort();
+}
+bool VTPageComposer::prepareInputs(uint32_t, LandscapeRegion, const VTPageSources &, const TilePagePool &, VTPageInstance &) {
+    std::abort();
+}
+void VTPageComposer::uploadInputs() {
+    std::abort();
+}
+void VTPageComposer::record(gfx::CommandBuffer &, const VTPageInstance *, uint32_t, bool) {
+    std::abort();
+}
+void VTPageComposer::setGlobalColorMap(Texture2D *) {
+    std::abort();
+}
+bool VTPageComposer::setGlobalColorStrength(float) {
+    std::abort();
+}
+bool VTPageComposer::setHeightBlendEnabled(bool) {
+    std::abort();
+}
+VTPageMipGenerator::VTPageMipGenerator() {
+    std::abort();
+}
+bool VTPageMipGenerator::init(const VTPageComposer &, bool) {
+    std::abort();
+}
+void VTPageMipGenerator::record(gfx::CommandBuffer &, const VTPageComposer &, uint32_t, bool) {
+    std::abort();
+}
+VTPageCompressor::VTPageCompressor() {
+    std::abort();
+}
+bool VTPageCompressor::supported() {
+    std::abort();
+}
+bool VTPageCompressor::init(gfx::Device *, RenderTexture &) {
+    std::abort();
+}
+Texture2D *VTPageCompressor::atlas() const {
+    std::abort();
+}
+gfx::Texture *VTPageCompressor::albedo() const {
+    std::abort();
+}
+gfx::Texture *VTPageCompressor::normalRoughnessAO() const {
+    std::abort();
+}
+void VTPageCompressor::begin(gfx::CommandBuffer &, bool) {
+    std::abort();
+}
+void VTPageCompressor::record(gfx::CommandBuffer &, uint32_t) {
+    std::abort();
+}
+void VTPageCompressor::end(gfx::CommandBuffer &) {
+    std::abort();
+}
+VTPageComposer::~VTPageComposer() = default;
+VTPageMipGenerator::~VTPageMipGenerator() = default;
+VTPageCompressor::~VTPageCompressor() = default;
+} // namespace cc::landscape
+
 // Access internal CPU state without making it part of the engine's public API.
 namespace cc::landscape {
 struct LandscapePagingTestAccess {
+    static bool init(VTRenderer &renderer, const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT) {
+        return renderer.initPages(data, capacity);
+    }
+    static void publish(VTRenderer &renderer, const ccstd::vector<uint32_t> &slots) {
+        for (const auto slot : slots) {
+            renderer.publish(slot);
+        }
+    }
+    static void initPageTable(VTPageTable &table, uint32_t capacity) {
+        table._entries.resize(static_cast<size_t>(capacity) * VTGridMapping::CELL_COUNT);
+    }
+    static uint32_t encodedPage(const VTPageTable &table, uint32_t slot, uint32_t cell) {
+        const auto &entry = table._entries[static_cast<size_t>(slot) * VTGridMapping::CELL_COUNT + cell];
+        return entry.physicalSlot | (static_cast<uint32_t>(entry.level) << 8U);
+    }
     static void initPool(TilePagePool &pool, const LandscapeData &data, uint32_t capacity) {
         pool._data = data;
         pool._capacity = capacity;
@@ -48,9 +151,7 @@ struct LandscapePagingTestAccess {
     static const auto &working(const TilePagePool &pool) {
         return pool._working;
     }
-    static uint32_t cliffReferenceLevel(const LandscapeData &data) {
-        return VTRenderer::cliffReferenceLevel(data);
-    }
+
 };
 } // namespace cc::landscape
 
@@ -121,13 +222,13 @@ ExpectedTree demand(uint32_t maxLevel, const ccstd::vector<QuadNode> &geometry, 
     return expected;
 }
 
-void collectUpdates(const VirtualTexture &pages, ccstd::vector<uint32_t> &updates, uint32_t budget) {
+void collectUpdates(const VTRenderer &pages, ccstd::vector<uint32_t> &updates, uint32_t budget) {
     updates.clear();
     for (const auto slot : pages.activeSlots()) {
         if (updates.size() == budget) {
             break;
         }
-        if (pages.page(slot).state != VirtualTexture::State::READY) {
+        if (pages.page(slot).state != VTRenderer::State::READY) {
             updates.push_back(slot);
         }
     }
@@ -149,8 +250,8 @@ void testSectorCountLimit() {
         require(d.valid() && NodeIndexLayout(d).nodeCount() > 0, "64 sectors must be accepted on either axis");
         TilePagePool sources;
         LandscapePagingTestAccess::initPool(sources, d, config::PAGE_POOL_LAYERS);
-        VirtualTexture pages;
-        require(pages.init(d), "maximum sector count must initialize VT");
+        VTRenderer pages;
+        require(LandscapePagingTestAccess::init(pages, d), "maximum sector count must initialize VT");
         ccstd::vector<NodeAddress> roots;
         ccstd::vector<VTPageAddress> rootPages;
         const VTPageLayout layout(d.sectorSize);
@@ -207,27 +308,27 @@ void testHeightReservations() {
 }
 
 void testExactPageLifecycle() {
-    VirtualTexture pages;
-    require(pages.init(cacheData(3), 5), "cache init");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, cacheData(3), 5), "cache init");
     const VTPageAddress root{3, 0, 0}, fine{0, 0, 0};
     require(pages.reserve({root}), "reserve root");
     ccstd::vector<uint32_t> updates;
     collectUpdates(pages, updates, 1);
-    pages.publish(updates);
+    LandscapePagingTestAccess::publish(pages, updates);
     const int rootSlot = pages.resolve(root);
     require(rootSlot >= 0 && pages.resolve(fine) == -1, "Missing fine pages must NEVER resolve to a resident ancestor");
     ccstd::vector<VTPageAddress> transition{root, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}};
     require(pages.reserve(transition), "reserve parent and four children together");
     for (int frame = 0; frame < 3; ++frame) {
         collectUpdates(pages, updates, 1);
-        pages.publish(updates);
+        LandscapePagingTestAccess::publish(pages, updates);
         require(!pages.ready() && pages.resolve(root) == rootSlot, "Partial child completion must preserve the parent");
     }
     auto excess = transition;
     excess.push_back(fine);
     require(!pages.reserve(excess) && pages.resolve(root) == rootSlot && pages.activeSlots().size() == 5, "Failed admission must not alter the working set");
     collectUpdates(pages, updates, 1);
-    pages.publish(updates);
+    LandscapePagingTestAccess::publish(pages, updates);
     require(pages.ready(), "All children complete");
     transition.erase(transition.begin());
     require(pages.reserve(transition), "commit children");
@@ -239,20 +340,20 @@ void testExactPageLifecycle() {
 }
 
 void testPageRefreshAndReuse() {
-    VirtualTexture pages;
-    require(pages.init(cacheData(3), 2), "refresh cache init");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, cacheData(3), 2), "refresh cache init");
     const VTPageAddress a{0, 0, 0};
     const VTPageAddress b{1, 1, 2};
     const VTPageAddress c{0, 3, 4};
     require(pages.reserve({a, b}), "reserve incomplete and complete pages together");
     const auto aSlot = pages.activeSlots()[0];
     const auto bSlot = pages.activeSlots()[1];
-    pages.publish({bSlot});
+    LandscapePagingTestAccess::publish(pages, {bSlot});
     pages.invalidate();
     pages.invalidate();
-    require(pages.page(aSlot).state == VirtualTexture::State::DIRTY && pages.resolve(a) == -1,
+    require(pages.page(aSlot).state == VTRenderer::State::DIRTY && pages.resolve(a) == -1,
             "invalidating an unfinished page must not make it drawable");
-    require(pages.page(bSlot).state == VirtualTexture::State::STALE && pages.resolve(b) == static_cast<int>(bSlot),
+    require(pages.page(bSlot).state == VTRenderer::State::STALE && pages.resolve(b) == static_cast<int>(bSlot),
             "repeated invalidation must retain the previous complete pixels");
     const auto region = pages.region(b);
     require(region.x == 2 && region.z == 4 && region.size == 2,
@@ -263,18 +364,18 @@ void testPageRefreshAndReuse() {
             "invalid addresses changed live page bindings");
     ccstd::vector<uint32_t> updates;
     collectUpdates(pages, updates, 0);
-    pages.publish(updates);
+    LandscapePagingTestAccess::publish(pages, updates);
     require(updates.empty() && pages.needsComposition(a) && pages.needsComposition(b), "zero budget changed page state");
     collectUpdates(pages, updates, 2);
     require(updates.size() == 2, "both unfinished and stale pages require composition");
     // The renderer can skip a missing source and publish a later ready page.
-    pages.publish({bSlot});
+    LandscapePagingTestAccess::publish(pages, {bSlot});
     require(!pages.ready() && pages.resolve(a) == -1 && !pages.needsComposition(b),
             "partial composition published an unresolved page");
     require(pages.reserve({c, b}) && pages.activeSlots()[0] == aSlot, "retired slot was not reused");
-    require(pages.resolve(c) == -1 && pages.page(aSlot).state == VirtualTexture::State::DIRTY,
+    require(pages.resolve(c) == -1 && pages.page(aSlot).state == VTRenderer::State::DIRTY,
             "replacement inherited retired page pixels");
-    pages.publish({aSlot});
+    LandscapePagingTestAccess::publish(pages, {aSlot});
     require(pages.ready(), "replacement page did not complete");
     require(pages.reserve({b}) && pages.resolve(c) == -1 && !pages.needsComposition(c),
             "inactive cached pages must stay reusable but cannot satisfy draw bindings");
@@ -282,14 +383,14 @@ void testPageRefreshAndReuse() {
     require(pages.reserve({b, c}) && pages.resolve(c) == static_cast<int>(aSlot) && pages.needsComposition(c),
             "reactivated stale pages lost their previous pixels or skipped refresh");
     collectUpdates(pages, updates, 2);
-    pages.publish(updates);
+    LandscapePagingTestAccess::publish(pages, updates);
     require(pages.ready(), "reactivated pages did not finish refresh");
     std::cout << "PASS: pending/stale pages, skipped sources, invalid admission, zero budget and slot reuse\n";
 }
 
 void testRegionalInvalidation() {
-    VirtualTexture pages;
-    require(pages.init(cacheData(3), 4), "regional cache init");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, cacheData(3), 4), "regional cache init");
     const VTPageAddress changed{0, 0, 0};
     const VTPageAddress gutter{0, 1, 0};
     const VTPageAddress distant{0, 6, 6};
@@ -299,26 +400,26 @@ void testRegionalInvalidation() {
     const auto gutterSlot = pages.activeSlots()[1];
     const auto distantSlot = pages.activeSlots()[2];
     const auto unfinishedSlot = pages.activeSlots()[3];
-    pages.publish({changedSlot, gutterSlot, distantSlot});
+    LandscapePagingTestAccess::publish(pages, {changedSlot, gutterSlot, distantSlot});
     require(pages.reserve({changed, distant, unfinished}), "cache neighboring page outside working set");
     // The decal ends before X=1, but is still inside the neighboring page's gutter.
     pages.invalidate({0.96F, 0.25F, 0.02F});
-    require(pages.page(changedSlot).state == VirtualTexture::State::STALE &&
-                pages.page(gutterSlot).state == VirtualTexture::State::STALE,
+    require(pages.page(changedSlot).state == VTRenderer::State::STALE &&
+                pages.page(gutterSlot).state == VTRenderer::State::STALE,
             "regional edits must invalidate intersecting and cached gutter pages");
-    require(pages.page(distantSlot).state == VirtualTexture::State::READY &&
-                pages.page(unfinishedSlot).state == VirtualTexture::State::DIRTY,
+    require(pages.page(distantSlot).state == VTRenderer::State::READY &&
+                pages.page(unfinishedSlot).state == VTRenderer::State::DIRTY,
             "regional edits must preserve unrelated and unpublished pages");
     require(pages.needsComposition(changed) && pages.resolve(changed) == static_cast<int>(changedSlot),
             "regional refresh must remain pending while retaining displayed pixels");
     pages.invalidate({0.96F, 0.25F, 0.02F});
-    require(pages.page(changedSlot).state == VirtualTexture::State::STALE &&
-                pages.page(gutterSlot).state == VirtualTexture::State::STALE &&
-                pages.page(distantSlot).state == VirtualTexture::State::READY,
+    require(pages.page(changedSlot).state == VTRenderer::State::STALE &&
+                pages.page(gutterSlot).state == VTRenderer::State::STALE &&
+                pages.page(distantSlot).state == VTRenderer::State::READY,
             "repeated edits must retain stale pixels and preserve unrelated pages");
     require(pages.reserve({changed, gutter, distant, unfinished}), "restore cached gutter page");
     require(pages.needsComposition(gutter), "reactivated gutter page must not reuse outdated decal pixels");
-    pages.publish({changedSlot, gutterSlot, unfinishedSlot});
+    LandscapePagingTestAccess::publish(pages, {changedSlot, gutterSlot, unfinishedSlot});
     require(pages.ready(), "regional refresh completes");
     pages.invalidate({0.96F, 0.25F, 0.02F});
     require(pages.needsComposition(changed) && pages.needsComposition(gutter) && !pages.needsComposition(distant),
@@ -424,8 +525,8 @@ void testCapacityLimitedTransitions() {
         ExpectedTree expected(d.maxLevel);
         TilePagePool heights;
         LandscapePagingTestAccess::initPool(heights, d, capacities.first);
-        VirtualTexture pages;
-        require(pages.init(d, capacities.second), "root-only VT capacity must initialize");
+        VTRenderer pages;
+        require(LandscapePagingTestAccess::init(pages, d, capacities.second), "root-only VT capacity must initialize");
         ccstd::vector<NodeAddress> roots;
         ccstd::vector<VTPageAddress> materials;
         for (const auto key : leafKeys(selection)) {
@@ -459,8 +560,8 @@ void testCapacityLimitedTransitions() {
             ExpectedTree expected(d.maxLevel);
             TilePagePool heights;
             LandscapePagingTestAccess::initPool(heights, d, capacities.first);
-            VirtualTexture pages;
-            require(pages.init(d, capacities.second), "capacity test VT init");
+            VTRenderer pages;
+            require(LandscapePagingTestAccess::init(pages, d, capacities.second), "capacity test VT init");
             const auto reserve = [&](const CurrentTree::Change &change) {
                 ccstd::vector<NodeAddress> sources;
                 ccstd::vector<VTPageAddress> materials;
@@ -479,7 +580,7 @@ void testCapacityLimitedTransitions() {
                 }
                 ccstd::vector<uint32_t> updates;
                 collectUpdates(pages, updates, budget);
-                pages.publish(updates);
+                LandscapePagingTestAccess::publish(pages, updates);
             };
             require(reserve({}), "minimum root coverage must fit");
             complete(capacities.second);
@@ -548,8 +649,8 @@ void testLocalTransitions() {
     ExpectedTree expected(d.maxLevel);
     TilePagePool heights;
     LandscapePagingTestAccess::initPool(heights, d, 64);
-    VirtualTexture pages;
-    require(pages.init(d, 64), "transaction pages init");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, d, 64), "transaction pages init");
     CurrentTree::Change pending;
     std::mt19937 random(731);
     size_t commits = 0, refused = 0;
@@ -615,7 +716,7 @@ void testLocalTransitions() {
                 updates.push_back(slot);
             }
         }
-        pages.publish(updates);
+        LandscapePagingTestAccess::publish(pages, updates);
         const bool ready = std::all_of(LandscapePagingTestAccess::working(heights).begin(), LandscapePagingTestAccess::working(heights).end(), [&](auto n) { return heights.resident(n) >= 0; });
         if (ready && pages.ready() && !pending.empty()) {
             commitTopology(selection, pending, d);
@@ -1025,8 +1126,8 @@ void testAtlasFilterFootprint() {
 
 void testPageCompositionBudget() {
     uint32_t remainingPages = config::VT_PAGE_UPDATE_BUDGET;
-    VirtualTexture pages;
-    require(pages.init(cacheData(3), 16), "streaming budget cache init");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, cacheData(3), 16), "streaming budget cache init");
     ccstd::vector<VTPageAddress> active;
     ccstd::vector<uint32_t> updates;
     uint32_t composed = 0;
@@ -1042,7 +1143,7 @@ void testPageCompositionBudget() {
         collectUpdates(pages, updates, remainingPages);
         remainingPages -= static_cast<uint32_t>(updates.size());
         composed += static_cast<uint32_t>(updates.size());
-        pages.publish(updates);
+        LandscapePagingTestAccess::publish(pages, updates);
         committed += pages.ready();
     }
     require(composed == 8 && committed == 2 && !pages.ready(), "transactions exceeded the shared eight-page budget");
@@ -1053,55 +1154,156 @@ void testPageCompositionBudget() {
     remainingPages = config::VT_PAGE_UPDATE_BUDGET;
     collectUpdates(pages, updates, remainingPages);
     remainingPages -= static_cast<uint32_t>(updates.size());
-    pages.publish(updates);
+    LandscapePagingTestAccess::publish(pages, updates);
     require(updates.size() == 2 && pages.ready() && remainingPages == 6, "pending transaction did not resume exactly");
     std::cout << "PASS: shared page allowance, multiple commits and partial composition\n";
 }
 
 void testCompositionSources() {
-    auto data = cacheData(7);
+    auto data = cacheData(7, 2, 2);
     data.sectorSize = 2048.0F;
     data.minTileLevel = 3;
-    VirtualTexture pages;
-    require(pages.init(data), "Initialize source selection without a tile pool");
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, data), "Initialize source selection without a tile pool");
     const auto interior = pages.sources({8, 2, 2}, true);
     require(interior.splat.key() == NodeAddress{4, 2, 2}.key(), "Splat source must cover the entire page");
-    for (uint32_t row = 0; row < 4; ++row) {
-        for (uint32_t col = 0; col < 4; ++col) {
-            require(interior.normals[row * 4 + col].key() == NodeAddress{3, col + 3, row + 3}.key(), "Normal sources must preserve the 4x4 sampling order and gutter ring");
+    for (uint32_t row = 0; row < 2; ++row) {
+        for (uint32_t col = 0; col < 2; ++col) {
+            require(interior.normals[row * 2 + col].key() == NodeAddress{3, col + 4, row + 4}.key(), "Far normal sources must contain only the 2x2 interior tiles");
         }
     }
     ccstd::vector<NodeAddress> sources;
     interior.appendTo(sources);
-    require(sources.size() == 17 && sources.front().key() == interior.splat.key(), "Reserve splat before the sixteen normal sources");
+    require(sources.size() == 5 && sources.front().key() == interior.splat.key(), "Reserve one splat and four padded normal tiles");
     interior.appendTo(sources);
-    require(sources.size() == 17, "Appending to existing reservations must not duplicate sources");
+    require(sources.size() == 5, "Appending to existing reservations must not duplicate sources");
 
     const auto corner = pages.sources({8, 0, 0}, true);
     sources.clear();
     corner.appendTo(sources);
-    require(sources.size() == 10, "Clamped corner must reserve only nine normal tiles plus the splat tile");
-    for (uint32_t row = 0; row < 4; ++row) {
-        for (uint32_t col = 0; col < 4; ++col) {
-            const uint32_t x = col > 0 ? col - 1 : 0;
-            const uint32_t z = row > 0 ? row - 1 : 0;
-            require(corner.normals[row * 4 + col].key() == NodeAddress{3, x, z}.key(), "Clamp gutter samples without changing shader table order");
+    require(sources.size() == 5, "Landscape corners also need only four interior normals plus splat");
+    for (uint32_t row = 0; row < 2; ++row) {
+        for (uint32_t col = 0; col < 2; ++col) {
+            require(corner.normals[row * 2 + col].key() == NodeAddress{3, col, row}.key(), "Outer boundary padding must not request tiles outside the landscape");
         }
     }
-    const auto unbaked = pages.sources({8, 2, 2}, false);
+    const auto coarse = pages.sources({8, 2, 2}, false);
     sources.clear();
-    unbaked.appendTo(sources);
-    require(sources.size() == 1, "Unbaked normals must use the splat source only");
-    for (const auto normal : unbaked.normals) {
-        require(normal.key() == unbaked.splat.key(), "Unbaked shader inputs must all reference the splat tile");
+    coarse.appendTo(sources);
+    require(sources.size() == 1, "Base precision shares one padded normal and splat tile without gutter neighbors");
+    for (const auto normal : coarse.normals) {
+        require(normal.key() == coarse.splat.key(), "All base-precision quadrants must share one source");
     }
     const auto fine = pages.sources({0, 17, 29}, true);
     sources.clear();
     fine.appendTo(sources);
     require(sources.size() == 1 && sources.front().key() == NodeAddress{3, 0, 0}.key(), "Sub-tile pages must respect the minimum source level");
+
+    data.minTileLevel = 0;
+    require(LandscapePagingTestAccess::init(pages, data), "Reinitialize source precision tests");
+    const auto near = pages.sources({5, 4, 4}, true);
+    const auto nearDisabled = pages.sources({5, 4, 4}, false);
+    for (size_t i = 0; i < near.normals.size(); ++i) {
+        require(near.normals[i].key() == nearDisabled.normals[i].key(), "Far detail must not change near page sources");
+    }
+    require(near.normals[0].level == 1, "Near pages use one page-sized interior normal tile");
+    require(pages.sources({6, 2, 2}, true).normals[0].level == 1, "Far detail starts at VT L6 with half-page sources");
+    require(pages.sources({6, 2, 2}, false).normals[0].level == 2, "Disabling far detail retains page-sized normal sources");
+
+    // Mirror the shader lookup at interior, edge and corner samples, including
+    // the full gutter. Each padded tile must cover the point without neighbor reads.
+    const float border = static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+    const float samples[] = {-border, 0.0F, 0.25F, 0.5F, 0.75F, 1.0F, 1.0F + border};
+    const VTPageLayout layout(data.sectorSize);
+    for (uint32_t level = 0; level <= layout.rootLevel(); ++level) {
+        const float size = layout.pageSize(level);
+        const uint32_t last = static_cast<uint32_t>(data.width() / size) - 1;
+        for (const uint32_t x : {0U, last / 2, last}) {
+            for (const uint32_t z : {0U, last / 2, last}) {
+                for (const bool detailed : {false, true}) {
+                    const auto inputs = pages.sources({level, x, z}, detailed);
+                    for (const float u : samples) {
+                        for (const float v : samples) {
+                            const auto col = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(u * 2)), 0, 1));
+                            const auto row = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(v * 2)), 0, 1));
+                            const auto region = data.nodeRegion(inputs.normals[row * 2 + col]);
+                            const float worldX = (x + u) * size;
+                            const float worldZ = (z + v) * size;
+                            const float padding = region.size * config::SOURCE_NORMAL_BORDER / (config::SOURCE_TILE_RESOLUTION - 1);
+                            require(worldX >= region.x - padding && worldX <= region.x + region.size + padding && worldZ >= region.z - padding && worldZ <= region.z + region.size + padding, "Padded normal lookup must cover all gutter edges and corners at every VT level");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const ccstd::vector<VTPageAddress> toggledPages{{5, 4, 4}, {6, 2, 2}};
+    require(pages.reserve(toggledPages), "Reserve near and far toggle test pages");
+    LandscapePagingTestAccess::publish(pages, pages.activeSlots());
+    pages.setRefineFarDetail(false);
+    require(!pages.getRefineFarDetail(), "Far detail toggle state must update");
+    require(!pages.needsComposition(toggledPages[0]) && pages.needsComposition(toggledPages[1]), "Far detail must invalidate only far pages");
+    require(pages.resolve(toggledPages[1]) >= 0, "Far pages remain drawable while their new normals are prepared");
+    LandscapePagingTestAccess::publish(pages, pages.activeSlots());
+    pages.setRefineFarDetail(false);
+    require(!pages.needsComposition(toggledPages[1]), "Unchanged toggle must not invalidate pages");
+    pages.setRefineFarDetail(true);
+    require(!pages.needsComposition(toggledPages[0]) && pages.needsComposition(toggledPages[1]), "Re-enabling far detail must refresh only far pages");
+}
+
+void testPageTableEncodingAndReuse() {
+    VTRenderer pages;
+    require(LandscapePagingTestAccess::init(pages, cacheData(8)), "Page table cache initialization failed");
+    VTGridMapping mapping;
+    for (uint32_t i = 0; i < VTGridMapping::CELL_COUNT; ++i) {
+        mapping.pages.push_back({4, i % 16, i / 16});
+        mapping.cells[i] = static_cast<uint8_t>(i);
+    }
+    require(pages.reserve(mapping.pages), "All 256 physical pages must fit");
+    LandscapePagingTestAccess::publish(pages, pages.activeSlots());
+    VTPageTable table;
+    LandscapePagingTestAccess::initPageTable(table, 4);
+    const auto first = table.allocate();
+    const auto second = table.allocate();
+    require(first == 0 && second == 1, "Page table allocations must be consecutive");
+    require(table.update(second, mapping, pages), "New grid mapping was not detected");
+    require(!table.update(second, mapping, pages), "Identical grid mapping must avoid another upload");
+    for (uint32_t i = 0; i < VTGridMapping::CELL_COUNT; ++i) {
+        const auto expected = static_cast<uint32_t>(pages.resolve(mapping.pages[i])) | (4U << 8U);
+        require(LandscapePagingTestAccess::encodedPage(table, second, i) == expected, "RG8 slot/level encoding changed");
+        require(LandscapePagingTestAccess::encodedPage(table, first, i) == 0, "Mapping overwrote a neighboring grid");
+    }
+    std::reverse(mapping.cells.begin(), mapping.cells.end());
+    require(table.update(second, mapping, pages), "Changed mapping must be uploaded");
+    for (uint32_t i = 0; i < VTGridMapping::CELL_COUNT; ++i) {
+        const auto expected = static_cast<uint32_t>(pages.resolve(mapping.pages[mapping.cells[i]])) | (4U << 8U);
+        require(LandscapePagingTestAccess::encodedPage(table, second, i) == expected, "Changed cell resolved the wrong page");
+    }
+    table.release(first);
+    require(table.allocate() == first, "Released grid mapping slot must be reused");
+    require(table.update(first, mapping, pages), "Reused mapping slot was not written");
+    table.destroy();
+    LandscapePagingTestAccess::initPageTable(table, 1);
+    require(table.allocate() == 0, "Page table destroy must reset slot allocation");
+}
+
+void testVTDistanceThresholds() {
+    for (const float sectorSize : {0.125F, 1.0F, 1.5F, 3.0F, 129.0F, 1000.25F, 16384.0F}) {
+        const VTPageLayout layout(sectorSize);
+        require(layout.levelForDistance(0.0F) == 0, "Zero distance must select the finest page");
+        for (uint32_t level = 0; level <= layout.rootLevel(); ++level) {
+            const float threshold = layout.pageSize(level) * 2.0F;
+            require(layout.levelForDistance(threshold) == level, "Exact distance threshold must keep the finer page");
+            require(layout.levelForDistance(std::nextafter(threshold, 0.0F)) == level, "Distance just below the threshold changed level");
+            require(layout.levelForDistance(std::nextafter(threshold, std::numeric_limits<float>::max())) == std::min(level + 1, layout.rootLevel()), "Distance just above the threshold must select the coarser page");
+        }
+    }
 }
 
 int main() {
+    testVTDistanceThresholds();
+    testPageTableEncodingAndReuse();
     testCompositionSources();
     testSectorCountLimit();
     testHeightReservations();
@@ -1137,18 +1339,6 @@ int main() {
     require(pageLayout.levelForDistance(1.5F) == 0, "Near view must request maximum material precision");
     require(pageLayout.levelForDistance(8.0F) == 2, "Material precision must fall independently with distance");
 
-    LandscapeData reference;
-    reference.sectorsX = reference.sectorsZ = 2;
-    reference.maxLevel = 7;
-    reference.minTileLevel = 3;
-    require(LandscapePagingTestAccess::cliffReferenceLevel(reference) == 4, "4 km reference must fit 256 source tiles at 2 m spacing");
-    for (uint32_t sectors : {1U, 2U, 4U, 8U, 16U}) {
-        reference.sectorsX = reference.sectorsZ = sectors;
-        const auto level = LandscapePagingTestAccess::cliffReferenceLevel(reference);
-        const auto count = static_cast<uint64_t>(sectors) * sectors * (1ULL << (2U * (reference.maxLevel - level)));
-        require(count <= config::PAGE_POOL_LAYERS / 4U, "Cliff references exceeded cache budget");
-        require(level >= reference.minTileLevel && level <= reference.maxLevel, "Invalid reference level");
-    }
     const auto fine = pageLayout.coveringPage(0, {17, 29}, {18, 30});
     require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
     const auto morph = pageLayout.coveringPage(0, {16, 28}, {18, 30});

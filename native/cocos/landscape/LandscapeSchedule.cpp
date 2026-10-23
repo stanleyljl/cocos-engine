@@ -114,15 +114,22 @@ bool LandscapeSchedule::beginNextChange() {
     });
     for (const auto &item : work) {
         Transaction transaction;
+        if (item.candidate.operation == Operation::REFRESH) {
+            auto node = desiredNode(item.candidate.node);
+            if (sameMapping(node.material, _currentTree.nodes().at(item.candidate.node.key()).material)) {
+                continue;
+            }
+            // Most view changes leave a grid's material mapping unchanged.
+            // Build a refresh transaction only after finding an actual change.
+            transaction.nodes.push_back(std::move(node));
+        }
         if (!_currentTree.plan(item.candidate, transaction.topology)) {
             continue;
         }
-        for (const auto address : transaction.topology.added) {
-            transaction.nodes.push_back(desiredNode(address));
-        }
-        if (item.candidate.operation == Operation::REFRESH &&
-            sameMapping(transaction.nodes.front().material, _currentTree.nodes().at(item.candidate.node.key()).material)) {
-            continue;
+        if (item.candidate.operation != Operation::REFRESH) {
+            for (const auto address : transaction.topology.added) {
+                transaction.nodes.push_back(desiredNode(address));
+            }
         }
         if (admit(std::move(transaction))) {
             return true;
@@ -137,10 +144,6 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::ve
     Resources resources;
     ccstd::unordered_set<uint64_t> sources;
     ccstd::unordered_set<uint64_t> pages;
-    _vt.requiredSources(resources.sources);
-    for (const auto source : resources.sources) {
-        sources.insert(source.key());
-    }
     const auto collect = [&](const CurrentTree::Node &node) {
         const auto address = node.geometry.address();
         const auto source = address.ancestor(std::max(address.level, _data.minTileLevel));
@@ -167,19 +170,19 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::ve
 }
 
 bool LandscapeSchedule::canPrepare(const Resources &resources) const {
-    if (!_tiles.canReserve(resources.sources) || !_vt.pages().canReserve(resources.pages)) {
+    if (!_tiles.canReserve(resources.sources) || !_vt.canReserve(resources.pages)) {
         return false;
     }
     ccstd::unordered_set<uint64_t> pinned;
     for (const auto source : resources.sources) {
         pinned.insert(source.key());
     }
-    // Every page must fit with all displayed/candidate height and projection
-    // sources, including the larger footprint needed when normal baking is enabled.
+    // Every page must fit with all displayed/candidate height sources,
+    // including the larger footprint needed when far normal detail is enabled.
     // Other composition inputs can be released between batches.
     for (const auto page : resources.pages) {
         ccstd::vector<NodeAddress> inputs;
-        _vt.pages().sources(page, true).appendTo(inputs);
+        _vt.sources(page, true).appendTo(inputs);
         if (!sourcesFit(pinned, inputs, _tiles.layerCount())) {
             return false;
         }
@@ -197,11 +200,11 @@ bool LandscapeSchedule::admit(Transaction transaction) {
     const auto &topology = transaction.topology;
     const auto nextCount = topology.removed.empty() ? currentCount
                                                   : currentCount - topology.removed.size() + topology.added.size();
-    if (!_vt.ensureGridMappingCapacity(static_cast<uint32_t>(std::max(currentCount, nextCount)))) {
+    if (!_vt.pageTable().ensureCapacity(static_cast<uint32_t>(std::max(currentCount, nextCount)))) {
         return false;
     }
     // Validate the entire union before changing either pool's reservations.
-    if (!_vt.pages().reserve(resources.pages) || !_tiles.reserve(resources.sources)) {
+    if (!_vt.reserve(resources.pages) || !_tiles.reserve(resources.sources)) {
         return false;
     }
     _pending = std::move(transaction);
@@ -220,11 +223,11 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
         working.insert(source.key());
     }
     for (const auto page : resources.pages) {
-        if (!_vt.pages().needsComposition(page)) {
+        if (!_vt.needsComposition(page)) {
             continue;
         }
         ccstd::vector<NodeAddress> inputs;
-        _vt.pages().sources(page, _vt.isBakeNormalEnabled()).appendTo(inputs);
+        _vt.sources(page, _vt.getRefineFarDetail()).appendTo(inputs);
         if (!sourcesFit(working, inputs, _tiles.layerCount())) {
             continue;
         }
@@ -238,7 +241,7 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
 }
 
 bool LandscapeSchedule::resourcesReady() const {
-    return _tiles.ready() && _vt.pages().ready() && _vt.sourcesReady();
+    return _tiles.ready() && _vt.ready();
 }
 
 void LandscapeSchedule::stopLoading() {
@@ -289,7 +292,7 @@ void LandscapeSchedule::commitChange() {
     // The old tree is no longer displayed. Keep only committed height sources,
     // material pages and projection references; composition inputs are temporary.
     _resources = collectResources();
-    _vt.pages().reserve(_resources.pages);
+    _vt.reserve(_resources.pages);
     _tiles.reserve(_resources.sources);
 }
 

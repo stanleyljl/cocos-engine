@@ -93,6 +93,8 @@ bool TilePagePool::initTextures() {
     info.format = gfx::Format::R16UI;
     _splatArray = _device->createTexture(info);
     info.format = gfx::Format::RG8;
+    info.width = config::SOURCE_NORMAL_RESOLUTION;
+    info.height = config::SOURCE_NORMAL_RESOLUTION;
     _normalArray = _device->createTexture(info);
     if (!valid()) {
         CC_LOG_WARNING("[Landscape] failed to create height/splat/normal arrays");
@@ -122,8 +124,8 @@ void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_
         return;
     }
     gfx::BufferTextureCopy region;
-    region.texExtent.width = config::SOURCE_TILE_RESOLUTION;
-    region.texExtent.height = config::SOURCE_TILE_RESOLUTION;
+    region.texExtent.width = array->getWidth();
+    region.texExtent.height = array->getHeight();
     region.texExtent.depth = 1;
     region.texSubres.mipLevel = 0;
     region.texSubres.baseArrayLayer = layer;

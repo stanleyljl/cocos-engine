@@ -29,7 +29,7 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "landscape/LandscapeData.h"
-#include "landscape/VirtualTexture.h"
+#include "landscape/VTRenderer.h"
 #include "math/Vec3.h"
 
 namespace cc {

@@ -49,7 +49,7 @@ export enum LandscapeQueryStatus {
 }
 
 /** Reusable world-space result. Surface type is the dominant painted material ID.
- * Visual cliff overrides, detail normals and decals are not part of this query.
+ * Detail normals and decals are not part of this query.
  */
 export class LandscapeSurfaceResult {
     public readonly position = new Vec3();
@@ -157,30 +157,24 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(6)
-    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.cliffEnabled.tooltip')
-    public cliffEnabled = true;
-
-    @serializable
-    @editable
-    @displayOrder(7)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.heightBlendEnabled.tooltip')
     public heightBlendEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(8)
-    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.bakeNormalEnabled.tooltip')
-    public bakeNormalEnabled = true;
+    @displayOrder(7)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.refineFarDetail.tooltip')
+    public refineFarDetail = true;
 
     @serializable
     @editable
-    @displayOrder(9)
+    @displayOrder(8)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.decal3DEnabled.tooltip')
     public decal3DEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(10)
+    @displayOrder(9)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.physicsWireframe.tooltip')
     public physicsWireframe = false;
 
@@ -552,11 +546,10 @@ export class Landscape extends Component {
             | (Number(data.showBox) << 3)
             | (Number(data.unlit) << 4)
             | (Number(data.showVTAtlas) << 5)
-            | (Number(data.cliffEnabled) << 6)
-            | (Number(data.heightBlendEnabled) << 7)
-            | (Number(data.bakeNormalEnabled) << 8)
-            | (Number(data.decal3DEnabled) << 9)
-            | (Number(data.physicsWireframe) << 10);
+            | (Number(data.heightBlendEnabled) << 6)
+            | (Number(data.refineFarDetail) << 7)
+            | (Number(data.decal3DEnabled) << 8)
+            | (Number(data.physicsWireframe) << 9);
         if (flags === this._appliedDebugFlags) {
             return;
         }
