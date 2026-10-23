@@ -1,0 +1,99 @@
+// Copyright (c) 2024 Xiamen Yaji Software Co., Ltd.
+// Filter completed VT pages and their gutters without re-evaluating materials.
+CCEffect %{
+  techniques:
+  - name: downsample
+    passes:
+    - vert: vt-mip-vs:vert
+      frag: vt-mip-fs
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      rasterizerState:
+        cullMode: none
+      blendState:
+        targets:
+        - blend: false
+        - blend: false
+      properties:
+        mipLayout: { value: [4352, 272, 0, 1] }
+        sourceAlbedo: { value: white, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
+        sourceNormal: { value: normal, sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
+}%
+
+CCProgram vt-mip-uniforms %{
+  uniform MipConstants {
+    vec4 mipLayout; // source atlas size, source slot size, source LOD, clip Y sign
+  };
+}%
+
+CCProgram vt-mip-vs %{
+  precision highp float;
+  #include <vt-mip-uniforms>
+  in vec2 a_position;
+  in vec4 a_vtPage;
+  out vec2 v_pageUV;
+  #if __VERSION__ >= 300
+    flat out vec2 v_slot;
+  #else
+    out vec2 v_slot;
+  #endif
+  vec4 vert() {
+    float count = mipLayout.x / mipLayout.y;
+    #if LANDSCAPE_VT_COMPACT
+      v_slot = vec2(0.0);
+    #else
+      v_slot = vec2(mod(a_vtPage.x, count), floor(a_vtPage.x / count));
+    #endif
+    v_pageUV = a_position;
+    vec2 clip = (v_slot + a_position) / count * 2.0 - 1.0;
+    clip.y *= mipLayout.w;
+    return vec4(clip, 0.0, 1.0);
+  }
+}%
+
+CCProgram vt-mip-fs %{
+  precision highp float;
+  precision highp int;
+  #include <vt-mip-uniforms>
+  #if __VERSION__ >= 300
+    uniform sampler2D sourceAlbedo;
+    uniform sampler2D sourceNormal;
+    in vec2 v_pageUV;
+    flat in vec2 v_slot;
+    layout(location = 0) out vec4 albedoOut;
+    layout(location = 1) out vec4 normalOut;
+
+    vec3 decodeNormal(vec4 albedo, vec4 nra) {
+      return normalize(vec3(nra.r, albedo.a, nra.g) * 2.0 - 1.0);
+    }
+    void main() {
+      // Halve the complete slot: 256+8+8 -> 128+4+4 -> 64+2+2. Integer fetches
+      // cannot cross into an unrelated physical slot, even at its outer edge.
+      int size = int(mipLayout.y);
+      int sourceLod = int(mipLayout.z);
+      ivec2 pixel = clamp(ivec2(floor(v_pageUV * float(size / 2))), ivec2(0), ivec2(size / 2 - 1));
+      ivec2 origin = ivec2(v_slot) * size + pixel * 2;
+      vec4 albedo = vec4(0.0);
+      vec3 normal = vec3(0.0);
+      vec2 roughnessAO = vec2(0.0);
+      for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+          ivec2 at = origin + ivec2(x, y);
+          vec4 color = texelFetch(sourceAlbedo, at, sourceLod);
+          albedo += color;
+          vec4 nra = texelFetch(sourceNormal, at, sourceLod);
+          normal += decodeNormal(color, nra);
+          roughnessAO += nra.ba;
+        }
+      }
+      // Albedo was already converted to linear by the compose pass.
+      albedoOut = albedo * 0.25;
+      vec3 filteredNormal = dot(normal, normal) > 1e-10 ? normalize(normal) : vec3(0.0, 0.0, 1.0);
+      albedoOut.a = filteredNormal.y * 0.5 + 0.5;
+      normalOut = vec4(filteredNormal.xz * 0.5 + 0.5, roughnessAO * 0.25);
+    }
+  #else
+    void main() { gl_FragColor = vec4(0.0); }
+  #endif
+}%

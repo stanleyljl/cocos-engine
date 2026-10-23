@@ -41,14 +41,14 @@ class LandscapeAsset;
 // Physical slots are reserved BEFORE starting IO. In-flight work is bounded;
 // only the coordinator's exact working set may be uploaded. Source mapping and
 // shader bindings use exact resident tiles, with no missing-source fallback.
-class TilePagePool {
+class SourceDataManager {
 public:
     struct Tile {
         NodeAddress address;
         int layer{-1};
     };
-    TilePagePool();
-    ~TilePagePool();
+    SourceDataManager();
+    ~SourceDataManager();
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
     bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();
@@ -70,8 +70,15 @@ public:
     gfx::Sampler *splatSampler() const { return _splatSampler; }
     uint32_t layerCount() const { return _capacity; }
 
+protected:
+    // CPU reservation operations; runtime callers use init() and the upload path.
+    bool initSlots(const LandscapeData &data, uint32_t layerCount);
+    const ccstd::vector<NodeAddress> &reservedSources() const { return _working; }
+    int reservedLayer(NodeAddress source) const;
+    // Publish a reserved source only after all three texture uploads have been submitted.
+    void publish(uint64_t key);
+
 private:
-    friend struct LandscapePagingTestAccess;
     struct Slot {
         uint32_t layer;
         bool ready{false};
@@ -90,7 +97,7 @@ private:
     gfx::Sampler *_heightSampler{nullptr};
     gfx::Sampler *_splatSampler{nullptr};
     bool _heightUnorm{false};
-    // Slot ownership and the exact working set share the same lifetime as the pool.
+    // Slot ownership and the exact working set share the same lifetime as the manager.
     LandscapeData _data;
     uint32_t _capacity{0};
     ccstd::unordered_map<uint64_t, Slot> _slots;

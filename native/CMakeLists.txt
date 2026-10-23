@@ -1633,8 +1633,8 @@ cocos_source_files(
                  cocos/landscape/LandscapeHeightfield.cpp
                  cocos/landscape/GridMesh.h
                  cocos/landscape/GridMesh.cpp
-                 cocos/landscape/TilePagePool.h
-                 cocos/landscape/TilePagePool.cpp
+                 cocos/landscape/SourceDataManager.h
+                 cocos/landscape/SourceDataManager.cpp
                  cocos/landscape/MaterialLibrary.h
                  cocos/landscape/MaterialLibrary.cpp
                  cocos/landscape/VTRenderer.h

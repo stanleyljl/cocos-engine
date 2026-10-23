@@ -23,8 +23,8 @@ bool sourcesFit(const ccstd::unordered_set<uint64_t> &protectedSources, const cc
 }
 } // namespace
 
-LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, TilePagePool &tiles, VTRenderer &vt)
-: _asset(asset), _tiles(tiles), _vt(vt), _data(asset.data()),
+LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, SourceDataManager &sourceData, VTRenderer &vt)
+: _asset(asset), _sourceData(sourceData), _vt(vt), _data(asset.data()),
   _layout(_data.sectorSize), _expectedTree(_data.maxLevel) {
     _currentTree.init(_data);
 }
@@ -68,7 +68,7 @@ float LandscapeSchedule::distance(NodeAddress node) const {
 CurrentTree::Node LandscapeSchedule::desiredNode(NodeAddress address) const {
     CurrentTree::Node result;
     result.geometry = geometry(address);
-    result.material = _layout.gridMapping(_data.nodeRegion(address), result.geometry.minY,
+    result.material = _layout.buildGridMapping(_data.nodeRegion(address), result.geometry.minY,
                                          result.geometry.maxY, _camera);
     return result;
 }
@@ -170,7 +170,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::ve
 }
 
 bool LandscapeSchedule::canPrepare(const Resources &resources) const {
-    if (!_tiles.canReserve(resources.sources) || !_vt.canReserve(resources.pages)) {
+    if (!_sourceData.canReserve(resources.sources) || !_vt.canReserve(resources.pages)) {
         return false;
     }
     ccstd::unordered_set<uint64_t> pinned;
@@ -182,8 +182,8 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
     // Other composition inputs can be released between batches.
     for (const auto page : resources.pages) {
         ccstd::vector<NodeAddress> inputs;
-        _vt.sources(page, true).appendTo(inputs);
-        if (!sourcesFit(pinned, inputs, _tiles.layerCount())) {
+        _vt.selectSources(page, true).appendTo(inputs);
+        if (!sourcesFit(pinned, inputs, _sourceData.layerCount())) {
             return false;
         }
     }
@@ -203,8 +203,8 @@ bool LandscapeSchedule::admit(Transaction transaction) {
     if (!_vt.pageTable().ensureCapacity(static_cast<uint32_t>(std::max(currentCount, nextCount)))) {
         return false;
     }
-    // Validate the entire union before changing either pool's reservations.
-    if (!_vt.reserve(resources.pages) || !_tiles.reserve(resources.sources)) {
+    // Validate the entire union before changing source data or VT reservations.
+    if (!_vt.reserve(resources.pages) || !_sourceData.reserve(resources.sources)) {
         return false;
     }
     _pending = std::move(transaction);
@@ -227,8 +227,8 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
             continue;
         }
         ccstd::vector<NodeAddress> inputs;
-        _vt.sources(page, _vt.getRefineFarDetail()).appendTo(inputs);
-        if (!sourcesFit(working, inputs, _tiles.layerCount())) {
+        _vt.selectSources(page, _vt.getRefineFarDetail()).appendTo(inputs);
+        if (!sourcesFit(working, inputs, _sourceData.layerCount())) {
             continue;
         }
         for (const auto source : inputs) {
@@ -241,7 +241,7 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
 }
 
 bool LandscapeSchedule::resourcesReady() const {
-    return _tiles.ready() && _vt.ready();
+    return _sourceData.ready() && _vt.ready();
 }
 
 void LandscapeSchedule::stopLoading() {
@@ -253,19 +253,19 @@ bool LandscapeSchedule::prepareResources(bool synchronous) {
     while (!resourcesReady()) {
         // Preserve the current batch while its IO/uploads are incomplete. This
         // prevents view or material edits from continually replacing in-flight work.
-        if (!_tiles.ready() && !_tiles.loadReserved(synchronous)) {
+        if (!_sourceData.ready() && !_sourceData.loadReserved(synchronous)) {
             stopLoading();
             return false;
         }
-        if (!_tiles.ready()) {
+        if (!_sourceData.ready()) {
             return false;
         }
-        if (!_tiles.reserve(compositionSources()) || !_tiles.loadReserved(synchronous)) {
+        if (!_sourceData.reserve(compositionSources()) || !_sourceData.loadReserved(synchronous)) {
             stopLoading();
             return false;
         }
         const auto budget = synchronous ? config::VT_PAGE_COUNT : _remainingPages;
-        const auto composed = _vt.render(_tiles, budget);
+        const auto composed = _vt.renderPages(_sourceData, budget);
         if (!synchronous) {
             _remainingPages -= composed;
         }
@@ -293,7 +293,7 @@ void LandscapeSchedule::commitChange() {
     // material pages and projection references; composition inputs are temporary.
     _resources = collectResources();
     _vt.reserve(_resources.pages);
-    _tiles.reserve(_resources.sources);
+    _sourceData.reserve(_resources.sources);
 }
 
 void LandscapeSchedule::update(ExpectedTree expected, const Vec3 &camera, uint32_t frame) {
@@ -313,7 +313,7 @@ void LandscapeSchedule::update(ExpectedTree expected, const Vec3 &camera, uint32
         _frame = frame;
         _remainingPages = config::VT_PAGE_UPDATE_BUDGET;
         if (_ready) {
-            _tiles.update(config::PAGE_UPLOAD_BUDGET);
+            _sourceData.update(config::PAGE_UPLOAD_BUDGET);
         }
     }
     if (!_pending && _resources.pages.empty() && !beginInitialChange()) {

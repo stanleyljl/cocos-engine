@@ -23,7 +23,6 @@
 ****************************************************************************/
 #pragma once
 
-#include <cstddef>
 #include <array>
 #include "base/Ptr.h"
 #include "base/std/container/vector.h"
@@ -40,23 +39,16 @@ namespace landscape {
 class DecalRenderer;
 class LandscapeAsset;
 class MaterialLibrary;
-class TilePagePool;
+class SourceDataManager;
 struct VTPageSources;
 
-// Direct vertex-buffer layout: three RGBA32F attributes; the page attribute
-// carries slot/count and two padding components.
+// Direct vertex-buffer layout: a_vtPage, a_vtRegion and a_vtSource (RGBA32F).
 struct VTPageInstance {
-    float slot{0};
-    float decalCount{0};
-    float reservedZ{0};
-    float reservedW{0};
+    Vec4 pageInfo; // X: physical VT slot; Y: overlapping decal count (including gutters); ZW: unused, zero.
     Vec4 region;
     Vec4 splatSource;
-    uint32_t physicalSlot() const { return static_cast<uint32_t>(slot); }
+    uint32_t physicalSlot() const { return static_cast<uint32_t>(pageInfo.x); }
 };
-static_assert(sizeof(VTPageInstance) == 12 * sizeof(float), "VT instance layout must match shader attributes");
-static_assert(offsetof(VTPageInstance, region) == 4 * sizeof(float) && offsetof(VTPageInstance, splatSource) == 8 * sizeof(float), "VT attribute offsets must match the input assembler");
-
 
 // Owns composition inputs, material and draw resources. Page selection and
 // submission belong to VTRenderer; this stage only prepares inputs and records draws.
@@ -66,14 +58,14 @@ public:
     ~VTPageComposer();
     VTPageComposer(const VTPageComposer &) = delete;
     VTPageComposer &operator=(const VTPageComposer &) = delete;
-    bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+    bool init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
     RenderTexture *target() const { return _compositionTarget.get(); }
     uint32_t size() const;
     gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }
     gfx::RenderPass *renderPass(bool initialize = false) const;
     void record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t count, bool initialize);
     Material *material() const { return _composeMaterial.get(); }
-    bool prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const TilePagePool &tiles, VTPageInstance &instance);
+    bool prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const SourceDataManager &sourceData, VTPageInstance &instance);
     void uploadInputs();
     void setGlobalColorMap(Texture2D *texture);
     // Return whether cached page pixels need recomposition.
@@ -84,8 +76,8 @@ private:
     bool initTarget(gfx::Device *device, bool compressed);
     bool initDrawResources(gfx::Device *device);
     bool initRenderPass(gfx::Device *device, bool compressed);
-    bool initMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
-    bool initSourceTable(TilePagePool &tiles, gfx::Device *device);
+    bool initMaterial(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
+    bool initSourceTable(SourceDataManager &sourceData, gfx::Device *device);
     void bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
     void applyGlobalColorMap();
 
@@ -158,7 +150,6 @@ private:
     IntrusivePtr<gfx::Buffer> _blocks;
     IntrusivePtr<gfx::Shader> _shader;
     IntrusivePtr<gfx::DescriptorSetLayout> _layout;
-    IntrusivePtr<gfx::DescriptorSetLayout> _emptyLayout;
     IntrusivePtr<gfx::PipelineLayout> _pipelineLayout;
     struct Mip {
         IntrusivePtr<gfx::Buffer> constants;

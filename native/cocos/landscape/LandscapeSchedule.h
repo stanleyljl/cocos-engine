@@ -4,7 +4,7 @@
 #include <optional>
 #include "landscape/LandscapeAsset.h"
 #include "landscape/Quadtree.h"
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 
 namespace cc::landscape {
 class VTRenderer;
@@ -14,7 +14,7 @@ class VTRenderer;
 // survives across updates; candidate ordering is never cached against an old cut.
 class LandscapeSchedule {
 public:
-    LandscapeSchedule(LandscapeAsset &asset, TilePagePool &tiles, VTRenderer &vt);
+    LandscapeSchedule(LandscapeAsset &asset, SourceDataManager &sourceData, VTRenderer &vt);
     void update(ExpectedTree expected, const Vec3 &localCamera, uint32_t frame);
     bool ready() const { return _ready; }
     const CurrentTree &currentTree() const { return _currentTree; }
@@ -49,7 +49,7 @@ private:
     void stopLoading();
 
     LandscapeAsset &_asset;
-    TilePagePool &_tiles;
+    SourceDataManager &_sourceData;
     VTRenderer &_vt;
     const LandscapeData &_data;
     VTPageLayout _layout;

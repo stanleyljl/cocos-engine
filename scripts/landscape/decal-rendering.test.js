@@ -17,7 +17,7 @@ test('RVT decal material and conforming near mesh on WebGL2', {
     skip: configured ? false : 'Set LANDSCAPE_EFFECT_JSON, LANDSCAPE_BASE_EFFECT_JSON, LANDSCAPE_DECAL_EFFECT_JSON and CHROME_PATH to run the GPU checks',
 }, () => {
     const effect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_EFFECT_JSON, 'utf8'));
-    assert.equal(effect.shaders.length, 2, 'Compile both compose and mip techniques');
+    assert.equal(effect.shaders.length, 1, 'Compose effect contains only material composition');
     assert.doesNotMatch(effect.shaders[0].glsl3.frag, /v_source.w < 0.0/, 'VT contains only normal terrain composition');
     const baseEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
     const decalEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_DECAL_EFFECT_JSON, 'utf8'));

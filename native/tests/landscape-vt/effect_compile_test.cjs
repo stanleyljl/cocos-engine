@@ -32,7 +32,7 @@ async function main() {
     const dependencies = JSON.parse(fs.readFileSync(path.join(engine, 'cc.config.json'), 'utf8'))
         .features.landscape.dependentAssets;
     const effectNames = new Set();
-    for (const name of ['builtin-landscape', 'builtin-landscape-decal', 'builtin-landscape-vt-compose', 'builtin-landscape-vt-compress']) {
+    for (const name of ['builtin-landscape', 'builtin-landscape-decal', 'builtin-landscape-vt-compose', 'builtin-landscape-vt-mip', 'builtin-landscape-vt-compress']) {
         const source = fs.readFileSync(path.join(engine, 'editor/assets/effects/landscape', `${name}.effect`), 'utf8');
         const effect = compiler.buildEffect(`landscape/${name}`, source);
         if (!effect || !effect.shaders.length) throw new Error(`No shaders produced for ${name}`);
@@ -47,7 +47,7 @@ async function main() {
         console.log(`PASS: ${name}, ${effect.shaders.length} shader programs`);
     }
     // Moving builtin effects changes their runtime names, even when UUIDs stay fixed.
-    for (const file of ['LandscapeRenderer.cpp', 'VTRenderer.cpp', 'DecalRenderer.cpp']) {
+    for (const file of ['LandscapeRenderer.cpp', 'VTRenderer.cpp', 'VTPageProcessing.cpp', 'DecalRenderer.cpp']) {
         const source = fs.readFileSync(path.join(engine, 'native/cocos/landscape', file), 'utf8');
         for (const match of source.matchAll(/"(landscape\/builtin-landscape[^"\s]*)"/g)) {
             if (!effectNames.has(match[1])) throw new Error(`${file} references missing effect ${match[1]}`);

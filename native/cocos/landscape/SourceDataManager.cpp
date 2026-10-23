@@ -22,7 +22,7 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,21 +41,18 @@
 namespace cc {
 namespace landscape {
 
-TilePagePool::TilePagePool() = default;
+SourceDataManager::SourceDataManager() = default;
 
-TilePagePool::~TilePagePool() {
+SourceDataManager::~SourceDataManager() {
     destroy();
 }
 
-bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
+bool SourceDataManager::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
     if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
         return false;
     }
-    const auto &data = asset->data();
-    const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
-    if (rootCount > layerCount) {
-        CC_LOG_WARNING("[Landscape] page pool has %u layers but needs %zu permanent root pages", layerCount, rootCount);
+    if (!initSlots(asset->data(), layerCount)) {
         return false;
     }
     // Check capabilities before createTexture reaches the validator assertion.
@@ -68,8 +65,6 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     }
     _device = device;
     _asset = asset;
-    _data = data;
-    _capacity = layerCount;
     _heightUnorm = heightUnorm;
     if (!initTextures()) {
         destroy();
@@ -80,66 +75,23 @@ bool TilePagePool::init(gfx::Device *device, LandscapeAsset *asset, uint32_t lay
     return true;
 }
 
-bool TilePagePool::initTextures() {
-    gfx::TextureInfo info;
-    info.type = gfx::TextureType::TEX2D_ARRAY;
-    info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
-    info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
-    info.width = config::SOURCE_TILE_RESOLUTION;
-    info.height = config::SOURCE_TILE_RESOLUTION;
-    info.layerCount = _capacity;
-    info.levelCount = 1;
-    _heightArray = _device->createTexture(info);
-    info.format = gfx::Format::R16UI;
-    _splatArray = _device->createTexture(info);
-    info.format = gfx::Format::RG8;
-    info.width = config::SOURCE_NORMAL_RESOLUTION;
-    info.height = config::SOURCE_NORMAL_RESOLUTION;
-    _normalArray = _device->createTexture(info);
-    if (!valid()) {
-        CC_LOG_WARNING("[Landscape] failed to create height/splat/normal arrays");
-        return false;
-    }
-    return true;
+void SourceDataManager::destroy() {
+    _data = {};
+    _capacity = 0;
+    _slots.clear();
+    _working.clear();
+    _heightUnorm = false;
+    _inFlight.clear();
+    _asset = nullptr;
+    _heightArray = nullptr;
+    _splatArray = nullptr;
+    _normalArray = nullptr;
+    _heightSampler = nullptr;
+    _splatSampler = nullptr;
+    _device = nullptr;
 }
 
-void TilePagePool::initSamplers() {
-    gfx::SamplerInfo si;
-    // R16_UNORM heights and normals use hardware filtering. RG8 heights are
-    // decoded before interpolation with texelFetch, which ignores the sampler.
-    si.minFilter = gfx::Filter::LINEAR;
-    si.magFilter = gfx::Filter::LINEAR;
-    si.mipFilter = gfx::Filter::NONE;
-    si.addressU = gfx::Address::CLAMP;
-    si.addressV = gfx::Address::CLAMP;
-    si.addressW = gfx::Address::CLAMP;
-    _heightSampler = _device->getSampler(si);
-    si.minFilter = gfx::Filter::POINT;
-    si.magFilter = gfx::Filter::POINT;
-    _splatSampler = _device->getSampler(si);
-}
-
-void TilePagePool::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
-    if (array == nullptr || data == nullptr) {
-        return;
-    }
-    gfx::BufferTextureCopy region;
-    region.texExtent.width = array->getWidth();
-    region.texExtent.height = array->getHeight();
-    region.texExtent.depth = 1;
-    region.texSubres.mipLevel = 0;
-    region.texSubres.baseArrayLayer = layer;
-    region.texSubres.layerCount = 1;
-    const uint8_t *buffers[1]{data};
-    _device->copyBuffersToTexture(buffers, array, &region, 1);
-}
-
-bool TilePagePool::validSource(NodeAddress source) const {
-    return source.level >= _data.minTileLevel && source.level <= _data.maxLevel &&
-           source.x < _data.nodesX(source.level) && source.z < _data.nodesZ(source.level);
-}
-
-bool TilePagePool::canReserve(const ccstd::vector<NodeAddress> &sources) const {
+bool SourceDataManager::canReserve(const ccstd::vector<NodeAddress> &sources) const {
     if (sources.size() > _capacity) {
         return false;
     }
@@ -151,7 +103,7 @@ bool TilePagePool::canReserve(const ccstd::vector<NodeAddress> &sources) const {
     return true;
 }
 
-bool TilePagePool::reserve(const ccstd::vector<NodeAddress> &sources) {
+bool SourceDataManager::reserve(const ccstd::vector<NodeAddress> &sources) {
     if (!canReserve(sources)) {
         return false;
     }
@@ -186,16 +138,7 @@ bool TilePagePool::reserve(const ccstd::vector<NodeAddress> &sources) {
     return true;
 }
 
-int TilePagePool::resident(NodeAddress source) const {
-    const auto it = _slots.find(source.key());
-    return it != _slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
-}
-
-bool TilePagePool::ready() const {
-    return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
-}
-
-bool TilePagePool::loadReserved(bool synchronous) {
+bool SourceDataManager::loadReserved(bool synchronous) {
     if (_asset->loadingFailed()) {
         return false;
     }
@@ -227,7 +170,7 @@ bool TilePagePool::loadReserved(bool synchronous) {
     return !_asset->loadingFailed();
 }
 
-void TilePagePool::update(uint32_t budget) {
+void SourceDataManager::update(uint32_t budget) {
     LandscapeAsset::TileData tile;
     for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
         _inFlight.erase(tile.key);
@@ -235,7 +178,95 @@ void TilePagePool::update(uint32_t budget) {
     }
 }
 
-void TilePagePool::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
+int SourceDataManager::resident(NodeAddress source) const {
+    const auto it = _slots.find(source.key());
+    return it != _slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
+}
+
+SourceDataManager::Tile SourceDataManager::resolve(NodeAddress node) const {
+    const uint32_t level = std::max(node.level, _data.minTileLevel);
+    const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
+    return {source, resident(source)};
+}
+
+Vec4 SourceDataManager::shaderParams(const Tile &tile) const {
+    const auto region = _data.nodeRegion(tile.address);
+    return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
+}
+
+bool SourceDataManager::ready() const {
+    return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
+}
+
+bool SourceDataManager::initSlots(const LandscapeData &data, uint32_t layerCount) {
+    CC_ASSERT(_device == nullptr && _slots.empty() && _inFlight.empty());
+    const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
+    if (!data.valid() || layerCount == 0) {
+        return false;
+    }
+    if (rootCount > layerCount) {
+        CC_LOG_WARNING("[Landscape] source data manager has %u layers but needs %zu permanent root tiles", layerCount, rootCount);
+        return false;
+    }
+    _data = data;
+    _capacity = layerCount;
+    return true;
+}
+
+int SourceDataManager::reservedLayer(NodeAddress source) const {
+    const auto it = _slots.find(source.key());
+    return it != _slots.end() ? static_cast<int>(it->second.layer) : -1;
+}
+
+void SourceDataManager::publish(uint64_t key) {
+    _slots.at(key).ready = true;
+}
+
+bool SourceDataManager::validSource(NodeAddress source) const {
+    return source.level >= _data.minTileLevel && source.level <= _data.maxLevel &&
+           source.x < _data.nodesX(source.level) && source.z < _data.nodesZ(source.level);
+}
+
+bool SourceDataManager::initTextures() {
+    gfx::TextureInfo info;
+    info.type = gfx::TextureType::TEX2D_ARRAY;
+    info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
+    info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
+    info.width = config::SOURCE_TILE_RESOLUTION;
+    info.height = config::SOURCE_TILE_RESOLUTION;
+    info.layerCount = _capacity;
+    info.levelCount = 1;
+    _heightArray = _device->createTexture(info);
+    info.format = gfx::Format::R16UI;
+    _splatArray = _device->createTexture(info);
+    info.format = gfx::Format::RG8;
+    info.width = config::SOURCE_NORMAL_RESOLUTION;
+    info.height = config::SOURCE_NORMAL_RESOLUTION;
+    _normalArray = _device->createTexture(info);
+    if (!valid()) {
+        CC_LOG_WARNING("[Landscape] failed to create height/splat/normal arrays");
+        return false;
+    }
+    return true;
+}
+
+void SourceDataManager::initSamplers() {
+    gfx::SamplerInfo si;
+    // R16_UNORM heights and normals use hardware filtering. RG8 heights are
+    // decoded before interpolation with texelFetch, which ignores the sampler.
+    si.minFilter = gfx::Filter::LINEAR;
+    si.magFilter = gfx::Filter::LINEAR;
+    si.mipFilter = gfx::Filter::NONE;
+    si.addressU = gfx::Address::CLAMP;
+    si.addressV = gfx::Address::CLAMP;
+    si.addressW = gfx::Address::CLAMP;
+    _heightSampler = _device->getSampler(si);
+    si.minFilter = gfx::Filter::POINT;
+    si.magFilter = gfx::Filter::POINT;
+    _splatSampler = _device->getSampler(si);
+}
+
+void SourceDataManager::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
     const auto it = _slots.find(key);
     if (it == _slots.end() || it->second.ready) {
         return;
@@ -244,34 +275,23 @@ void TilePagePool::uploadTile(uint64_t key, const uint8_t *height, const uint8_t
     uploadLayer(_heightArray, slot.layer, height);
     uploadLayer(_splatArray, slot.layer, splat);
     uploadLayer(_normalArray, slot.layer, normal);
-    slot.ready = true;
+    publish(key);
 }
 
-void TilePagePool::destroy() {
-    _data = {};
-    _capacity = 0;
-    _slots.clear();
-    _working.clear();
-    _heightUnorm = false;
-    _inFlight.clear();
-    _asset = nullptr;
-    _heightArray = nullptr;
-    _splatArray = nullptr;
-    _normalArray = nullptr;
-    _heightSampler = nullptr;
-    _splatSampler = nullptr;
-    _device = nullptr;
+void SourceDataManager::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
+    if (array == nullptr || data == nullptr) {
+        return;
+    }
+    gfx::BufferTextureCopy region;
+    region.texExtent.width = array->getWidth();
+    region.texExtent.height = array->getHeight();
+    region.texExtent.depth = 1;
+    region.texSubres.mipLevel = 0;
+    region.texSubres.baseArrayLayer = layer;
+    region.texSubres.layerCount = 1;
+    const uint8_t *buffers[1]{data};
+    _device->copyBuffersToTexture(buffers, array, &region, 1);
 }
 
-TilePagePool::Tile TilePagePool::resolve(NodeAddress node) const {
-    const uint32_t level = std::max(node.level, _data.minTileLevel);
-    const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
-    return {source, resident(source)};
-}
-
-Vec4 TilePagePool::shaderParams(const Tile &tile) const {
-    const auto region = _data.nodeRegion(tile.address);
-    return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
-}
 } // namespace landscape
 } // namespace cc

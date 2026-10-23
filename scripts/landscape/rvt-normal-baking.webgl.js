@@ -10,7 +10,7 @@ try {
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
     return shader;
   };
-  const programs = effect.shaders.map(s => {
+  const programs = [effect.shaders[0], mipEffect.shaders[0]].map(s => {
     const p = gl.createProgram();
     const prefix = '#define LANDSCAPE_HEIGHT_UNORM 0\n#define LANDSCAPE_VT_COMPACT 0\n';
     gl.attachShader(p, compile(gl.VERTEX_SHADER, prefix + s.glsl3.vert));

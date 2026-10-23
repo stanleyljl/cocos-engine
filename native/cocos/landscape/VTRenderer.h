@@ -86,7 +86,7 @@ public:
 
     // Subdivide aligned grid regions according to distance, independently of
     // geometry LOD, and map each cell to a page covering its stitched footprint.
-    VTGridMapping gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
+    VTGridMapping buildGridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
 
     // Local bounds must stay within one sector.
     // Include the complete stitched footprint, not just the original grid cell.
@@ -112,8 +112,11 @@ public:
     void upload(ccstd::vector<uint32_t> slots);
     void destroy();
 
+protected:
+    // CPU allocation step; runtime callers use ensureCapacity() to update both mirrors.
+    void resizeEntries(size_t count);
+
 private:
-    friend struct LandscapePagingTestAccess;
     struct Entry {
         uint8_t physicalSlot{0};
         uint8_t level{0};
@@ -134,34 +137,34 @@ public:
     ~VTRenderer();
     VTRenderer(const VTRenderer &) = delete;
     VTRenderer &operator=(const VTRenderer &) = delete;
-    bool init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals);
+    bool init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals);
     void destroy();
-    uint32_t render(TilePagePool &tiles, uint32_t maxUpdates);
+    uint32_t renderPages(SourceDataManager &sourceData, uint32_t maxPages);
 
-    enum class State {
+    enum class PageState {
         EMPTY,
-        DIRTY, // No composed pixels yet.
+        UNCOMPOSED, // No composed pixels yet.
         READY,
-        STALE, // Needs recomposition; previous pixels remain drawable.
+        OUTDATED, // Needs recomposition; previous pixels remain drawable.
     };
     struct Page {
         VTPageAddress address;
-        State state{State::EMPTY};
+        PageState state{PageState::EMPTY};
         uint64_t lastReserved{0};
         bool needsComposition() const {
-            return state == State::DIRTY || state == State::STALE;
+            return state == PageState::UNCOMPOSED || state == PageState::OUTDATED;
         }
         bool drawable() const {
-            return state == State::READY || state == State::STALE;
+            return state == PageState::READY || state == PageState::OUTDATED;
         }
     };
     // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
     bool reserve(const ccstd::vector<VTPageAddress> &pages);
-    const ccstd::vector<uint32_t> &activeSlots() const { return _active; }
+    const ccstd::vector<uint32_t> &reservedSlots() const { return _reservedSlots; }
     const Page &page(uint32_t slot) const { return _pages[slot]; }
     LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
-    VTPageSources sources(VTPageAddress address, bool refineFarDetail) const;
+    VTPageSources selectSources(VTPageAddress address, bool refineFarDetail) const;
     void invalidate();
     // Invalidate intersecting cached pages, including their filtering gutters.
     void invalidate(LandscapeRegion region);
@@ -183,18 +186,21 @@ public:
     gfx::Texture *normalRoughnessAO() const;
     gfx::Sampler *sampler() const { return _sampler; }
 
-private:
-    friend struct LandscapePagingTestAccess;
-    bool initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+protected:
+    // CPU residency operations; runtime callers use init() and renderPages().
     bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
+    // Mark composition complete only after its GPU commands have been submitted.
+    void publish(uint32_t slot);
+
+private:
+    bool initResources(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
     uint32_t sourceLevel(float size) const;
     int allocate(VTPageAddress address);
-    void publish(uint32_t slot);
     LandscapeData _data;
     VTPageLayout _layout;
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     ccstd::vector<Page> _pages;
-    ccstd::vector<uint32_t> _active;
+    ccstd::vector<uint32_t> _reservedSlots;
     ccstd::unordered_map<uint64_t, uint32_t> _lookup;
 
     VTPageTable _pageTable;

@@ -4,7 +4,7 @@ enable_testing()
 add_executable(landscape_vt_paging_test paging_test.cpp ../../cocos/landscape/LandscapeData.cpp
     ../../cocos/landscape/Quadtree.cpp
     ../../cocos/landscape/VTRenderer.cpp
-    ../../cocos/landscape/TilePagePool.cpp ../../cocos/base/RefCounted.cpp
+    ../../cocos/landscape/SourceDataManager.cpp ../../cocos/base/RefCounted.cpp
     ../../cocos/math/Vec3.cpp ../../cocos/math/Vec4.cpp ../../cocos/math/MathUtil.cpp)
 target_compile_features(landscape_vt_paging_test PRIVATE cxx_std_17)
 target_compile_definitions(landscape_vt_paging_test PRIVATE BOOST_ALL_NO_LIB BOOST_CONTAINER_NO_LIB CC_DEBUG=0 CC_STATIC _USE_MATH_DEFINES)

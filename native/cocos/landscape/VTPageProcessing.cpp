@@ -26,7 +26,7 @@
 #include "landscape/DecalRenderer.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/MaterialLibrary.h"
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 
 #include <algorithm>
 
@@ -96,12 +96,12 @@ VTPageComposer::~VTPageComposer() {
     }
 }
 
-bool VTPageComposer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+bool VTPageComposer::init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
     CC_ASSERT(_composeMaterial == nullptr);
     _decals = &decals;
     auto *device = Root::getInstance()->getDevice();
-    if (!initTarget(device, compressed) || !initMaterial(asset, tiles, materials, device, compressed, size()) ||
-        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(tiles, device)) {
+    if (!initTarget(device, compressed) || !initMaterial(asset, sourceData, materials, device, compressed, size()) ||
+        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(sourceData, device)) {
         return false;
     }
     _composeMaterial->getPasses()->front()->update();
@@ -109,24 +109,23 @@ bool VTPageComposer::init(const LandscapeAsset &asset, TilePagePool &tiles, cons
     return _pageMesh && initDrawResources(device) && initRenderPass(device, compressed);
 }
 
-bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const TilePagePool &tiles, VTPageInstance &instance) {
-    const auto splat = tiles.resolve(sources.splat);
+bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const SourceDataManager &sourceData, VTPageInstance &instance) {
+    const auto splat = sourceData.resolve(sources.splat);
     if (splat.layer < 0) {
         return false;
     }
     NormalSourceRow normals;
     for (size_t i = 0; i < sources.normals.size(); ++i) {
-        const auto tile = tiles.resolve(sources.normals[i]);
+        const auto tile = sourceData.resolve(sources.normals[i]);
         if (tile.layer < 0) {
             return false;
         }
-        normals[i] = tiles.shaderParams(tile);
+        normals[i] = sourceData.shaderParams(tile);
     }
     // All inputs are resident. Write their GPU representation only now.
-    instance.slot = static_cast<float>(slot);
     instance.region = {region.x, region.z, region.size, 0};
-    instance.splatSource = tiles.shaderParams(splat);
-    instance.decalCount = static_cast<float>(_decals->collectPageDecals(slot, instance.region));
+    instance.splatSource = sourceData.shaderParams(splat);
+    instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), 0, 0};
     _normalSourceRows[slot] = normals;
     return true;
 }
@@ -148,7 +147,7 @@ void VTPageComposer::bindTexture(const char *name, gfx::Texture *texture, gfx::S
     pass->bindSampler(scene::Pass::getBindingFromHandle(pass->getHandle(name)), sampler);
 }
 
-bool VTPageComposer::initMaterial(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize) {
+bool VTPageComposer::initMaterial(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize) {
     const auto &data = asset.data();
     _composeMaterial = ccnew Material();
     IMaterialInfo info;
@@ -177,8 +176,8 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, TilePagePool &til
             return false;
         }
     }
-    bindTexture("splatmap", tiles.splatArray(), tiles.splatSampler());
-    bindTexture("terrainNormalMap", tiles.normalArray(), tiles.heightSampler());
+    bindTexture("splatmap", sourceData.splatArray(), sourceData.splatSampler());
+    bindTexture("terrainNormalMap", sourceData.normalArray(), sourceData.heightSampler());
     bindTexture("albedoHeightMap", materials.albedoHeight(), materials.repeatSampler());
     bindTexture("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.repeatSampler());
     if (data.width() <= 0.0F || data.depth() <= 0.0F || !materials.whiteTexture() || !materials.clampSampler()) {
@@ -196,7 +195,7 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, TilePagePool &til
     return true;
 }
 
-bool VTPageComposer::initSourceTable(TilePagePool &tiles, gfx::Device *device) {
+bool VTPageComposer::initSourceTable(SourceDataManager &sourceData, gfx::Device *device) {
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
@@ -208,7 +207,7 @@ bool VTPageComposer::initSourceTable(TilePagePool &tiles, gfx::Device *device) {
         return false;
     }
     _normalSourceRows.resize(config::VT_PAGE_COUNT);
-    bindTexture("normalSourceMap", _normalSourceTable, tiles.splatSampler());
+    bindTexture("normalSourceMap", _normalSourceTable, sourceData.splatSampler());
     return true;
 }
 
@@ -356,8 +355,7 @@ VTPageMipGenerator::~VTPageMipGenerator() {
 bool VTPageMipGenerator::init(const VTPageComposer &composer, bool compressed) {
     auto *device = Root::getInstance()->getDevice();
     IMaterialInfo info;
-    info.effectName = ccstd::string{"landscape/builtin-landscape-vt-compose"};
-    info.technique = 1;
+    info.effectName = ccstd::string{"landscape/builtin-landscape-vt-mip"};
     info.defines = IMaterialInfo::DefinesType{MacroRecord{{"LANDSCAPE_VT_COMPACT", compressed}}};
     const auto view = [device](gfx::Texture *texture, uint32_t base, uint32_t count) {
         gfx::TextureViewInfo info;
@@ -381,7 +379,7 @@ bool VTPageMipGenerator::init(const VTPageComposer &composer, bool compressed) {
         if (!mip.framebuffer) {
             return false;
         }
-        // Technique 1 filters the completed pages, never re-evaluates materials.
+        // The mip effect filters completed pages without re-evaluating materials.
         auto &mipMaterial = _mipPasses[level - 1].material;
         mipMaterial = ccnew Material();
         mipMaterial->initialize(info);
@@ -390,7 +388,7 @@ bool VTPageMipGenerator::init(const VTPageComposer &composer, bool compressed) {
         }
         auto *mipPass = mipMaterial->getPasses()->front().get();
         if (!mipPass->getHandle("mipLayout") || !mipPass->getHandle("sourceAlbedo") || !mipPass->getHandle("sourceNormal")) {
-            CC_LOG_ERROR("[Landscape] VT mip technique is missing; rebuild project effects");
+            CC_LOG_ERROR("[Landscape] VT mip effect properties are missing; rebuild project effects");
             return false;
         }
         // Read the preceding level; the source view excludes the destination.
@@ -474,10 +472,10 @@ bool VTPageCompressor::init(gfx::Device *device, RenderTexture &composition) {
     gfx::ShaderInfo shaderInfo;
     shaderInfo.name = COMPRESSION_PROGRAM;
     shaderInfo.stages = {{gfx::ShaderStageFlagBit::COMPUTE, source.value()}};
-    shaderInfo.blocks = {{1, 0, "CompressionConstants", {{"compressionParams", gfx::Type::FLOAT4, 1}}, 1}};
-    shaderInfo.samplerTextures = {{1, 1, "sourceAlbedo", gfx::Type::SAMPLER2D, 1},
-                                  {1, 2, "sourceNormal", gfx::Type::SAMPLER2D, 1}};
-    shaderInfo.buffers = {{1, 3, "CompressedBlocks", 1, gfx::MemoryAccessBit::WRITE_ONLY}};
+    shaderInfo.blocks = {{0, 0, "CompressionConstants", {{"compressionParams", gfx::Type::FLOAT4, 1}}, 1}};
+    shaderInfo.samplerTextures = {{0, 1, "sourceAlbedo", gfx::Type::SAMPLER2D, 1},
+                                  {0, 2, "sourceNormal", gfx::Type::SAMPLER2D, 1}};
+    shaderInfo.buffers = {{0, 3, "CompressedBlocks", 1, gfx::MemoryAccessBit::WRITE_ONLY}};
     _shader = device->createShader(shaderInfo);
     gfx::DescriptorSetLayoutInfo layoutInfo;
     layoutInfo.bindings = {{0, gfx::DescriptorType::UNIFORM_BUFFER, 1, gfx::ShaderStageFlagBit::COMPUTE},
@@ -485,8 +483,7 @@ bool VTPageCompressor::init(gfx::Device *device, RenderTexture &composition) {
                            {2, gfx::DescriptorType::SAMPLER_TEXTURE, 1, gfx::ShaderStageFlagBit::COMPUTE},
                            {3, gfx::DescriptorType::STORAGE_BUFFER, 1, gfx::ShaderStageFlagBit::COMPUTE}};
     _layout = device->createDescriptorSetLayout(layoutInfo);
-    _emptyLayout = device->createDescriptorSetLayout({});
-    _pipelineLayout = device->createPipelineLayout({{_emptyLayout, _layout}});
+    _pipelineLayout = device->createPipelineLayout({{_layout}});
     constexpr uint32_t BLOCKS_PER_SIDE = config::VT_PAGE_RES / ASTC_BLOCK_SIDE;
     constexpr uint32_t PAGE_BYTES = BLOCKS_PER_SIDE * BLOCKS_PER_SIDE * ASTC_BLOCK_BYTES;
     _blocks = device->createBuffer({gfx::BufferUsageBit::STORAGE | gfx::BufferUsageBit::TRANSFER_SRC,
@@ -547,7 +544,7 @@ void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
         auto *barrier = device->getGeneralBarrier({gfx::AccessFlagBit::TRANSFER_READ, gfx::AccessFlagBit::COMPUTE_SHADER_WRITE});
         commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
         commands.bindPipelineState(_pipeline);
-        commands.bindDescriptorSet(1, _mips[level].bindings);
+        commands.bindDescriptorSet(0, _mips[level].bindings);
         gfx::DispatchInfo dispatch;
         dispatch.groupCountX = (blocks + COMPRESSION_GROUP_SIDE - 1) / COMPRESSION_GROUP_SIDE;
         dispatch.groupCountY = (blocks + COMPRESSION_GROUP_SIDE - 1) / COMPRESSION_GROUP_SIDE;
@@ -571,7 +568,6 @@ VTPageCompressor::~VTPageCompressor() {
     _mips = {};
     _pipelineLayout = nullptr;
     _layout = nullptr;
-    _emptyLayout = nullptr;
     _shader = nullptr;
     _blocks = nullptr;
     for (auto &texture : _atlas) {

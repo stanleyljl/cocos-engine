@@ -1,7 +1,7 @@
 'use strict';
 
-// Compile builtin-landscape-vt-compose with Creator's Effect compiler first.
-// LANDSCAPE_EFFECT_JSON points to that compiler's JSON output (including glsl3).
+// Compile builtin-landscape-vt-compose and builtin-landscape-vt-mip first.
+// LANDSCAPE_EFFECT_JSON and LANDSCAPE_MIP_EFFECT_JSON point to their compiled JSON.
 // CHROME_PATH points to Chrome/Chromium. No editor or running project is changed.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,12 +11,15 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { spawnSync } = require('node:child_process');
 
-const configured = process.env.LANDSCAPE_EFFECT_JSON && process.env.LANDSCAPE_BASE_EFFECT_JSON && process.env.CHROME_PATH;
+const configured = process.env.LANDSCAPE_EFFECT_JSON && process.env.LANDSCAPE_MIP_EFFECT_JSON
+    && process.env.LANDSCAPE_BASE_EFFECT_JSON && process.env.CHROME_PATH;
 test('RVT normal composition and three-mip filtering on WebGL2', {
-    skip: configured ? false : 'Set LANDSCAPE_EFFECT_JSON, LANDSCAPE_BASE_EFFECT_JSON and CHROME_PATH to run the GPU checks',
+    skip: configured ? false : 'Set LANDSCAPE_EFFECT_JSON, LANDSCAPE_MIP_EFFECT_JSON, LANDSCAPE_BASE_EFFECT_JSON and CHROME_PATH to run the GPU checks',
 }, () => {
     const effect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_EFFECT_JSON, 'utf8'));
-    assert.equal(effect.shaders.length, 2, 'Compile both compose and mip techniques');
+    assert.equal(effect.shaders.length, 1, 'Compose effect contains only material composition');
+    const mipEffect = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_MIP_EFFECT_JSON, 'utf8'));
+    assert.equal(mipEffect.shaders.length, 1, 'Mip effect contains only page filtering');
     assert.doesNotMatch(effect.shaders[0].glsl3.frag, /v_source.w < 0.0/, 'VT contains only normal terrain composition');
     const compiledBase = JSON.parse(fs.readFileSync(process.env.LANDSCAPE_BASE_EFFECT_JSON, 'utf8'));
     const source = fs.readFileSync(path.join(__dirname, '../../editor/assets/chunks/landscape/rvt-surface.chunk'), 'utf8');
@@ -47,7 +50,8 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
     try {
         const html = path.join(directory, 'test.html');
         fs.writeFileSync(html, '<pre id="result">RUNNING</pre><script>const effect='
-            + JSON.stringify(effect).replace(/</g, '\\u003c') + ';const compiledBase='
+            + JSON.stringify(effect).replace(/</g, '\\u003c') + ';const mipEffect='
+            + JSON.stringify(mipEffect).replace(/</g, '\\u003c') + ';const compiledBase='
             + JSON.stringify(compiledBase).replace(/</g, '\\u003c') + ';const shaderFunctions='
             + JSON.stringify(shaderFunctions).replace(/</g, '\\u003c') + ';\n' + harness + '</script>');
         const run = spawnSync(process.env.CHROME_PATH, [

@@ -36,7 +36,7 @@
 #include "landscape/LandscapeRenderer.h"
 #include "landscape/GridMesh.h"
 #include "landscape/MaterialLibrary.h"
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 #include "landscape/VTRenderer.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXDef-common.h"
@@ -132,9 +132,9 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     _instanceAttributeScratch = Float32Array(4);
     _asset = asset;
     _data = asset->data();
-    _tilePages = std::make_unique<TilePagePool>();
-    if (!_tilePages->init(device, asset, config::PAGE_POOL_LAYERS, _heightUnorm)) {
-        _tilePages.reset();
+    _sourceData = std::make_unique<SourceDataManager>();
+    if (!_sourceData->init(device, asset, config::PAGE_POOL_LAYERS, _heightUnorm)) {
+        _sourceData.reset();
         return false;
     }
     _materialLibrary = std::make_unique<MaterialLibrary>();
@@ -145,12 +145,12 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
         return false;
     }
     _vtRenderer = std::make_unique<VTRenderer>();
-    if (!_vtRenderer->init(*asset, *_tilePages, *_materialLibrary, *_decals)) {
+    if (!_vtRenderer->init(*asset, *_sourceData, *_materialLibrary, *_decals)) {
         CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
         _vtRenderer.reset();
         return false;
     }
-    _schedule = std::make_unique<LandscapeSchedule>(*asset, *_tilePages, *_vtRenderer);
+    _schedule = std::make_unique<LandscapeSchedule>(*asset, *_sourceData, *_vtRenderer);
     _decals->setEnabled(_debugData.decal3DEnabled);
     _decals->setWireframe(_debugData.wireframe);
     _decals->setCastShadow(_castShadow);
@@ -181,14 +181,14 @@ void LandscapeRenderer::bindRuntimeTextures() {
     // Bind full VT textures with anisotropic mip filtering for terrain and decals.
     auto &vt = *_vtRenderer;
     for (auto *material : surfaceMaterials()) {
-        setRuntimeTexture(material, "holeSplatmap", _tilePages->splatArray(), _tilePages->splatSampler());
-        setRuntimeTexture(material, "heightmap", _tilePages->heightArray(), _tilePages->heightSampler());
+        setRuntimeTexture(material, "holeSplatmap", _sourceData->splatArray(), _sourceData->splatSampler());
+        setRuntimeTexture(material, "heightmap", _sourceData->heightArray(), _sourceData->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _tilePages->splatSampler());
+        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _sourceData->splatSampler());
         setRuntimeTexture(material, "vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
     for (auto *material : _decals->materials()) {
-        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _tilePages->heightSampler());
+        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _sourceData->heightSampler());
     }
 }
 
@@ -285,7 +285,7 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
     const auto edges = _schedule->currentTree().edgeMasks(node.address());
     gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edges.coarser), static_cast<float>(edges.finer), 0};
 
-    const auto tile = _tilePages->resolve(node.address());
+    const auto tile = _sourceData->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
                "[Landscape] unprepared exact height source: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
                node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
@@ -293,7 +293,7 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
     // z = source tile size, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
-    gridParams.tile = _tilePages->shaderParams(tile);
+    gridParams.tile = _sourceData->shaderParams(tile);
     return gridParams;
 }
 
@@ -601,7 +601,7 @@ void LandscapeRenderer::destroy() {
     _vtRenderer.reset();
     _decals.reset();
 
-    _tilePages.reset();
+    _sourceData.reset();
     _asset = nullptr;
     _mesh = nullptr;
     _materialSolid = nullptr;

@@ -35,7 +35,7 @@
 #include "core/assets/Texture2D.h"
 #include "landscape/LandscapeAsset.h"
 #include "landscape/MaterialLibrary.h"
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -45,190 +45,28 @@
 #include "scene/RenderWindow.h"
 
 namespace cc::landscape {
-VTRenderer::VTRenderer() = default;
-VTRenderer::~VTRenderer() {
-    destroy();
-}
-
-bool VTRenderer::init(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals) {
-    if (!tiles.valid() || !materials.valid()) {
-        return false;
-    }
-    const bool compressed = VTPageCompressor::supported();
-    if (!initResources(asset, tiles, materials, decals, compressed)) {
-        destroy();
-        if (!compressed || !initResources(asset, tiles, materials, decals, false)) {
-            destroy();
-            return false;
+void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
+    // Return each input once, in sampling order. Base-precision normal entries
+    // share one tile, which may also provide the splat data.
+    const auto append = [&output](NodeAddress source) {
+        const auto key = source.key();
+        const auto duplicate = std::find_if(output.begin(), output.end(), [key](NodeAddress entry) {
+            return entry.key() == key;
+        });
+        if (duplicate == output.end()) {
+            output.push_back(source);
         }
-        CC_LOG_WARNING("[Landscape] ASTC 4x4 initialization failed; using RGBA8 VT atlas");
-    }
-    CC_LOG_INFO("[Landscape] VT atlas: %s", _compressor ? "ASTC 4x4" : "RGBA8");
-    _batch.reserve(config::VT_PAGE_COUNT);
-    return true;
-}
-
-bool VTRenderer::initResources(const LandscapeAsset &asset, TilePagePool &tiles, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
-    _composer = std::make_unique<VTPageComposer>();
-    _mipGenerator = std::make_unique<VTPageMipGenerator>();
-    if (!initPages(asset.data()) || !_pageTable.ensureCapacity(1) ||
-        !_composer->init(asset, tiles, materials, decals, compressed) || !_mipGenerator->init(*_composer, compressed)) {
-        return false;
-    }
-    if (compressed) {
-        _compressor = std::make_unique<VTPageCompressor>();
-        if (!_compressor->init(Root::getInstance()->getDevice(), *_composer->target())) {
-            return false;
-        }
-    }
-    auto *device = Root::getInstance()->getDevice();
-    gfx::SamplerInfo sampler;
-    sampler.minFilter = sampler.magFilter = sampler.mipFilter = gfx::Filter::LINEAR;
-    sampler.maxAnisotropy = config::VT_MAX_ANISOTROPY;
-    sampler.addressU = sampler.addressV = sampler.addressW = gfx::Address::CLAMP;
-    _sampler = device->getSampler(sampler);
-    _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
-    return _commands != nullptr;
-}
-
-uint32_t VTRenderer::render(TilePagePool &tiles, uint32_t maxUpdates) {
-    if (maxUpdates == 0) {
-        return 0;
-    }
-    // Select dirty reserved pages and prepare inputs only when every source is resident.
-    _batch.clear();
-    for (const uint32_t slot : _active) {
-        const auto &page = _pages[slot];
-        if (!page.needsComposition()) {
-            continue;
-        }
-        VTPageInstance instance;
-        const auto inputs = sources(page.address, getRefineFarDetail());
-        if (!_composer->prepareInputs(slot, region(page.address), inputs, tiles, instance)) {
-            continue;
-        }
-        _batch.push_back(instance);
-        if (_batch.size() == maxUpdates) {
-            break;
-        }
-    }
-    if (_batch.empty()) {
-        return 0;
-    }
-    _composer->uploadInputs();
-
-    _commands->begin();
-    if (_compressor) {
-        _compressor->begin(*_commands, _needsClear);
-        // Finish composition, mips and compression before reusing the scratch page.
-        for (const auto &instance : _batch) {
-            _composer->record(*_commands, &instance, 1, _needsClear);
-            _mipGenerator->record(*_commands, *_composer, 1, _needsClear);
-            _needsClear = false;
-            _compressor->record(*_commands, instance.physicalSlot());
-        }
-        _compressor->end(*_commands);
-    } else {
-        const auto count = static_cast<uint32_t>(_batch.size());
-        _composer->record(*_commands, _batch.data(), count, _needsClear);
-        _mipGenerator->record(*_commands, *_composer, count, _needsClear);
-        _needsClear = false;
-    }
-    _commands->end();
-
-    // Submit every stage on the same queue before making these pages drawable.
-    auto *device = Root::getInstance()->getDevice();
-    gfx::CommandBuffer *command = _commands.get();
-    device->flushCommands(&command, 1);
-    device->getQueue()->submit(&command, 1);
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    const auto recomposed = std::count_if(_batch.begin(), _batch.end(), [this](const VTPageInstance &instance) {
-        return page(instance.physicalSlot()).state == State::STALE;
-    });
-    if (recomposed > 0) {
-        CC_LOG_INFO("[Landscape] VT recomposed: %zu stale pages submitted (%s)",
-                    static_cast<size_t>(recomposed), _compressor ? "ASTC 4x4" : "RGBA8");
-    }
-#endif
-    for (const auto &instance : _batch) {
-        publish(instance.physicalSlot());
-    }
-    return static_cast<uint32_t>(_batch.size());
-}
-
-TextureBase *VTRenderer::atlas() const {
-    return _compressor ? static_cast<TextureBase *>(_compressor->atlas()) : _composer->target();
-}
-gfx::Texture *VTRenderer::albedo() const {
-    return _compressor ? _compressor->albedo() : _composer->target()->getWindow()->getColorTexture(0);
-}
-gfx::Texture *VTRenderer::normalRoughnessAO() const {
-    return _compressor ? _compressor->normalRoughnessAO() : _composer->target()->getWindow()->getColorTexture(1);
-}
-
-void VTRenderer::setGlobalColorMap(Texture2D *texture) {
-    _composer->setGlobalColorMap(texture);
-    invalidate();
-}
-
-void VTRenderer::setGlobalColorStrength(float strength) {
-    if (_composer->setGlobalColorStrength(strength)) {
-        invalidate();
-    }
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    auto *pass = _composer->material()->getPasses()->front().get();
-    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
-    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
-    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
-    const auto stale = std::count_if(activeSlots().begin(), activeSlots().end(), [this](uint32_t slot) {
-        return page(slot).state == State::STALE;
-    });
-    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
-                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
-                static_cast<size_t>(stale), activeSlots().size());
-#endif
-}
-
-void VTRenderer::setHeightBlendEnabled(bool enabled) {
-    if (_composer->setHeightBlendEnabled(enabled)) {
-        invalidate();
+    };
+    append(splat);
+    for (const auto source : normals) {
+        append(source);
     }
 }
 
-void VTRenderer::setRefineFarDetail(bool enabled) {
-    if (_refineFarDetail == enabled) {
-        return;
-    }
-    _refineFarDetail = enabled;
-    for (auto &page : _pages) {
-        if (page.address.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL && page.state == State::READY) {
-            page.state = State::STALE;
-        }
-    }
-}
-
-
-void VTRenderer::destroy() {
-    _commands = nullptr;
-    _compressor.reset();
-    _mipGenerator.reset();
-    _composer.reset();
-    _pageTable.destroy();
-    _pages.clear();
-    _active.clear();
-    _lookup.clear();
-    _reservation = 0;
-    _batch.clear();
-    _sampler = nullptr;
-    _needsClear = true;
-    _refineFarDetail = true;
-}
-
-VTPageLayout::VTPageLayout(float sectorSize) : _sectorSize(sectorSize) {
+VTPageLayout::VTPageLayout(float sectorSize)
+: _sectorSize(sectorSize) {
     assert(sectorSize > 0);
-    while (_rootLevel < 27U && sectorSize / static_cast<float>(1U << (_rootLevel + 1U)) >= 1.0F) {
-        ++_rootLevel;
-    }
+    _rootLevel = static_cast<uint32_t>(std::clamp(std::ilogb(sectorSize), 0, 27));
 }
 
 uint32_t VTPageLayout::levelForDistance(float distance) const {
@@ -244,7 +82,7 @@ uint32_t VTPageLayout::levelForDistance(float distance) const {
     return level;
 }
 
-VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const {
+VTGridMapping VTPageLayout::buildGridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const {
     VTGridMapping result;
     const float heightDistance = std::max({minY - camera.y, camera.y - maxY, 0.0F});
     const LandscapeRegion firstCell{region.x, region.z, region.size / static_cast<float>(VTGridMapping::SIDE)};
@@ -256,6 +94,22 @@ VTGridMapping VTPageLayout::gridMapping(LandscapeRegion region, float minY, floa
         }
     }
     return result;
+}
+
+VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
+    assert(desiredLevel <= _rootLevel);
+    for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
+        const float size = pageSize(level);
+        const VTPageAddress page{level,
+                                 static_cast<uint32_t>(std::floor(min.x / size + 1e-7F)),
+                                 static_cast<uint32_t>(std::floor(min.z / size + 1e-7F))};
+        if (max.x <= (page.x + 1.0F) * size + size * 1e-7F &&
+            max.z <= (page.z + 1.0F) * size + size * 1e-7F) {
+            return page;
+        }
+    }
+    assert(false && "VT coverage must not cross sector boundaries");
+    return {};
 }
 
 void VTPageLayout::mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const {
@@ -293,206 +147,8 @@ void VTPageLayout::mapCells(const LandscapeRegion &firstCell, const Vec3 &camera
     }
 }
 
-VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
-    assert(desiredLevel <= _rootLevel);
-    for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
-        const float size = pageSize(level);
-        const VTPageAddress page{level,
-                                 static_cast<uint32_t>(std::floor(min.x / size + 1e-7F)),
-                                 static_cast<uint32_t>(std::floor(min.z / size + 1e-7F))};
-        if (max.x <= (page.x + 1.0F) * size + size * 1e-7F &&
-            max.z <= (page.z + 1.0F) * size + size * 1e-7F) {
-            return page;
-        }
-    }
-    assert(false && "VT coverage must not cross sector boundaries");
-    return {};
-}
-
-void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
-    // Return each input once, in sampling order. Base-precision normal entries
-    // share one tile, which may also provide the splat data.
-    const auto append = [&output](NodeAddress source) {
-        const auto key = source.key();
-        const auto duplicate = std::find_if(output.begin(), output.end(), [key](NodeAddress entry) {
-            return entry.key() == key;
-        });
-        if (duplicate == output.end()) {
-            output.push_back(source);
-        }
-    };
-    append(splat);
-    for (const auto source : normals) {
-        append(source);
-    }
-}
-
-uint32_t VTRenderer::sourceLevel(float size) const {
-    uint32_t level = _data.minTileLevel;
-    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
-        ++level;
-    }
-    return level;
-}
-
-VTPageSources VTRenderer::sources(VTPageAddress page, bool refineFarDetail) const {
-    const float size = _layout.pageSize(page.level);
-    VTPageSources result;
-    result.splat = _data.nodeAtClamped(sourceLevel(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
-    // Base precision uses one tile for the page interior. Far detail matches
-    // source height density to the output page, using up to 2x2 interior tiles.
-    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
-    const bool detailed = refineFarDetail && page.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL;
-    const uint32_t level = detailed ? sourceLevel(target) : result.splat.level;
-    // Select only the four interior quadrants. Source padding supplies the
-    // gutters, so neither precision reserves additional neighboring tiles.
-    std::array<uint32_t, 2> columns;
-    std::array<uint32_t, 2> rows;
-    for (uint32_t i = 0; i < 2; ++i) {
-        const auto source = _data.nodeAtClamped(level, {(page.x + 0.25F + i * 0.5F) * size, (page.z + 0.25F + i * 0.5F) * size});
-        columns[i] = source.x;
-        rows[i] = source.z;
-    }
-    for (uint32_t row = 0; row < 2; ++row) {
-        for (uint32_t col = 0; col < 2; ++col) {
-            result.normals[row * 2 + col] = {level, columns[col], rows[row]};
-        }
-    }
-    return result;
-}
-
-bool VTRenderer::initPages(const LandscapeData &data, uint32_t capacity) {
-    if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
-        return false;
-    }
-    _pages.clear();
-    _active.clear();
-    _lookup.clear();
-    _reservation = 0;
-    _data = data;
-    _layout = VTPageLayout(data.sectorSize);
-    _pages.resize(capacity);
-    return true;
-}
-bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
-    if (pages.size() > _pages.size()) {
-        return false;
-    }
-    for (const auto p : pages) {
-        if (p.level > _layout.rootLevel()) {
-            return false;
-        }
-        const uint64_t side = 1ULL << (_layout.rootLevel() - p.level);
-        if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
-            return false;
-        }
-    }
-    return true;
-}
-bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
-    if (!canReserve(pages)) {
-        return false;
-    }
-    ++_reservation;
-    // First protect resident pages and remember their slots before any eviction.
-    constexpr uint32_t MISSING = std::numeric_limits<uint32_t>::max();
-    _active.clear();
-    for (const auto address : pages) {
-        const auto found = _lookup.find(address.key());
-        if (found == _lookup.end()) {
-            _active.push_back(MISSING);
-            continue;
-        }
-        const auto slot = found->second;
-        _pages[slot].lastReserved = _reservation;
-        _active.push_back(slot);
-    }
-    // Fill only the missing slots, preserving demand order without another lookup.
-    for (size_t i = 0; i < pages.size(); ++i) {
-        if (_active[i] != MISSING) {
-            continue;
-        }
-        const int slot = allocate(pages[i]);
-        assert(slot >= 0);
-        _pages[slot].lastReserved = _reservation;
-        _active[i] = static_cast<uint32_t>(slot);
-    }
-    return true;
-}
-int VTRenderer::allocate(VTPageAddress address) {
-    int slot = -1;
-    uint64_t oldest = std::numeric_limits<uint64_t>::max();
-    for (uint32_t i = 0; i < _pages.size(); ++i) {
-        const auto &p = _pages[i];
-        if (p.state == State::EMPTY) {
-            slot = static_cast<int>(i);
-            break;
-        }
-        if (p.lastReserved != _reservation && p.lastReserved < oldest) {
-            oldest = p.lastReserved;
-            slot = static_cast<int>(i);
-        }
-    }
-    if (slot < 0) {
-        return -1;
-    }
-    auto &p = _pages[slot];
-    if (p.state != State::EMPTY) {
-        _lookup.erase(p.address.key());
-    }
-    p = Page{};
-    p.address = address;
-    p.state = State::DIRTY;
-    _lookup[address.key()] = static_cast<uint32_t>(slot);
-    return slot;
-}
-void VTRenderer::publish(uint32_t slot) {
-    auto &page = _pages[slot];
-    assert(page.lastReserved == _reservation && page.needsComposition());
-    page.state = State::READY;
-}
-
-
-void VTRenderer::invalidate() {
-    for (auto &p : _pages) {
-        if (p.state == State::READY) {
-            p.state = State::STALE;
-        }
-    }
-}
-void VTRenderer::invalidate(LandscapeRegion changed) {
-    for (auto &page : _pages) {
-        if (page.state != State::READY) {
-            continue;
-        }
-        const auto bounds = region(page.address);
-        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
-        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
-            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
-            continue;
-        }
-        page.state = State::STALE;
-    }
-}
-
-bool VTRenderer::ready() const {
-    return !_active.empty() && std::all_of(_active.begin(), _active.end(), [this](uint32_t slot) { return _pages[slot].state == State::READY; });
-}
-bool VTRenderer::needsComposition(VTPageAddress address) const {
-    const auto it = _lookup.find(address.key());
-    return it == _lookup.end() || _pages[it->second].state != State::READY;
-}
-int VTRenderer::resolve(VTPageAddress address) const {
-    const auto it = _lookup.find(address.key());
-    if (it == _lookup.end()) {
-        return -1;
-    }
-    const auto &p = _pages[it->second];
-    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
-}
-
-
 VTPageTable::VTPageTable() = default;
+
 VTPageTable::~VTPageTable() = default;
 
 bool VTPageTable::ensureCapacity(uint32_t count) {
@@ -519,7 +175,7 @@ bool VTPageTable::ensureCapacity(uint32_t count) {
         return false;
     }
     // Linear indices remain stable across growth; the shader uses textureSize.
-    _entries.resize(static_cast<size_t>(size) * size);
+    resizeEntries(static_cast<size_t>(size) * size);
     gfx::BufferTextureCopy copy;
     copy.texExtent = {size, size, 1};
     const uint8_t *bytes[]{reinterpret_cast<const uint8_t *>(_entries.data())};
@@ -607,6 +263,362 @@ void VTPageTable::destroy() {
     _freeSlots.clear();
     _size = 0;
     _count = 0;
+}
+
+void VTPageTable::resizeEntries(size_t count) {
+    CC_ASSERT(static_cast<size_t>(_count) * VTGridMapping::CELL_COUNT <= count);
+    _entries.resize(count);
+}
+
+VTRenderer::VTRenderer() = default;
+
+VTRenderer::~VTRenderer() {
+    destroy();
+}
+
+bool VTRenderer::init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals) {
+    if (!sourceData.valid() || !materials.valid()) {
+        return false;
+    }
+    const bool compressed = VTPageCompressor::supported();
+    if (!initResources(asset, sourceData, materials, decals, compressed)) {
+        destroy();
+        if (!compressed || !initResources(asset, sourceData, materials, decals, false)) {
+            destroy();
+            return false;
+        }
+        CC_LOG_WARNING("[Landscape] ASTC 4x4 initialization failed; using RGBA8 VT atlas");
+    }
+    CC_LOG_INFO("[Landscape] VT atlas: %s", _compressor ? "ASTC 4x4" : "RGBA8");
+    _batch.reserve(config::VT_PAGE_COUNT);
+    return true;
+}
+
+void VTRenderer::destroy() {
+    _commands = nullptr;
+    _compressor.reset();
+    _mipGenerator.reset();
+    _composer.reset();
+    _pageTable.destroy();
+    _pages.clear();
+    _reservedSlots.clear();
+    _lookup.clear();
+    _reservation = 0;
+    _batch.clear();
+    _sampler = nullptr;
+    _needsClear = true;
+    _refineFarDetail = true;
+}
+
+uint32_t VTRenderer::renderPages(SourceDataManager &sourceData, uint32_t maxPages) {
+    if (maxPages == 0) {
+        return 0;
+    }
+    // Select dirty reserved pages and prepare inputs only when every source is resident.
+    _batch.clear();
+    for (const uint32_t slot : _reservedSlots) {
+        const auto &page = _pages[slot];
+        if (!page.needsComposition()) {
+            continue;
+        }
+        VTPageInstance instance;
+        const auto inputs = selectSources(page.address, getRefineFarDetail());
+        if (!_composer->prepareInputs(slot, region(page.address), inputs, sourceData, instance)) {
+            continue;
+        }
+        _batch.push_back(instance);
+        if (_batch.size() == maxPages) {
+            break;
+        }
+    }
+    if (_batch.empty()) {
+        return 0;
+    }
+    _composer->uploadInputs();
+
+    _commands->begin();
+    if (_compressor) {
+        _compressor->begin(*_commands, _needsClear);
+        // Finish composition, mips and compression before reusing the scratch page.
+        for (const auto &instance : _batch) {
+            _composer->record(*_commands, &instance, 1, _needsClear);
+            _mipGenerator->record(*_commands, *_composer, 1, _needsClear);
+            _needsClear = false;
+            _compressor->record(*_commands, instance.physicalSlot());
+        }
+        _compressor->end(*_commands);
+    } else {
+        const auto count = static_cast<uint32_t>(_batch.size());
+        _composer->record(*_commands, _batch.data(), count, _needsClear);
+        _mipGenerator->record(*_commands, *_composer, count, _needsClear);
+        _needsClear = false;
+    }
+    _commands->end();
+
+    // Submit every stage on the same queue before making these pages drawable.
+    auto *device = Root::getInstance()->getDevice();
+    gfx::CommandBuffer *command = _commands.get();
+    device->flushCommands(&command, 1);
+    device->getQueue()->submit(&command, 1);
+#if CC_DEBUG && CC_LANDSCAPE_DEBUG
+    const auto recomposed = std::count_if(_batch.begin(), _batch.end(), [this](const VTPageInstance &instance) {
+        return page(instance.physicalSlot()).state == PageState::OUTDATED;
+    });
+    if (recomposed > 0) {
+        CC_LOG_INFO("[Landscape] VT recomposed: %zu stale pages submitted (%s)",
+                    static_cast<size_t>(recomposed), _compressor ? "ASTC 4x4" : "RGBA8");
+    }
+#endif
+    for (const auto &instance : _batch) {
+        publish(instance.physicalSlot());
+    }
+    return static_cast<uint32_t>(_batch.size());
+}
+
+bool VTRenderer::needsComposition(VTPageAddress address) const {
+    const auto it = _lookup.find(address.key());
+    return it == _lookup.end() || _pages[it->second].state != PageState::READY;
+}
+
+bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
+    if (pages.size() > _pages.size()) {
+        return false;
+    }
+    for (const auto p : pages) {
+        if (p.level > _layout.rootLevel()) {
+            return false;
+        }
+        const uint64_t side = 1ULL << (_layout.rootLevel() - p.level);
+        if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
+    if (!canReserve(pages)) {
+        return false;
+    }
+    ++_reservation;
+    // First protect resident pages and remember their slots before any eviction.
+    constexpr uint32_t MISSING = std::numeric_limits<uint32_t>::max();
+    _reservedSlots.clear();
+    for (const auto address : pages) {
+        const auto found = _lookup.find(address.key());
+        if (found == _lookup.end()) {
+            _reservedSlots.push_back(MISSING);
+            continue;
+        }
+        const auto slot = found->second;
+        _pages[slot].lastReserved = _reservation;
+        _reservedSlots.push_back(slot);
+    }
+    // Fill only the missing slots, preserving demand order without another lookup.
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (_reservedSlots[i] != MISSING) {
+            continue;
+        }
+        const int slot = allocate(pages[i]);
+        assert(slot >= 0);
+        _pages[slot].lastReserved = _reservation;
+        _reservedSlots[i] = static_cast<uint32_t>(slot);
+    }
+    return true;
+}
+
+VTPageSources VTRenderer::selectSources(VTPageAddress page, bool refineFarDetail) const {
+    const float size = _layout.pageSize(page.level);
+    VTPageSources result;
+    result.splat = _data.nodeAtClamped(sourceLevel(size), {(page.x + 0.5F) * size, (page.z + 0.5F) * size});
+    // Base precision uses one tile for the page interior. Far detail matches
+    // source height density to the output page, using up to 2x2 interior tiles.
+    const float target = size * std::max(0.5F, static_cast<float>(config::SOURCE_TILE_RESOLUTION - 1) / config::VT_PAGE_INTERIOR);
+    const bool detailed = refineFarDetail && page.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL;
+    const uint32_t level = detailed ? sourceLevel(target) : result.splat.level;
+    // Select only the four interior quadrants. Source padding supplies the
+    // gutters, so neither precision reserves additional neighboring tiles.
+    std::array<uint32_t, 2> columns;
+    std::array<uint32_t, 2> rows;
+    for (uint32_t i = 0; i < 2; ++i) {
+        const auto source = _data.nodeAtClamped(level, {(page.x + 0.25F + i * 0.5F) * size, (page.z + 0.25F + i * 0.5F) * size});
+        columns[i] = source.x;
+        rows[i] = source.z;
+    }
+    for (uint32_t row = 0; row < 2; ++row) {
+        for (uint32_t col = 0; col < 2; ++col) {
+            result.normals[row * 2 + col] = {level, columns[col], rows[row]};
+        }
+    }
+    return result;
+}
+
+void VTRenderer::invalidate() {
+    for (auto &p : _pages) {
+        if (p.state == PageState::READY) {
+            p.state = PageState::OUTDATED;
+        }
+    }
+}
+
+void VTRenderer::invalidate(LandscapeRegion changed) {
+    for (auto &page : _pages) {
+        if (page.state != PageState::READY) {
+            continue;
+        }
+        const auto bounds = region(page.address);
+        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
+            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
+            continue;
+        }
+        page.state = PageState::OUTDATED;
+    }
+}
+
+bool VTRenderer::ready() const {
+    return !_reservedSlots.empty() && std::all_of(_reservedSlots.begin(), _reservedSlots.end(), [this](uint32_t slot) { return _pages[slot].state == PageState::READY; });
+}
+
+int VTRenderer::resolve(VTPageAddress address) const {
+    const auto it = _lookup.find(address.key());
+    if (it == _lookup.end()) {
+        return -1;
+    }
+    const auto &p = _pages[it->second];
+    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
+}
+
+void VTRenderer::setGlobalColorStrength(float strength) {
+    if (_composer->setGlobalColorStrength(strength)) {
+        invalidate();
+    }
+#if CC_DEBUG && CC_LANDSCAPE_DEBUG
+    auto *pass = _composer->material()->getPasses()->front().get();
+    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
+    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
+    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
+    const auto stale = std::count_if(reservedSlots().begin(), reservedSlots().end(), [this](uint32_t slot) {
+        return page(slot).state == PageState::OUTDATED;
+    });
+    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
+                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
+                static_cast<size_t>(stale), reservedSlots().size());
+#endif
+}
+
+void VTRenderer::setGlobalColorMap(Texture2D *texture) {
+    _composer->setGlobalColorMap(texture);
+    invalidate();
+}
+
+void VTRenderer::setHeightBlendEnabled(bool enabled) {
+    if (_composer->setHeightBlendEnabled(enabled)) {
+        invalidate();
+    }
+}
+
+void VTRenderer::setRefineFarDetail(bool enabled) {
+    if (_refineFarDetail == enabled) {
+        return;
+    }
+    _refineFarDetail = enabled;
+    for (auto &page : _pages) {
+        if (page.address.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL && page.state == PageState::READY) {
+            page.state = PageState::OUTDATED;
+        }
+    }
+}
+
+TextureBase *VTRenderer::atlas() const {
+    return _compressor ? static_cast<TextureBase *>(_compressor->atlas()) : _composer->target();
+}
+
+gfx::Texture *VTRenderer::albedo() const {
+    return _compressor ? _compressor->albedo() : _composer->target()->getWindow()->getColorTexture(0);
+}
+
+gfx::Texture *VTRenderer::normalRoughnessAO() const {
+    return _compressor ? _compressor->normalRoughnessAO() : _composer->target()->getWindow()->getColorTexture(1);
+}
+
+bool VTRenderer::initPages(const LandscapeData &data, uint32_t capacity) {
+    if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
+        return false;
+    }
+    _pages.clear();
+    _reservedSlots.clear();
+    _lookup.clear();
+    _reservation = 0;
+    _data = data;
+    _layout = VTPageLayout(data.sectorSize);
+    _pages.resize(capacity);
+    return true;
+}
+
+void VTRenderer::publish(uint32_t slot) {
+    auto &page = _pages[slot];
+    assert(page.lastReserved == _reservation && page.needsComposition());
+    page.state = PageState::READY;
+}
+
+bool VTRenderer::initResources(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+    _composer = std::make_unique<VTPageComposer>();
+    _mipGenerator = std::make_unique<VTPageMipGenerator>();
+    if (!initPages(asset.data()) || !_pageTable.ensureCapacity(1) ||
+        !_composer->init(asset, sourceData, materials, decals, compressed) || !_mipGenerator->init(*_composer, compressed)) {
+        return false;
+    }
+    if (compressed) {
+        _compressor = std::make_unique<VTPageCompressor>();
+        if (!_compressor->init(Root::getInstance()->getDevice(), *_composer->target())) {
+            return false;
+        }
+    }
+    auto *device = Root::getInstance()->getDevice();
+    gfx::SamplerInfo sampler;
+    sampler.minFilter = sampler.magFilter = sampler.mipFilter = gfx::Filter::LINEAR;
+    sampler.maxAnisotropy = config::VT_MAX_ANISOTROPY;
+    sampler.addressU = sampler.addressV = sampler.addressW = gfx::Address::CLAMP;
+    _sampler = device->getSampler(sampler);
+    _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
+    return _commands != nullptr;
+}
+
+uint32_t VTRenderer::sourceLevel(float size) const {
+    uint32_t level = _data.minTileLevel;
+    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
+        ++level;
+    }
+    return level;
+}
+
+int VTRenderer::allocate(VTPageAddress address) {
+    int slot = -1;
+    uint64_t oldest = std::numeric_limits<uint64_t>::max();
+    for (uint32_t i = 0; i < _pages.size(); ++i) {
+        const auto &p = _pages[i];
+        if (p.state == PageState::EMPTY) {
+            slot = static_cast<int>(i);
+            break;
+        }
+        if (p.lastReserved != _reservation && p.lastReserved < oldest) {
+            oldest = p.lastReserved;
+            slot = static_cast<int>(i);
+        }
+    }
+    if (slot < 0) {
+        return -1;
+    }
+    auto &p = _pages[slot];
+    if (p.state != PageState::EMPTY) {
+        _lookup.erase(p.address.key());
+    }
+    p = Page{};
+    p.address = address;
+    p.state = PageState::UNCOMPOSED;
+    _lookup[address.key()] = static_cast<uint32_t>(slot);
+    return slot;
 }
 
 } // namespace cc::landscape

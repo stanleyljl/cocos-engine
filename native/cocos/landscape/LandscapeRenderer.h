@@ -36,7 +36,7 @@
 #include "landscape/DecalRenderer.h"
 #include "landscape/Landscape.h"
 #include "landscape/LandscapeAsset.h"
-#include "landscape/TilePagePool.h"
+#include "landscape/SourceDataManager.h"
 #include "landscape/LandscapeSchedule.h"
 #include "landscape/VTRenderer.h"
 #include "math/Vec3.h"
@@ -122,7 +122,7 @@ private:
     IntrusivePtr<Material> _materialWire;
     std::unique_ptr<DecalRenderer> _decals;
     IntrusivePtr<LandscapeAsset> _asset;
-    std::unique_ptr<TilePagePool> _tilePages;
+    std::unique_ptr<SourceDataManager> _sourceData;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
     std::unique_ptr<LandscapeSchedule> _schedule;

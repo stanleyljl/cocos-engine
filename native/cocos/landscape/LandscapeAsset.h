@@ -85,12 +85,12 @@ public:
     // Main thread: resolve the manifest once and anchor its files to that package.
     bool load(const ccstd::string &manifestPath);
     // Main-thread synchronous decode for roots and the initial view warmup.
-    // Height output is RG8 or R16UI, matching the page pool's upload representation.
+    // Height output is RG8 or R16UI, matching SourceDataManager's upload representation.
     bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat, TileData &tile) const;
     // Call on the main thread: builds absolute paths from the resolved manifest;
     // background I/O bypasses FileUtils' unsynchronized relative-path cache.
     // Only complete height/splat/normal sets are available through takeReadyTile().
-    // TilePagePool owns request deduplication and the in-flight limit.
+    // SourceDataManager owns request deduplication and the in-flight limit.
     bool requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat);
     bool takeReadyTile(TileData &tile);
     // Generated tiles are valid. An unexpected I/O/decode error stops streaming

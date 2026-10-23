@@ -234,17 +234,18 @@ CCProgram vt-astc-encode %{
 // One invocation encodes one 4x4 block from each atlas channel group.
 CCProgram vt-compress-main %{
   layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+  // The standalone compute pipeline binds all resources in descriptor set 0.
   #pragma rate CompressionConstants pass
-  layout(std140) uniform CompressionConstants {
+  layout(std140, set = 0, binding = 0) uniform CompressionConstants {
     vec4 compressionParams; // source mip level, unused YZW
   };
   #pragma rate sourceAlbedo pass
-  uniform sampler2D sourceAlbedo;
+  layout(set = 0, binding = 1) uniform sampler2D sourceAlbedo;
   #pragma rate sourceNormal pass
-  uniform sampler2D sourceNormal;
+  layout(set = 0, binding = 2) uniform sampler2D sourceNormal;
   #pragma rate CompressedBlocks pass
   #pragma glBinding(0)
-  layout(std430) writeonly buffer CompressedBlocks {
+  layout(std430, set = 0, binding = 3) writeonly buffer CompressedBlocks {
     uvec4 blocks[];
   };
   void main() {
