@@ -39,8 +39,6 @@ test('RVT normal composition and three-mip filtering on WebGL2', {
     const shaderFunctions = [
         'virtualTextureCoordinates',
         'sampleVirtualTexture',
-        'decodeTerrainNormal',
-        'applyTerrainNormalFrame',
         'lodPalette',
         'SurfacesFragmentModifySharedData',
     ].map(extract).join('\n').replace('#include <landscape-surface-discard>', 'discardLandscapeHole();');

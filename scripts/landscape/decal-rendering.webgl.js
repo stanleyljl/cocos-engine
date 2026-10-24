@@ -28,11 +28,12 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(2336);
+  const constants = new Float32Array(2320);
   const blockBytes = gl.getActiveUniformBlockParameter(p, gl.getUniformBlockIndex(p, 'Constants'), gl.UNIFORM_BLOCK_DATA_SIZE);
   if (blockBytes !== constants.byteLength || blockBytes > 16384) throw new Error('Unexpected compose uniform block size: ' + blockBytes);
-  constants.set([1,1,0,1],0); constants.set([0,0,0,0],4);
-  constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
+  constants.set([1,1,0,1],0);
+  constants.set([1,1,0,0],132);
+  constants.set([1,3,2,0],136);
   const tex = (name,unit,target) => {
     gl.activeTexture(gl.TEXTURE0+unit); const t=gl.createTexture(); gl.bindTexture(target,t);
     gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
@@ -53,10 +54,6 @@ try {
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,256,4,0,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
   tex('terrainNormalMap',10,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([128,128]));
   tex('normalSourceMap',11,gl.TEXTURE_2D);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,4,0,gl.RGBA,gl.FLOAT,new Float32Array(Array.from({length:64},()=>[0,0,1,0]).flat()));
-  const cliffSourceTable=tex('cliffSourceMap',12,gl.TEXTURE_2D);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,1,0]));
-  const cliffHeight=tex('terrainHeightMap',13,gl.TEXTURE_2D_ARRAY);
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([0,0]));
   const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
   gl.activeTexture(gl.TEXTURE0+6);
   for(let i=0;i<2;i++) { const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0); }
@@ -66,7 +63,7 @@ try {
   const pack=([a,b,w,hole=0])=>a|(b<<5)|(w<<10)|(hole<<15);
   const render=(pairs,{strength=1,scale=1,x=.5,y=.5,span=1,atlasCount=1,slot=0,sourceX=0,sourceY=0,sourceSize=1,sourceLayer=0,influence=1}={})=>{
     constants[0]=atlasCount;gl.viewport(0,0,atlasCount,atlasCount);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2192],0,0);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),slot,constants[2188],0,0);
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),sourceX,sourceY,sourceSize * 128,sourceLayer);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
     // Embed the test cell in a production-size tile; extend its outer corners.
@@ -79,13 +76,14 @@ try {
     }
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,samples);
     for (let i = 0; i < 32; i++) {
-      constants.set([scale, Array.isArray(influence) ? influence[i % influence.length] : influence, 0, 0], 8 + i * 4);
+      constants.set([scale, Array.isArray(influence) ? influence[i % influence.length] : influence, 0, 0], 4 + i * 4);
     }
-    constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
+    constants[136]=strength;
+    gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);
+    gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
     if(gl.getError()!==gl.NO_ERROR) throw new Error('WebGL error');
-    if(constants[4]<.5){output[5]=output[3];output[3]=255;} // Decode the new tangent-normal packing for baseline material checks.
     return output;
   };
   let checks=0;
@@ -149,7 +147,7 @@ try {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, biomeTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([...color, alpha]));
-    constants[138] = strength;
+    constants[134] = strength;
   };
   const biomeBase = render(repeat([0, 0, 0]));
   const modulation = [160, 112, 96];
@@ -198,22 +196,25 @@ try {
   setBiomeColor([128, 128, 128], 0);
 
   const plain=render(repeat([0,0,0]));
-  constants.set([0,0,1,0],144);constants[2192]=1;
+  constants.set([0,0,1,0],140);
+  constants[2188]=1;
   const overlay=render(repeat([0,0,0]));
   close(overlay.slice(0,3),plain.slice(0,3).map((v,i)=>v*(1-128/255)+[50,25,10][i]),'premultiplied decal color');
   close(overlay.slice(6),[plain[6]*(1-128/255)+128*128/255,plain[7]*(1-128/255)+255*128/255],'decal roughness/AO');
   close(render(repeat([0,0,0]),{x:-.1}),plain,'outside decal coverage unchanged',0);
   close(render(repeat([0,0,0]),{x:1.1}),plain,'opposite decal edge unchanged',0);
-  if(overlay[4]<=plain[4]||overlay[5]>=plain[5])throw Error('Decal normal direction lost');checks++;
+  if(overlay[4]<=plain[4]||overlay[5]<=plain[5])throw Error('Decal normal direction lost');
+  checks++;
 
   // Ground-color modulation must retain the underlying material's hue.
-  constants[2196]=1;
+  constants[2192]=1;
   const modulated=render(repeat([0,0,0]));
   close(modulated.slice(0,3),plain.slice(0,3).map((v,i)=>v*(1-128/255+[50,25,10][i]/255)),'imprint preserves ground color');
-  constants[2196]=0;
+  constants[2192]=0;
   // A constant one-texel coverage map must not limit repeated material detail.
   {
-  constants[2197]=2;constants[2198]=3; // material IDs 1 and 2, encoded +1
+  constants[2193]=2;
+  constants[2194]=3; // material IDs 1 and 2, encoded +1
   const detail=render(repeat([0,0,0]));
   const weight=128/255,alpha=128/255;
   close(detail.slice(0,3),plain.slice(0,3).map((v,c)=>v*(1-alpha)+255*alpha*((colors[1][c]/255)**2*(1-weight)+(colors[2][c]/255)**2*weight)),'tiled decal color and alpha');
@@ -223,43 +224,45 @@ try {
   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D_ARRAY,ah);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.REPEAT);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,8,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,stripes);
-  constants.set([0,0,4,0],144);
+  constants.set([0,0,4,0],140);
   const dark=render(repeat([0,0,0]),{x:.0625,span:.001}),light=render(repeat([0,0,0]),{x:.1875,span:.001});
   close(dark.slice(0,3),plain.slice(0,3).map(v=>v*(1-alpha)),'sub-mask-texel dark detail');
   close(light.slice(0,3),plain.slice(0,3).map(v=>v*(1-alpha)+255*alpha),'sub-mask-texel light detail');
   close(render(repeat([0,0,0]),{x:1.1875,span:.001}),light,'detail repeats in meters');
   close(render(repeat([0,0,0]),{x:.09375,scale:2,span:.001}),light,'material texel density independent of decal footprint');
-  constants.set([0,0,1,0],144);
+  constants.set([0,0,1,0],140);
   close(render(repeat([0,0,0]),{x:1.1875,span:.001}),plain,'detail respects coverage bounds');
   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D_ARRAY,ah);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(colors.flat()));
-  constants[2197]=0;constants[2198]=0;
+  constants[2193]=0;
+  constants[2194]=0;
   }
   // Exercise both packed index pairs, the 8-bit boundary and the highest layer.
-  for(let i=0;i<512;i++)constants.set([10,10,1,0],144+i*4);
+  for(let i=0;i<512;i++)constants.set([10,10,1,0],140+i*4);
   const uploadIndices=()=>{
     gl.activeTexture(gl.TEXTURE9);gl.bindTexture(gl.TEXTURE_2D,decalIndices);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,256,4,gl.RGBA,gl.UNSIGNED_BYTE,indexBytes);
   };
   for(const id of [255,256,511]){
-    constants.set([0,0,1,31],144+id*4);
+    constants.set([0,0,1,31],140+id*4);
     indexBytes[0]=id&255;indexBytes[1]=id>>8;uploadIndices();
     close(render(repeat([0,0,0])),overlay,'page list reaches global decal '+id+' and layer 31');
-    constants.set([10,10,1,0],144+id*4);
+    constants.set([10,10,1,0],140+id*4);
   }
-  constants.set([0,0,1,31],144+511*4);
+  constants.set([0,0,1,31],140+511*4);
   indexBytes[0]=0;indexBytes[1]=0;indexBytes[2]=255;indexBytes[3]=1;uploadIndices();
-  constants[2192]=2;
+  constants[2188]=2;
   close(render(repeat([0,0,0])),overlay,'BA pair preserves the high index byte');
   for(let i=0;i<512;i++){indexBytes[i*2]=i&255;indexBytes[i*2+1]=i>>8;}uploadIndices();
-  constants[2192]=512;
+  constants[2188]=512;
   close(render(repeat([0,0,0])),overlay,'page list processes all 512 entries');
-  constants[2196+31*4]=1;
+  constants[2192+31*4]=1;
   close(render(repeat([0,0,0])),modulated,'layer 31 reads its own parameters');
-  constants[2196+31*4]=0;
-  constants[2192]=0;close(render(repeat([0,0,0])),plain,'empty page skips all global decals');
-  constants[2192]=1;
+  constants[2192+31*4]=0;
+  constants[2188]=0;
+  close(render(repeat([0,0,0])),plain,'empty page skips all global decals');
+  constants[2188]=1;
   close(render(repeat([0,0,0])),plain,'page list excludes overlapping unlisted decals');
 
   const link=(vs,fs,feedback)=>{
@@ -328,7 +331,6 @@ try {
     a('a_gridInst',...nodeOrigin,nodeSize,0);
     a('a_mappingInst',...mapping);
     a('a_tileInst',0,0,16,0);
-    a('a_normalParentInst',0,0,16,0);
     a('a_decalRegion',0,0,16,0);
     a('a_decalGrid',...grid);
     a('a_decalFade',scale,fade,0,0);
@@ -458,7 +460,7 @@ try {
       const attributes={a_position:[...uv,0,1],a_normal:[0,1,0,0],a_tangent:[1,0,0,1],
         a_matWorld0:[1,0,0,0],a_matWorld1:[0,1,0,0],a_matWorld2:[0,0,1,0],
         a_gridInst:[0,0,16,0],a_mappingInst:[0,0,0,0],a_tileInst:[0,0,16,0],
-        a_normalParentInst:[0,0,16,0],a_decalRegion:[0,0,16,0],
+        a_decalRegion:[0,0,16,0],
         a_decalGrid:[0,0,8,8],a_decalFade:[.6,1,0,0],a_localShadowBiasAndProbeId:[0,0,0,0]};
       for(const [name,value]of Object.entries(attributes)){
         const l=gl.getAttribLocation(p,name);if(l>=0){gl.disableVertexAttribArray(l);gl.vertexAttrib4f(l,...value);}

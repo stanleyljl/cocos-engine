@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-#include "landscape/LandscapeHeightfield.h"
+#include "landscape/PhysicsResources.h"
 #include "base/Macros.h"
 
 #if CC_USE_PHYSICS_PHYSX
@@ -13,7 +13,7 @@ namespace cc::landscape {
 // PhysX resource IDs start at 0. UINT32_MAX is never allocated by PhysXWorld.
 constexpr uint32_t INVALID_RESOURCE_ID = UINT32_MAX;
 
-struct LandscapeHeightfield::Impl {
+struct LandscapePhysicsResources::Impl {
 #if CC_USE_PHYSICS_PHYSX
     physx::PxHeightField *heightfield{nullptr};
     physx::PxTriangleMesh *triangleMesh{nullptr};
@@ -23,12 +23,14 @@ struct LandscapeHeightfield::Impl {
 #endif
 };
 
-LandscapeHeightfield::LandscapeHeightfield() : _impl(std::make_unique<Impl>()) {}
-LandscapeHeightfield::~LandscapeHeightfield() { destroy(); }
+LandscapePhysicsResources::LandscapePhysicsResources() : _impl(std::make_unique<Impl>()) {}
+LandscapePhysicsResources::~LandscapePhysicsResources() {
+    destroy();
+}
 
-uint32_t LandscapeHeightfield::create(const Uint16Array &source, const Uint8Array &holes, uint32_t resolution, uint32_t wrapperObjectID) {
+uint32_t LandscapePhysicsResources::createHeightfield(const Uint16Array &source, const Uint8Array &holes, uint32_t resolution, uint32_t wrapperObjectID) {
 #if CC_USE_PHYSICS_PHYSX
-    if (_impl->heightfield) {
+    if (_impl->heightfield || _impl->triangleMesh) {
         return INVALID_RESOURCE_ID;
     }
     _impl->uninitializedWrapperID = wrapperObjectID;
@@ -39,7 +41,7 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, const Uint8Arra
     ccstd::vector<physx::PxHeightFieldSample> samples(source.length());
     // Source is Z-major (X contiguous). PhysX rows run along X and columns
     // along Z, so transpose while converting uint16 to signed16 heights.
-    // The tile node's Y offset restores the bias removed here (see TS holder).
+    // The tile node's Y offset restores the bias removed here (see LandscapeHeightfieldData).
     for (uint32_t x = 0; x < resolution; ++x) {
         for (uint32_t z = 0; z < resolution; ++z) {
             auto &sample = samples[x * resolution + z];
@@ -68,16 +70,22 @@ uint32_t LandscapeHeightfield::create(const Uint16Array &source, const Uint8Arra
 #endif
 }
 
-bool LandscapeHeightfield::adoptTriangleMesh(uint32_t objectID, uint32_t wrapperObjectID) {
+bool LandscapePhysicsResources::adoptTriangleMesh(uint32_t objectID, uint32_t wrapperObjectID) {
 #if CC_USE_PHYSICS_PHYSX
-    if (_impl->heightfield || _impl->triangleMesh) return false;
+    if (_impl->heightfield || _impl->triangleMesh) {
+        return false;
+    }
     // Keep the wrapper ID even when cooking failed, so destroy can unregister it.
     _impl->uninitializedWrapperID = wrapperObjectID;
-    if (objectID == INVALID_RESOURCE_ID) return false;
+    if (objectID == INVALID_RESOURCE_ID) {
+        return false;
+    }
     auto &world = physics::PhysXWorld::getInstance();
     _impl->objectID = objectID;
     auto *mesh = reinterpret_cast<physx::PxTriangleMesh *>(world.getPXPtrWithPXObjectID(objectID));
-    if (!mesh) return false;
+    if (!mesh) {
+        return false;
+    }
     _impl->triangleMesh = mesh;
     return true;
 #else
@@ -85,7 +93,7 @@ bool LandscapeHeightfield::adoptTriangleMesh(uint32_t objectID, uint32_t wrapper
 #endif
 }
 
-bool LandscapeHeightfield::adoptShape() {
+bool LandscapePhysicsResources::adoptShape() {
 #if CC_USE_PHYSICS_PHYSX
     if ((!_impl->heightfield && !_impl->triangleMesh) || _impl->shape) {
         return false;
@@ -114,7 +122,7 @@ bool LandscapeHeightfield::adoptShape() {
 #endif
 }
 
-void LandscapeHeightfield::destroy() {
+void LandscapePhysicsResources::destroy() {
 #if CC_USE_PHYSICS_PHYSX
     if (_impl->uninitializedWrapperID) {
         // Cooking failed before the terrain/mesh wrapper could initialize.

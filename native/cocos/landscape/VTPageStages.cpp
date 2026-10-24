@@ -21,12 +21,11 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 ****************************************************************************/
-#include "landscape/VTPageProcessing.h"
-#include "landscape/VTRenderer.h"
+#include "landscape/VTPageStages.h"
 #include "landscape/DecalRenderer.h"
-#include "landscape/LandscapeAsset.h"
+#include "landscape/Asset.h"
 #include "landscape/MaterialLibrary.h"
-#include "landscape/SourceDataManager.h"
+#include "landscape/Residency.h"
 
 #include <algorithm>
 
@@ -39,7 +38,7 @@
 #include "core/assets/RenderingSubMesh.h"
 #include "core/assets/Texture2D.h"
 #include "landscape/GridMesh.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Config.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDescriptorSetLayout.h"
@@ -96,12 +95,12 @@ VTPageComposer::~VTPageComposer() {
     }
 }
 
-bool VTPageComposer::init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+bool VTPageComposer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
     CC_ASSERT(_composeMaterial == nullptr);
     _decals = &decals;
     auto *device = Root::getInstance()->getDevice();
-    if (!initTarget(device, compressed) || !initMaterial(asset, sourceData, materials, device, compressed, size()) ||
-        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(sourceData, device)) {
+    if (!initTarget(device, compressed) || !initMaterial(asset, residency, materials, device, compressed, size()) ||
+        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(residency, device)) {
         return false;
     }
     _composeMaterial->getPasses()->front()->update();
@@ -109,22 +108,22 @@ bool VTPageComposer::init(const LandscapeAsset &asset, SourceDataManager &source
     return _pageMesh && initDrawResources(device) && initRenderPass(device, compressed);
 }
 
-bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const SourceDataManager &sourceData, VTPageInstance &instance) {
-    const auto splat = sourceData.resolve(sources.splat);
+bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const LandscapeResidency &residency, VTPageInstance &instance) {
+    const auto splat = residency.resolve(sources.splat);
     if (splat.layer < 0) {
         return false;
     }
     NormalSourceRow normals;
     for (size_t i = 0; i < sources.normals.size(); ++i) {
-        const auto tile = sourceData.resolve(sources.normals[i]);
+        const auto tile = residency.resolve(sources.normals[i]);
         if (tile.layer < 0) {
             return false;
         }
-        normals[i] = sourceData.shaderParams(tile);
+        normals[i] = residency.shaderParams(tile);
     }
     // All inputs are resident. Write their GPU representation only now.
     instance.region = {region.x, region.z, region.size, 0};
-    instance.splatSource = sourceData.shaderParams(splat);
+    instance.splatSource = residency.shaderParams(splat);
     instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), 0, 0};
     _normalSourceRows[slot] = normals;
     return true;
@@ -147,7 +146,7 @@ void VTPageComposer::bindTexture(const char *name, gfx::Texture *texture, gfx::S
     pass->bindSampler(scene::Pass::getBindingFromHandle(pass->getHandle(name)), sampler);
 }
 
-bool VTPageComposer::initMaterial(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize) {
+bool VTPageComposer::initMaterial(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize) {
     const auto &data = asset.data();
     _composeMaterial = ccnew Material();
     IMaterialInfo info;
@@ -176,8 +175,8 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, SourceDataManager
             return false;
         }
     }
-    bindTexture("splatmap", sourceData.splatArray(), sourceData.splatSampler());
-    bindTexture("terrainNormalMap", sourceData.normalArray(), sourceData.heightSampler());
+    bindTexture("splatmap", residency.splatArray(), residency.splatSampler());
+    bindTexture("terrainNormalMap", residency.normalArray(), residency.heightSampler());
     bindTexture("albedoHeightMap", materials.albedoHeight(), materials.repeatSampler());
     bindTexture("normalRoughnessAOMap", materials.normalRoughnessAO(), materials.repeatSampler());
     if (data.width() <= 0.0F || data.depth() <= 0.0F || !materials.whiteTexture() || !materials.clampSampler()) {
@@ -195,7 +194,7 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, SourceDataManager
     return true;
 }
 
-bool VTPageComposer::initSourceTable(SourceDataManager &sourceData, gfx::Device *device) {
+bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device *device) {
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
@@ -207,7 +206,7 @@ bool VTPageComposer::initSourceTable(SourceDataManager &sourceData, gfx::Device 
         return false;
     }
     _normalSourceRows.resize(config::VT_PAGE_COUNT);
-    bindTexture("normalSourceMap", _normalSourceTable, sourceData.splatSampler());
+    bindTexture("normalSourceMap", _normalSourceTable, residency.splatSampler());
     return true;
 }
 

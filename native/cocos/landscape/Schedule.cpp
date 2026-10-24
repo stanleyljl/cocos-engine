@@ -1,8 +1,10 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-#include "landscape/LandscapeSchedule.h"
+#include "landscape/Schedule.h"
 
 #include <algorithm>
 #include "base/Log.h"
+#include "landscape/Asset.h"
+#include "landscape/Residency.h"
 #include "landscape/VTRenderer.h"
 
 namespace cc::landscape {
@@ -23,20 +25,18 @@ bool sourcesFit(const ccstd::unordered_set<uint64_t> &protectedSources, const cc
 }
 } // namespace
 
-LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, SourceDataManager &sourceData, VTRenderer &vt)
-: _asset(asset), _sourceData(sourceData), _vt(vt), _data(asset.data()),
-  _layout(_data.sectorSize), _expectedTree(_data.maxLevel) {
-    _currentTree.init(_data);
-}
+LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, LandscapeResidency &residency, VTRenderer &vt, Quadtree &quadtree)
+: _asset(asset), _residency(residency), _vt(vt), _data(asset.data()),
+  _layout(_data.sectorSize), _quadtree(quadtree) {}
 
 bool LandscapeSchedule::beginInitialChange() {
     Transaction transaction;
     // Bootstrap uses the same admission/prepare/commit path as later changes.
     // Every sector starts with one coarse material page and complete coverage.
-    for (const auto &entry : _currentTree.nodes()) {
+    for (const auto &entry : _quadtree.nodes()) {
         const auto address = entry.second.geometry.address();
-        CurrentTree::Node node;
-        node.geometry = geometry(address);
+        Quadtree::Node node;
+        node.geometry = _quadtree.geometry(address);
         node.material.pages.push_back({_layout.rootLevel(), address.x, address.z});
         transaction.topology.added.push_back(address);
         transaction.nodes.push_back(std::move(node));
@@ -44,32 +44,11 @@ bool LandscapeSchedule::beginInitialChange() {
     return admit(std::move(transaction));
 }
 
-QuadNode LandscapeSchedule::geometry(NodeAddress address) const {
-    float minY = _data.minHeight();
-    float maxY = _data.maxHeight();
-    _asset.getHeightRange(address.level, address.x, address.z, minY, maxY);
-    const auto source = address.ancestor(std::max(address.level, _data.minTileLevel));
-    float sourceMin = minY;
-    float sourceMax = maxY;
-    _asset.getHeightRange(source.level, source.x, source.z, sourceMin, sourceMax);
-    return {address.level, address.x, address.z, std::min(minY, sourceMin), std::max(maxY, sourceMax)};
-}
-
-float LandscapeSchedule::distance(NodeAddress node) const {
-    const auto &camera = _camera;
-    const auto bounds = geometry(node);
-    const auto region = _data.nodeRegion(node);
-    const float x = std::max({region.x - camera.x, camera.x - region.x - region.size, 0.0F});
-    const float y = std::max({bounds.minY - camera.y, camera.y - bounds.maxY, 0.0F});
-    const float z = std::max({region.z - camera.z, camera.z - region.z - region.size, 0.0F});
-    return x * x + y * y + z * z;
-}
-
-CurrentTree::Node LandscapeSchedule::desiredNode(NodeAddress address) const {
-    CurrentTree::Node result;
-    result.geometry = geometry(address);
+Quadtree::Node LandscapeSchedule::desiredNode(NodeAddress address) const {
+    Quadtree::Node result;
+    result.geometry = _quadtree.geometry(address);
     result.material = _layout.buildGridMapping(_data.nodeRegion(address), result.geometry.minY,
-                                         result.geometry.maxY, _camera);
+                                         result.geometry.maxY, _quadtree.camera());
     return result;
 }
 
@@ -77,56 +56,22 @@ bool LandscapeSchedule::beginNextChange() {
     if (!_needsPlan) {
         return false;
     }
-    struct Work {
-        CurrentTree::Candidate candidate;
-        bool visible;
-        float distance;
-        uint32_t priority;
-    };
-    ccstd::vector<Work> work;
-    for (const auto candidate : _currentTree.candidates(_expectedTree)) {
-        const auto priority = candidate.operation == CurrentTree::Operation::SPLIT ? _expectedTree.refinementPriority(candidate.node) : 0;
-        work.push_back({candidate, _expectedTree.visible(candidate.node), distance(candidate.node),
-                        priority});
-    }
-    // Release capacity first; otherwise favor visible, nearby work. All priorities
-    // refer to this cut and view and are discarded as soon as one change is admitted.
-    using Operation = CurrentTree::Operation;
-    std::sort(work.begin(), work.end(), [](const Work &a, const Work &b) {
-        const auto left = a.candidate.operation;
-        const auto right = b.candidate.operation;
-        if ((left == Operation::MERGE) != (right == Operation::MERGE)) {
-            return left == Operation::MERGE;
-        }
-        if (a.visible != b.visible) {
-            return a.visible;
-        }
-        if (a.distance != b.distance) {
-            return a.distance < b.distance;
-        }
-        if (left != right) {
-            return left < right;
-        }
-        if (a.priority != b.priority) {
-            return a.priority > b.priority;
-        }
-        return a.candidate.node.key() < b.candidate.node.key();
-    });
-    for (const auto &item : work) {
+    using Operation = Quadtree::Operation;
+    for (const auto &candidate : _quadtree.candidates()) {
         Transaction transaction;
-        if (item.candidate.operation == Operation::REFRESH) {
-            auto node = desiredNode(item.candidate.node);
-            if (sameMapping(node.material, _currentTree.nodes().at(item.candidate.node.key()).material)) {
+        if (candidate.operation == Operation::REFRESH) {
+            auto node = desiredNode(candidate.node);
+            if (sameMapping(node.material, _quadtree.nodes().at(candidate.node.key()).material)) {
                 continue;
             }
             // Most view changes leave a grid's material mapping unchanged.
             // Build a refresh transaction only after finding an actual change.
             transaction.nodes.push_back(std::move(node));
         }
-        if (!_currentTree.plan(item.candidate, transaction.topology)) {
+        if (!_quadtree.plan(candidate, transaction.topology)) {
             continue;
         }
-        if (item.candidate.operation != Operation::REFRESH) {
+        if (candidate.operation != Operation::REFRESH) {
             for (const auto address : transaction.topology.added) {
                 transaction.nodes.push_back(desiredNode(address));
             }
@@ -135,16 +80,16 @@ bool LandscapeSchedule::beginNextChange() {
             return true;
         }
     }
-    // Retry only after demand/view changes or a commit releases resources.
+    // Retry after view changes or a commit releases resources.
     _needsPlan = false;
     return false;
 }
 
-LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::vector<CurrentTree::Node> &added) const {
+LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::vector<Quadtree::Node> &added) const {
     Resources resources;
     ccstd::unordered_set<uint64_t> sources;
     ccstd::unordered_set<uint64_t> pages;
-    const auto collect = [&](const CurrentTree::Node &node) {
+    const auto collect = [&](const Quadtree::Node &node) {
         const auto address = node.geometry.address();
         const auto source = address.ancestor(std::max(address.level, _data.minTileLevel));
         if (sources.insert(source.key()).second) {
@@ -157,7 +102,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::ve
         }
     };
     // Keep all displayed bindings alive, including nodes retired by the transaction.
-    for (const auto &entry : _currentTree.nodes()) {
+    for (const auto &entry : _quadtree.nodes()) {
         collect(entry.second);
     }
     for (const auto &node : added) {
@@ -170,7 +115,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources(const ccstd::ve
 }
 
 bool LandscapeSchedule::canPrepare(const Resources &resources) const {
-    if (!_sourceData.canReserve(resources.sources) || !_vt.canReserve(resources.pages)) {
+    if (!_residency.canReserve(resources.sources) || !_vt.canReserve(resources.pages)) {
         return false;
     }
     ccstd::unordered_set<uint64_t> pinned;
@@ -183,7 +128,7 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
     for (const auto page : resources.pages) {
         ccstd::vector<NodeAddress> inputs;
         _vt.selectSources(page, true).appendTo(inputs);
-        if (!sourcesFit(pinned, inputs, _sourceData.layerCount())) {
+        if (!sourcesFit(pinned, inputs, _residency.layerCount())) {
             return false;
         }
     }
@@ -196,7 +141,7 @@ bool LandscapeSchedule::admit(Transaction transaction) {
     if (!canPrepare(resources)) {
         return false;
     }
-    const auto currentCount = _currentTree.nodes().size();
+    const auto currentCount = _quadtree.nodes().size();
     const auto &topology = transaction.topology;
     const auto nextCount = topology.removed.empty() ? currentCount
                                                   : currentCount - topology.removed.size() + topology.added.size();
@@ -204,7 +149,7 @@ bool LandscapeSchedule::admit(Transaction transaction) {
         return false;
     }
     // Validate the entire union before changing source data or VT reservations.
-    if (!_vt.reserve(resources.pages) || !_sourceData.reserve(resources.sources)) {
+    if (!_vt.reserve(resources.pages) || !_residency.reserve(resources.sources)) {
         return false;
     }
     _pending = std::move(transaction);
@@ -228,7 +173,7 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
         }
         ccstd::vector<NodeAddress> inputs;
         _vt.selectSources(page, _vt.getRefineFarDetail()).appendTo(inputs);
-        if (!sourcesFit(working, inputs, _sourceData.layerCount())) {
+        if (!sourcesFit(working, inputs, _residency.layerCount())) {
             continue;
         }
         for (const auto source : inputs) {
@@ -241,7 +186,7 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
 }
 
 bool LandscapeSchedule::resourcesReady() const {
-    return _sourceData.ready() && _vt.ready();
+    return _residency.ready() && _vt.ready();
 }
 
 void LandscapeSchedule::stopLoading() {
@@ -253,19 +198,19 @@ bool LandscapeSchedule::prepareResources(bool synchronous) {
     while (!resourcesReady()) {
         // Preserve the current batch while its IO/uploads are incomplete. This
         // prevents view or material edits from continually replacing in-flight work.
-        if (!_sourceData.ready() && !_sourceData.loadReserved(synchronous)) {
+        if (!_residency.ready() && !_residency.loadReserved(synchronous)) {
             stopLoading();
             return false;
         }
-        if (!_sourceData.ready()) {
+        if (!_residency.ready()) {
             return false;
         }
-        if (!_sourceData.reserve(compositionSources()) || !_sourceData.loadReserved(synchronous)) {
+        if (!_residency.reserve(compositionSources()) || !_residency.loadReserved(synchronous)) {
             stopLoading();
             return false;
         }
         const auto budget = synchronous ? config::VT_PAGE_COUNT : _remainingPages;
-        const auto composed = _vt.renderPages(_sourceData, budget);
+        const auto composed = _vt.renderPages(_residency, budget);
         if (!synchronous) {
             _remainingPages -= composed;
         }
@@ -286,18 +231,18 @@ bool LandscapeSchedule::prepareResources(bool synchronous) {
 }
 
 void LandscapeSchedule::commitChange() {
-    _currentTree.commit(_pending->topology, _pending->nodes);
+    _quadtree.commit(_pending->topology, _pending->nodes);
     _pending.reset();
     _needsPlan = true;
-    // The old tree is no longer displayed. Keep only committed height sources,
+    // Replaced nodes no longer draw. Keep only committed height sources,
     // material pages and projection references; composition inputs are temporary.
     _resources = collectResources();
     _vt.reserve(_resources.pages);
-    _sourceData.reserve(_resources.sources);
+    _residency.reserve(_resources.sources);
 }
 
-void LandscapeSchedule::update(ExpectedTree expected, const Vec3 &camera, uint32_t frame) {
-    _currentTree.clearChanges();
+void LandscapeSchedule::update(uint32_t frame) {
+    _quadtree.clearChanges();
     if (_failed) {
         return;
     }
@@ -305,15 +250,12 @@ void LandscapeSchedule::update(ExpectedTree expected, const Vec3 &camera, uint32
         stopLoading();
         return;
     }
-    _needsPlan |= !(_expectedTree == expected);
-    _expectedTree = std::move(expected);
-    _needsPlan |= _camera.x != camera.x || _camera.y != camera.y || _camera.z != camera.z;
-    _camera = camera;
+    _needsPlan |= _quadtree.viewChanged();
     if (!_frame || *_frame != frame) {
         _frame = frame;
         _remainingPages = config::VT_PAGE_UPDATE_BUDGET;
         if (_ready) {
-            _sourceData.update(config::PAGE_UPLOAD_BUDGET);
+            _residency.update(config::PAGE_UPLOAD_BUDGET);
         }
     }
     if (!_pending && _resources.pages.empty() && !beginInitialChange()) {

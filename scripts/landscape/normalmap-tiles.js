@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { PNG } = require('pngjs');
 
-// Keep these dimensions in sync with LandscapeConfig.h and the asset importer.
+// Keep these dimensions in sync with Config.h and the asset importer.
 const TILE_RESOLUTION = 129;
 const NORMAL_BORDER = 8;
 const NORMAL_RESOLUTION = TILE_RESOLUTION + 2 * NORMAL_BORDER;

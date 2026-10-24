@@ -16,7 +16,7 @@ declare const jsb: any;
 let nextTerrainID = 1;
 
 /** Landscape-owned immutable samples, centered on the signed16 domain. */
-export class LandscapePhysicsHeightfield implements ITerrainAsset {
+export class LandscapeHeightfieldData implements ITerrainAsset {
     public readonly _uuid = `landscape-heightfield-${nextTerrainID++}`;
     // ITerrainAsset calls sample spacing tileSize; it is NOT the source tile's width.
     public readonly tileSize: number;
@@ -27,8 +27,12 @@ export class LandscapePhysicsHeightfield implements ITerrainAsset {
         this.heightFieldScale = _layout.heightScale / 65535;
         this.localOriginY = _layout.heightBias + 32768 * _layout.heightScale / 65535;
     }
-    public getVertexCountI (): number { return this._layout.resolution; }
-    public getVertexCountJ (): number { return this._layout.resolution; }
+    public getVertexCountI (): number {
+        return this._layout.resolution;
+    }
+    public getVertexCountJ (): number {
+        return this._layout.resolution;
+    }
     // Samples are Z-major with X contiguous; physics stores signed16 heights.
     public getSignedHeight (x: number, z: number): number {
         return this.samples[z * this._layout.resolution + x] - 32768;
@@ -38,20 +42,137 @@ export class LandscapePhysicsHeightfield implements ITerrainAsset {
     }
 }
 
+// Shared with the native contract: zero is a valid native resource ID.
+const INVALID_RESOURCE_ID = 0xFFFFFFFF;
+
+/** Owns one streamed PhysX heightfield or mesh and its shape, matching C++.
+ * Web handles are SDK objects; native handles are resource/wrapper IDs.
+ * Failed creation returns INVALID_RESOURCE_ID; adoption returns success.
+ * Destroy only after the wrapper has removed its physics/event registrations. */
+class LandscapePhysicsResources {
+    private _heightfield: any;
+    private _triangleMesh: any;
+    private _shape: any;
+    private _wrapper: any;
+
+    public createHeightfield (source: Uint16Array, holes: Uint8Array, resolution: number, wrapper: any): any {
+        if (this._heightfield || this._triangleMesh) {
+            return INVALID_RESOURCE_ID;
+        }
+        this._wrapper = wrapper;
+        if (resolution < 2 || resolution > 4097 || source.length !== resolution * resolution || holes.length !== (resolution - 1) * (resolution - 1)) {
+            return INVALID_RESOURCE_ID;
+        }
+        // The Web binding cannot set hole materials. The collision manager uses meshes
+        // for these patches; reject unsupported input rather than filling holes.
+        if (holes.some(value => value !== 0)) {
+            return INVALID_RESOURCE_ID;
+        }
+        const PX = cclegacy._global.PhysX as any;
+        const samples = new PX.PxHeightFieldSampleVector();
+        const sample = new PX.PxHeightFieldSample();
+        try {
+            // PhysX rows run along X, columns along Z: transpose the source layout.
+            for (let x = 0; x < resolution; ++x) {
+                for (let z = 0; z < resolution; ++z) {
+                    sample.height = source[z * resolution + x] - 32768;
+                    samples.push_back(sample);
+                }
+            }
+            this._heightfield = PhysXInstance.cooking.createHeightFieldExt(resolution, resolution, samples, PhysXInstance.physics);
+        } finally {
+            sample.delete();
+            samples.delete();
+        }
+        return this._heightfield || INVALID_RESOURCE_ID;
+    }
+
+    public adoptTriangleMesh (mesh: any, wrapper: any): boolean {
+        if (this._heightfield || this._triangleMesh) {
+            return false;
+        }
+        this._wrapper = wrapper;
+        if (!mesh || mesh === INVALID_RESOURCE_ID) {
+            return false;
+        }
+        this._triangleMesh = mesh;
+        return true;
+    }
+
+    public adoptShape (): boolean {
+        if ((!this._heightfield && !this._triangleMesh) || this._shape || !this._wrapper?.impl) {
+            return false;
+        }
+        // Transfer the original createShape reference without adding a reference.
+        // The Landscape wrapper skips its ordinary release after this succeeds.
+        this._shape = this._wrapper.impl;
+        this._wrapper = null;
+        return true;
+    }
+
+    public destroy (): void {
+        this._shape?.release();
+        this._shape = null;
+        this._heightfield?.release();
+        this._heightfield = null;
+        this._triangleMesh?.release();
+        this._triangleMesh = null;
+        this._wrapper = null;
+    }
+}
+
+/** Share ownership/teardown between Web heightfield and mesh adapters. */
+function createWebLandscapeShapeType (Base: any): any {
+    return class extends Base {
+        protected readonly _resource = new LandscapePhysicsResources();
+        private _shapeAdopted = false;
+
+        initialize (collider: TerrainCollider | MeshCollider): void {
+            super.initialize(collider);
+            this._shapeAdopted = this._resource.adoptShape();
+            if (!this._shapeAdopted) {
+                throw new Error('Failed to own Landscape collision shape');
+            }
+        }
+
+        onDestroy (): void {
+            const shape = this._impl;
+            const flags = this._flags;
+            if (this._shapeAdopted) {
+                // Preserve base shared-body cleanup, but defer the owned shape's
+                // registry removal and release until that cleanup has finished.
+                this._impl = null;
+            }
+            super.onDestroy();
+            if (this._shapeAdopted && shape.$$) {
+                // Same pointer-registry cleanup as PhysX removeReference. A static
+                // adapter import would load PhysX even when another SDK is selected.
+                const pointers = (cclegacy._global.PhysX as any).IMPL_PTR;
+                pointers[shape.$$.ptr] = null;
+                delete pointers[shape.$$.ptr];
+            }
+            this._resource.destroy();
+            this._shapeAdopted = false;
+            this.geometry?.delete();
+            flags?.delete();
+        }
+    };
+}
+
 /** @engineInternal Reuse the unchanged JSB wrapper's event/raycast bookkeeping. */
 export function createNativeLandscapeShapeType (Base: any, Resource: any): Constructor<ITerrainShape> {
     return class extends Base {
         private _resource: any;
         private _nativeInitialized = false;
-        setTerrain (terrain: LandscapePhysicsHeightfield): void {
+        setTerrain (terrain: LandscapeHeightfieldData): void {
             if (this._resource) {
                 return;
             }
             const resource = new Resource();
             this._resource = resource;
-            const id = resource.create(terrain.samples, terrain.holes, terrain.getVertexCountI(), this._impl.getObjectID());
+            const id = resource.createHeightfield(terrain.samples, terrain.holes, terrain.getVertexCountI(), this._impl.getObjectID());
             // PhysX resource ID 0 is valid; the Landscape owner returns UINT32_MAX on failure.
-            if (id === 0xFFFFFFFF) {
+            if (id === INVALID_RESOURCE_ID) {
                 throw new Error('Failed to create Landscape native heightfield');
             }
             this._impl.setTerrain(id, terrain.tileSize, terrain.tileSize, terrain.heightFieldScale);
@@ -144,7 +265,7 @@ function createLandscapeShape (): ITerrainShape {
                 // Samples are immutable; TerrainShape.onLoad need not rebuild them.
                 setTerrain (): void {}
                 protected onComponentSet (): void {
-                    const terrain = this.collider.terrain as LandscapePhysicsHeightfield;
+                    const terrain = this.collider.terrain as LandscapeHeightfieldData;
                     const n = terrain.getVertexCountI();
                     for (let i = 0; i < n; ++i) {
                         this.data[i] = new Array<number>(n);
@@ -163,51 +284,32 @@ function createLandscapeShape (): ITerrainShape {
                 }
             } as unknown as Constructor<ITerrainShape>;
         } else if (selector.id === 'physx' && JSB && typeof jsb !== 'undefined' && globalThis['jsb.physics']) {
-            if (!jsb.LandscapeHeightfield) {
+            if (!jsb.LandscapePhysicsResources) {
                 throw new Error('Landscape native physics binding is missing; rebuild native code');
             }
-            Type = createNativeLandscapeShapeType(Base, jsb.LandscapeHeightfield);
+            Type = createNativeLandscapeShapeType(Base, jsb.LandscapePhysicsResources);
         } else if (selector.id === 'physx') {
-            Type = class extends Base {
-                private _ownedHeightField: any;
-                setTerrain (terrain: LandscapePhysicsHeightfield): void {
+            Type = class extends createWebLandscapeShapeType(Base) {
+                setTerrain (terrain: LandscapeHeightfieldData): void {
                     if (this._impl) {
                         return;
                     }
-                    const PX = cclegacy._global.PhysX as any;
-                    const samples = new PX.PxHeightFieldSampleVector();
-                    const sample = new PX.PxHeightFieldSample();
-                    const n = terrain.getVertexCountI();
-                    try {
-                        // PhysX rows run along X, columns along Z: transpose the source layout.
-                        for (let x = 0; x < n; ++x) {
-                            for (let z = 0; z < n; ++z) {
-                                sample.height = terrain.getSignedHeight(x, z);
-                                samples.push_back(sample);
-                            }
-                        }
-                        this._ownedHeightField = PhysXInstance.cooking.createHeightFieldExt(n, n, samples, PhysXInstance.physics);
-                    } finally { sample.delete(); samples.delete(); }
-                    if (!this._ownedHeightField) {
+                    const heightfield = this._resource.createHeightfield(terrain.samples, terrain.holes, terrain.getVertexCountI(), this);
+                    if (heightfield === INVALID_RESOURCE_ID) {
                         throw new Error('Failed to create Landscape heightfield');
                     }
+                    const PX = cclegacy._global.PhysX as any;
                     const flags = new PX.PxMeshGeometryFlags(0);
-                    const geometry = new PX.PxHeightFieldGeometry(this._ownedHeightField, flags,
-                        terrain.heightFieldScale, terrain.tileSize, terrain.tileSize);
+                    const geometry = new PX.PxHeightFieldGeometry(heightfield, flags, terrain.heightFieldScale, terrain.tileSize, terrain.tileSize);
                     try {
-                        this._impl = PhysXInstance.physics.createShape(geometry, this.getSharedMaterial(this.collider.sharedMaterial),
-                            true, this._flags);
-                    } finally { geometry.delete(); flags.delete(); }
+                        this._impl = PhysXInstance.physics.createShape(geometry, this.getSharedMaterial(this.collider.sharedMaterial), true, this._flags);
+                    } finally {
+                        geometry.delete();
+                        flags.delete();
+                    }
                     if (!this._impl) {
                         throw new Error('Failed to create Landscape collision shape');
                     }
-                }
-                onDestroy (): void {
-                    const flags = this._flags;
-                    super.onDestroy();
-                    flags?.delete();
-                    this._ownedHeightField?.release();
-                    this._ownedHeightField = null;
                 }
             } as unknown as Constructor<ITerrainShape>;
         } else {
@@ -277,39 +379,46 @@ export class LandscapePhysicsMeshCollider extends MeshCollider {
                 private _resource: any;
                 private _nativeInitialized = false;
                 setMesh (mesh: Mesh): void {
-                    if (this._resource) return;
+                    if (this._resource) {
+                        return;
+                    }
                     super.setMesh(mesh);
-                    this._resource = new jsb.LandscapeHeightfield();
+                    this._resource = new jsb.LandscapePhysicsResources();
                     const cache = globalThis['jsb.physics'].CACHE.trimesh;
                     const adopted = this._resource.adoptTriangleMesh(cache[mesh._uuid], this._impl.getObjectID());
-                    delete cache[mesh._uuid];
                     if (!adopted) {
                         throw new Error('Failed to own Landscape native hole mesh');
                     }
+                    delete cache[mesh._uuid];
                 }
                 initialize (collider: MeshCollider): void {
-                    super.initialize(collider); this._nativeInitialized = true;
-                    if (!this._resource.adoptShape()) throw new Error('Failed to attach Landscape native hole mesh');
+                    super.initialize(collider);
+                    this._nativeInitialized = true;
+                    if (!this._resource.adoptShape()) {
+                        throw new Error('Failed to attach Landscape native hole mesh');
+                    }
                 }
                 onDestroy (): void {
-                    if (this._nativeInitialized) super.onDestroy();
-                    this._resource?.destroy(); this._resource = null;
+                    if (this._nativeInitialized) {
+                        super.onDestroy();
+                    }
+                    this._resource?.destroy();
+                    this._resource = null;
                 }
             };
         } else if (selector.id === 'physx') {
-            Type = class extends Base {
-                private _ownedMesh: any;
+            Type = class extends createWebLandscapeShapeType(Base) {
                 setMesh (mesh: Mesh): void {
-                    if (this._ownedMesh) return;
+                    if (this._impl) {
+                        return;
+                    }
                     super.setMesh(mesh);
                     const cache = (cclegacy._global.PhysX as any).MESH_STATIC;
-                    this._ownedMesh = cache[mesh._uuid]; delete cache[mesh._uuid];
-                }
-                onDestroy (): void {
-                    const flags = this._flags;
-                    super.onDestroy();
-                    this.geometry?.delete(); flags?.delete();
-                    this._ownedMesh?.release(); this._ownedMesh = null;
+                    const adopted = this._resource.adoptTriangleMesh(cache[mesh._uuid], this);
+                    if (!adopted) {
+                        throw new Error('Failed to own Landscape hole mesh');
+                    }
+                    delete cache[mesh._uuid];
                 }
             };
         }

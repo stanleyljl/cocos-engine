@@ -23,13 +23,14 @@
 ****************************************************************************/
 
 #include "landscape/MaterialLibrary.h"
+#include "landscape/Asset.h"
 
 #include <algorithm>
 #include <cmath>
 
 #include "base/Log.h"
 #include "base/Macros.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Config.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
 #include "renderer/gfx-base/GFXDevice.h"

@@ -27,7 +27,7 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeData.h"
+#include "landscape/Data.h"
 #include "math/Vec4.h"
 namespace cc {
 namespace gfx {
@@ -41,14 +41,14 @@ class LandscapeAsset;
 // Physical slots are reserved BEFORE starting IO. In-flight work is bounded;
 // only the coordinator's exact working set may be uploaded. Source mapping and
 // shader bindings use exact resident tiles, with no missing-source fallback.
-class SourceDataManager {
+class LandscapeResidency {
 public:
     struct Tile {
         NodeAddress address;
         int layer{-1};
     };
-    SourceDataManager();
-    ~SourceDataManager();
+    LandscapeResidency();
+    ~LandscapeResidency();
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
     bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();

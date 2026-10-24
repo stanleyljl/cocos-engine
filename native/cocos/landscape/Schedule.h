@@ -2,23 +2,22 @@
 #pragma once
 
 #include <optional>
-#include "landscape/LandscapeAsset.h"
 #include "landscape/Quadtree.h"
-#include "landscape/SourceDataManager.h"
+#include "landscape/Data.h"
 
 namespace cc::landscape {
+class LandscapeAsset;
+class LandscapeResidency;
 class VTRenderer;
 
-// Compare demand with committed coverage, admit one replacement, prepare it,
-// then commit geometry and materials together. Only an admitted transaction
-// survives across updates; candidate ordering is never cached against an old cut.
+// Prepare the next local Quadtree change without exposing incomplete resources.
+// The tree owns coverage and distance decisions; this module owns reservations,
+// uploads and VT preparation. Ready changes can advance repeatedly in one update.
 class LandscapeSchedule {
 public:
-    LandscapeSchedule(LandscapeAsset &asset, SourceDataManager &sourceData, VTRenderer &vt);
-    void update(ExpectedTree expected, const Vec3 &localCamera, uint32_t frame);
+    LandscapeSchedule(LandscapeAsset &asset, LandscapeResidency &residency, VTRenderer &vt, Quadtree &quadtree);
+    void update(uint32_t frame);
     bool ready() const { return _ready; }
-    const CurrentTree &currentTree() const { return _currentTree; }
-    QuadNode geometry(NodeAddress address) const;
 
 private:
     struct Resources {
@@ -28,8 +27,8 @@ private:
         ccstd::vector<VTPageAddress> pages;
     };
     struct Transaction {
-        CurrentTree::Change topology;
-        ccstd::vector<CurrentTree::Node> nodes;
+        Quadtree::Change topology;
+        ccstd::vector<Quadtree::Node> nodes;
         Resources resources;
     };
 
@@ -39,25 +38,22 @@ private:
     bool prepareResources(bool synchronous);
     void commitChange();
 
-    Resources collectResources(const ccstd::vector<CurrentTree::Node> &added = {}) const;
+    Resources collectResources(const ccstd::vector<Quadtree::Node> &added = {}) const;
     const Resources &activeResources() const;
     bool canPrepare(const Resources &resources) const;
     ccstd::vector<NodeAddress> compositionSources() const;
     bool resourcesReady() const;
-    float distance(NodeAddress node) const;
-    CurrentTree::Node desiredNode(NodeAddress node) const;
+    Quadtree::Node desiredNode(NodeAddress node) const;
     void stopLoading();
 
     LandscapeAsset &_asset;
-    SourceDataManager &_sourceData;
+    LandscapeResidency &_residency;
     VTRenderer &_vt;
     const LandscapeData &_data;
     VTPageLayout _layout;
-    ExpectedTree _expectedTree;
-    CurrentTree _currentTree;
+    Quadtree &_quadtree;
     std::optional<Transaction> _pending;
     Resources _resources;
-    Vec3 _camera;
     bool _needsPlan{true};
     bool _ready{false};
     bool _failed{false};

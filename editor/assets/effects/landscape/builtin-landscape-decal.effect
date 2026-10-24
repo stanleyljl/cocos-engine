@@ -55,7 +55,7 @@ CCEffect %{
 
 CCProgram landscape-uniforms %{
   // L0-L8; maximum sector size = 4096 m at 1 m finest-grid spacing.
-  // Must match config::MAX_LOD_LEVELS in LandscapeConfig.h.
+  // Must match config::MAX_LOD_LEVELS in Config.h.
   #define LANDSCAPE_MAX_LOD_LEVELS 9
   // Must match config::SOURCE_TILE_RESOLUTION.
   #define LANDSCAPE_TILE_RESOLUTION 129

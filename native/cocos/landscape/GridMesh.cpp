@@ -26,7 +26,7 @@
 
 #include "base/std/container/vector.h"
 #include "core/assets/RenderingSubMesh.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Config.h"
 #include "renderer/gfx-base/GFXBuffer.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"

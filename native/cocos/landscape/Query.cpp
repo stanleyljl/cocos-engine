@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-#include "landscape/LandscapeQuery.h"
+#include "landscape/Query.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <utility>
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Config.h"
 
 namespace cc {
 namespace landscape {

@@ -39,6 +39,7 @@
 #include "renderer/gfx-base/GFXTexture.h"
 #include "renderer/pipeline/InstancedBuffer.h"
 #include "renderer/pipeline/PipelineStateManager.h"
+#include "scene/Model.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
 #include "scene/RenderWindow.h"

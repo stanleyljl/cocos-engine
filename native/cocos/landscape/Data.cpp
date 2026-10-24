@@ -22,7 +22,8 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/LandscapeData.h"
+#include "landscape/Data.h"
+#include "math/Vec3.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -55,6 +56,24 @@ NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
     assert(targetLevel >= level && targetLevel < config::MAX_LOD_LEVELS);
     const uint32_t shift = targetLevel - level;
     return {targetLevel, x >> shift, z >> shift};
+}
+
+void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
+    // Return each input once, in sampling order. Base-precision normal entries
+    // share one tile, which may also provide the splat data.
+    const auto append = [&output](NodeAddress source) {
+        const auto key = source.key();
+        const auto duplicate = std::find_if(output.begin(), output.end(), [key](NodeAddress entry) {
+            return entry.key() == key;
+        });
+        if (duplicate == output.end()) {
+            output.push_back(source);
+        }
+    };
+    append(splat);
+    for (const auto source : normals) {
+        append(source);
+    }
 }
 
 bool LandscapeData::valid() const {
@@ -130,6 +149,90 @@ size_t NodeIndexLayout::globalNodeIndex(uint32_t level, uint32_t globalX, uint32
     }
     const uint32_t side = _levels[level].nodesPerSide;
     return sectorNodeIndex(globalX / side, globalZ / side, level, globalX % side, globalZ % side);
+}
+
+VTPageLayout::VTPageLayout(float sectorSize)
+: _sectorSize(sectorSize) {
+    assert(sectorSize > 0);
+    _rootLevel = static_cast<uint32_t>(std::clamp(std::ilogb(sectorSize), 0, 27));
+}
+
+uint32_t VTPageLayout::levelForDistance(float distance) const {
+    // Start with the sector page and refine while the next level meets the
+    // requested size. Most mapping queries are for distant, coarse pages.
+    uint32_t level = _rootLevel;
+    float nextSize = _sectorSize * 0.5F;
+    const float target = distance * 0.5F;
+    while (level > 0 && nextSize >= target) {
+        --level;
+        nextSize *= 0.5F;
+    }
+    return level;
+}
+
+VTGridMapping VTPageLayout::buildGridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const {
+    VTGridMapping result;
+    const float heightDistance = std::max({minY - camera.y, camera.y - maxY, 0.0F});
+    const LandscapeRegion firstCell{region.x, region.z, region.size / static_cast<float>(VTGridMapping::SIDE)};
+    constexpr uint32_t half = VTGridMapping::SIDE / 2;
+    // Four aligned quadrants; only subdivide where material resolution needs it.
+    for (uint32_t z = 0; z < VTGridMapping::SIDE; z += half) {
+        for (uint32_t x = 0; x < VTGridMapping::SIDE; x += half) {
+            mapCells(firstCell, camera, heightDistance, x, z, half, result);
+        }
+    }
+    return result;
+}
+
+VTPageAddress VTPageLayout::coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const {
+    assert(desiredLevel <= _rootLevel);
+    for (uint32_t level = desiredLevel; level <= _rootLevel; ++level) {
+        const float size = pageSize(level);
+        const VTPageAddress page{level,
+                                 static_cast<uint32_t>(std::floor(min.x / size + 1e-7F)),
+                                 static_cast<uint32_t>(std::floor(min.z / size + 1e-7F))};
+        if (max.x <= (page.x + 1.0F) * size + size * 1e-7F &&
+            max.z <= (page.z + 1.0F) * size + size * 1e-7F) {
+            return page;
+        }
+    }
+    assert(false && "VT coverage must not cross sector boundaries");
+    return {};
+}
+
+void VTPageLayout::mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const {
+    const float cellSize = firstCell.size;
+    const float x = firstCell.x + left * cellSize;
+    const float z = firstCell.z + bottom * cellSize;
+    const float size = side * cellSize;
+    const float dx = std::max({x - camera.x, camera.x - (x + size), 0.0F});
+    const float dz = std::max({z - camera.z, camera.z - (z + size), 0.0F});
+    const uint32_t desiredLevel = levelForDistance(std::sqrt(dx * dx + heightDistance * heightDistance + dz * dz));
+    if (side > 1 && pageSize(desiredLevel) < size) {
+        const uint32_t half = side / 2;
+        for (uint32_t row = bottom; row < bottom + side; row += half) {
+            for (uint32_t column = left; column < left + side; column += half) {
+                mapCells(firstCell, camera, heightDistance, column, row, half, mapping);
+            }
+        }
+        return;
+    }
+    // Odd vertices collapse to the preceding even vertex during morph/stitching.
+    // One page must cover the whole trajectory, including the cell's far edge.
+    const auto page = coveringPage(desiredLevel,
+                                  {x - (left & 1U) * cellSize, z - (bottom & 1U) * cellSize},
+                                  {x + size, z + size});
+    const auto found = std::find_if(mapping.pages.begin(), mapping.pages.end(), [page](const auto &entry) {
+        return entry.key() == page.key();
+    });
+    const size_t index = static_cast<size_t>(found - mapping.pages.begin());
+    assert(index < VTGridMapping::CELL_COUNT);
+    if (found == mapping.pages.end()) {
+        mapping.pages.push_back(page);
+    }
+    for (uint32_t row = bottom; row < bottom + side; ++row) {
+        std::fill_n(mapping.cells.begin() + row * VTGridMapping::SIDE + left, side, static_cast<uint8_t>(index));
+    }
 }
 
 } // namespace landscape

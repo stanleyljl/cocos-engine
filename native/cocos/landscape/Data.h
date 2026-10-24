@@ -29,9 +29,12 @@
 #include <cstdint>
 #include <limits>
 
-#include "landscape/LandscapeConfig.h"
+#include "base/std/container/vector.h"
+#include "landscape/Config.h"
 
 namespace cc {
+class Vec3;
+
 namespace landscape {
 
 // Local XZ position. The landscape node is at the minimum XZ corner;
@@ -68,6 +71,63 @@ struct NodeAddress {
 
 // Shared key encoding for geometry nodes, source tiles and VT pages.
 uint64_t makeNodeKey(uint32_t level, uint32_t ix, uint32_t iz);
+
+struct QuadNode {
+    // Global geometry coordinates; management branches above sector roots never draw.
+    uint32_t level{0};
+    uint32_t ix{0};
+    uint32_t iz{0};
+    float minY{0.0F};
+    float maxY{0.0F};
+    NodeAddress address() const {
+        return {level, ix, iz};
+    }
+};
+
+// Material coordinates are independent of the geometry quadtree. Level zero
+// covers at least one logical unit; increasing the level doubles the covered area side.
+struct VTPageAddress {
+    uint32_t level{0};
+    uint32_t x{0};
+    uint32_t z{0};
+
+    uint64_t key() const {
+        return makeNodeKey(level, x, z);
+    }
+};
+
+// A node owns unique page addresses and a compact index for each grid cell.
+// Residency and physical-slot lookup visit pages once, not all 256 cells.
+struct VTGridMapping {
+    static constexpr uint32_t SIDE = 16;
+    static constexpr uint32_t CELL_COUNT = SIDE * SIDE;
+    std::array<uint8_t, CELL_COUNT> cells{};
+    ccstd::vector<VTPageAddress> pages;
+};
+
+// Source addresses for one material-page composition, independent of residency.
+struct VTPageSources {
+    NodeAddress splat;
+    // 2x2 lookup: base precision repeats one tile; far detail uses up to four.
+    // Each source includes its own real-neighbor border for the VT gutters.
+    std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normals;
+    // Append unique addresses in sampling order, preserving existing entries.
+    void appendTo(ccstd::vector<NodeAddress> &output) const;
+};
+
+// Shared component and renderer settings; contains no runtime resources.
+struct LandscapeDebugData {
+    bool wireframe{false};
+    bool lodColor{false};
+    bool showRanges{false};
+    bool showBox{false};
+    bool unlit{false};
+    bool showVTAtlas{false};
+    bool heightBlendEnabled{true};
+    bool refineFarDetail{true};
+    bool decal3DEnabled{true};
+    bool physicsWireframe{false};
+};
 
 struct LandscapeData {
     uint32_t sectorsX{0};
@@ -129,6 +189,39 @@ private:
     uint32_t _sectorsX{0};
     uint32_t _sectorsZ{0};
     size_t _nodesPerSector{0};
+};
+
+// Material-page dimensions are derived together; a geometry maxLevel cannot
+// accidentally be supplied as the VT root. This class does not own atlas slots.
+class VTPageLayout {
+public:
+    explicit VTPageLayout(float sectorSize = 1.0F);
+
+    uint32_t rootLevel() const {
+        return _rootLevel;
+    }
+    float pageSize(uint32_t level) const {
+        return level <= _rootLevel ? _sectorSize / static_cast<float>(1U << (_rootLevel - level)) : 0.0F;
+    }
+    // Distance-based material resolution, independent of geometry LOD.
+    uint32_t levelForDistance(float distance) const;
+    LandscapeRegion pageRegion(VTPageAddress page) const {
+        const float size = pageSize(page.level);
+        return {page.x * size, page.z * size, size};
+    }
+
+    // Subdivide aligned grid regions according to distance, independently of
+    // geometry LOD, and map each cell to a page covering its stitched footprint.
+    VTGridMapping buildGridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
+
+    // Local bounds must stay within one sector.
+    // Include the complete stitched footprint, not just the original grid cell.
+    VTPageAddress coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const;
+
+private:
+    void mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const;
+    float _sectorSize;
+    uint32_t _rootLevel{0};
 };
 
 } // namespace landscape

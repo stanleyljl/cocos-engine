@@ -5,7 +5,7 @@
 #include <deque>
 #include <iostream>
 #include <thread>
-#include "landscape/LandscapeQuery.h"
+#include "landscape/Query.h"
 
 using namespace cc::landscape;
 using Status = LandscapeQueryStatus;

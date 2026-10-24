@@ -24,32 +24,28 @@
 
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <memory>
 
 #include "base/Ptr.h"
 #include "base/std/container/unordered_map.h"
-#include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
-#include "landscape/DecalRenderer.h"
-#include "landscape/Landscape.h"
-#include "landscape/LandscapeAsset.h"
-#include "landscape/SourceDataManager.h"
-#include "landscape/LandscapeSchedule.h"
-#include "landscape/VTRenderer.h"
+#include "landscape/Data.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
-#include "scene/Model.h"
-
-#include "landscape/Quadtree.h"
 
 namespace cc {
 
 class Node;
 class Material;
 class RenderingSubMesh;
+class Texture2D;
+class TextureBase;
+
+namespace geometry {
+class Frustum;
+} // namespace geometry
 
 namespace gfx {
 class Texture;
@@ -57,34 +53,41 @@ class Texture;
 
 namespace scene {
 class RenderScene;
+class Model;
 } // namespace scene
 
 namespace landscape {
 
 class MaterialLibrary;
 class VTRenderer;
+class DecalRenderer;
+class LandscapeAsset;
+class LandscapeSchedule;
+class Quadtree;
+class LandscapeResidency;
+struct LandscapeGridParams;
 
 /**
- * Owns terrain models and material bindings. LandscapeSchedule owns both
- * trees and all resource scheduling. Each committed node draws one shared
- * 16 x 16 grid and selects material pages through a local mapping texture.
+ * Owns terrain models and material bindings. Landscape owns the single
+ * Quadtree; LandscapeSchedule prepares its resource-backed changes.
+ * Each committed node draws one shared 16 x 16 grid and selects material pages through a local mapping texture.
  */
 class LandscapeRenderer {
 public:
-    LandscapeRenderer();
+    explicit LandscapeRenderer(Quadtree &quadtree);
     ~LandscapeRenderer();
 
     // Runtime methods require successful initialization of all owned modules.
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
     // Latched after the initial view settles within budget with all exact bindings ready.
-    bool isReady() const { return _schedule->ready(); }
+    bool isReady() const;
 
     void setLodRanges(const ccstd::vector<float> &morphStart, const ccstd::vector<float> &morphEnd);
     bool addDecal(uint32_t id, float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
     void setDebugData(const LandscapeDebugData &data);
-    void preparePasses(ExpectedTree expected);
+    void preparePasses();
     void collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
     void setHoleMode(uint32_t mode);
@@ -97,7 +100,7 @@ public:
 
 private:
     struct GridDraw {
-        // GPU ownership only. Geometry/material decisions live in CurrentTree.
+        // GPU ownership only. Geometry/material decisions live in Quadtree.
         int mapping{-1};
         IntrusivePtr<scene::Model> model;
     };
@@ -115,6 +118,8 @@ private:
     void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
 
+    // Borrowed from Landscape; it outlives this renderer and its schedule.
+    Quadtree &_quadtree;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<RenderingSubMesh> _mesh;
@@ -122,7 +127,7 @@ private:
     IntrusivePtr<Material> _materialWire;
     std::unique_ptr<DecalRenderer> _decals;
     IntrusivePtr<LandscapeAsset> _asset;
-    std::unique_ptr<SourceDataManager> _sourceData;
+    std::unique_ptr<LandscapeResidency> _residency;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
     std::unique_ptr<LandscapeSchedule> _schedule;

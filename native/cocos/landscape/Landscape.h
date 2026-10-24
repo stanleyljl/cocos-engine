@@ -31,7 +31,7 @@
 #include "base/std/container/array.h"
 #include "base/std/container/string.h"
 #include "base/std/container/vector.h"
-#include "landscape/Quadtree.h"
+#include "landscape/Data.h"
 #include "math/Vec3.h"
 #include "core/TypedArray.h"
 
@@ -56,21 +56,8 @@ namespace landscape {
 
 class LandscapeAsset;
 class LandscapeRenderer;
-class ExpectedTree;
 class LandscapeQuery;
-
-struct LandscapeDebugData {
-    bool wireframe{false};
-    bool lodColor{false};
-    bool showRanges{false};
-    bool showBox{false};
-    bool unlit{false};
-    bool showVTAtlas{false};
-    bool heightBlendEnabled{true};
-    bool refineFarDetail{true};
-    bool decal3DEnabled{true};
-    bool physicsWireframe{false};
-};
+class Quadtree;
 
 class Landscape : public RefCounted {
 public:
@@ -120,12 +107,11 @@ private:
     void applyRendererSettings(LandscapeRenderer &renderer) const;
     void logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const;
     scene::Camera *pickMainCamera() const;
-    void selectPass(const geometry::Frustum &frustum, bool shadow, ExpectedTree &expected);
-    uint32_t selectShadowPasses(const pipeline::PipelineSceneData &sceneData, ExpectedTree &expected);
+    void addPass(const geometry::Frustum &frustum, bool shadow);
+    uint32_t collectShadowPasses(const pipeline::PipelineSceneData &sceneData);
     void reportVisibilityDistanceStatus();
-    void finalizePassSelection(uint32_t cascadesToDeduplicate, ExpectedTree expected);
+    void preparePassModels(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
-    bool selectNodes(const geometry::Frustum &frustum, ccstd::vector<QuadNode> &nodes, bool preloadNearby = false);
     bool queryTransformValid() const;
 
     struct PassSelection {
@@ -137,8 +123,6 @@ private:
     size_t _passCount{0};
     bool _visibilityDistanceWarning{false};
     Vec3 _lodViewPosition;
-    // Reused while accumulating pass demand; no per-pass target snapshots.
-    ccstd::vector<QuadNode> _selectedNodes;
 
     LandscapeDebugData _debugData;
     uint32_t _holeMode{0};
@@ -155,7 +139,6 @@ private:
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
     uint32_t _nextDecalId{1}; // Never reset when reloading this Landscape object.
-    ccstd::vector<QuadNode> _debugNodes;
     bool _lastVisibilityDistanceWarning{false};
 };
 

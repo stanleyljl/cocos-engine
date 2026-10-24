@@ -22,7 +22,7 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/LandscapeAsset.h"
+#include "landscape/Asset.h"
 
 #include <cstring>
 #include <utility>
@@ -30,7 +30,7 @@
 #include "base/Log.h"
 #include "base/Ptr.h"
 #include "base/ThreadPool.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Config.h"
 #include "platform/FileUtils.h"
 #include "platform/Image.h"
 #include "rapidjson/document.h"

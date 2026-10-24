@@ -26,7 +26,7 @@
 #include <array>
 #include "base/Ptr.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeData.h"
+#include "landscape/Data.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 
@@ -39,8 +39,7 @@ namespace landscape {
 class DecalRenderer;
 class LandscapeAsset;
 class MaterialLibrary;
-class SourceDataManager;
-struct VTPageSources;
+class LandscapeResidency;
 
 // Direct vertex-buffer layout: a_vtPage, a_vtRegion and a_vtSource (RGBA32F).
 struct VTPageInstance {
@@ -58,14 +57,14 @@ public:
     ~VTPageComposer();
     VTPageComposer(const VTPageComposer &) = delete;
     VTPageComposer &operator=(const VTPageComposer &) = delete;
-    bool init(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
     RenderTexture *target() const { return _compositionTarget.get(); }
     uint32_t size() const;
     gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }
     gfx::RenderPass *renderPass(bool initialize = false) const;
     void record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t count, bool initialize);
     Material *material() const { return _composeMaterial.get(); }
-    bool prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const SourceDataManager &sourceData, VTPageInstance &instance);
+    bool prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const LandscapeResidency &residency, VTPageInstance &instance);
     void uploadInputs();
     void setGlobalColorMap(Texture2D *texture);
     // Return whether cached page pixels need recomposition.
@@ -76,8 +75,8 @@ private:
     bool initTarget(gfx::Device *device, bool compressed);
     bool initDrawResources(gfx::Device *device);
     bool initRenderPass(gfx::Device *device, bool compressed);
-    bool initMaterial(const LandscapeAsset &asset, SourceDataManager &sourceData, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
-    bool initSourceTable(SourceDataManager &sourceData, gfx::Device *device);
+    bool initMaterial(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
+    bool initSourceTable(LandscapeResidency &residency, gfx::Device *device);
     void bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
     void applyGlobalColorMap();
 

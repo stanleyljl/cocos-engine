@@ -9,8 +9,8 @@
 #include "bindings/jswrapper/SeApi.h"
 #include "bindings/manual/jsb_conversions.h"
 #include "landscape/Landscape.h"
-#include "landscape/LandscapeAsset.h"
-#include "landscape/LandscapeHeightfield.h"
+#include "landscape/Asset.h"
+#include "landscape/PhysicsResources.h"
 %}
 
 // Prepended to the generated source (.cpp)
@@ -24,6 +24,19 @@ using namespace cc;
 %}
 
 %ignore cc::RefCounted;
+// Shared native data stays internal; retain only the existing debug-data binding.
+%ignore cc::landscape::LandscapePoint;
+%ignore cc::landscape::LandscapeRegion;
+%ignore cc::landscape::HeightRange;
+%ignore cc::landscape::NodeAddress;
+%ignore cc::landscape::makeNodeKey;
+%ignore cc::landscape::QuadNode;
+%ignore cc::landscape::VTPageAddress;
+%ignore cc::landscape::VTGridMapping;
+%ignore cc::landscape::VTPageSources;
+%ignore cc::landscape::VTPageLayout;
+%ignore cc::landscape::LandscapeData;
+%ignore cc::landscape::NodeIndexLayout;
 %ignore cc::landscape::Landscape::preparePasses;
 %ignore cc::landscape::Landscape::getPassModels;
 %ignore cc::landscape::Landscape::onGlobalPipelineStateChanged;
@@ -53,6 +66,7 @@ using namespace cc;
 %import "core/assets/Texture2D.h"
 
 // Generate bindings for classes in these headers.
+%include "landscape/Data.h"
 %include "landscape/Landscape.h"
-%include "landscape/LandscapeAsset.h"
-%include "landscape/LandscapeHeightfield.h"
+%include "landscape/Asset.h"
+%include "landscape/PhysicsResources.h"

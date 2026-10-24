@@ -29,20 +29,24 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
-#include "landscape/Quadtree.h"
-#include "landscape/LandscapeAsset.h"
+#include "landscape/Data.h"
+#include "landscape/Asset.h"
+#include "math/Vec3.h"
 #include "math/Vec4.h"
-#include "scene/Model.h"
 
 namespace cc {
 class Material;
 class Node;
 class RenderingSubMesh;
+namespace geometry {
+class Frustum;
+} // namespace geometry
 namespace gfx {
 class Device;
 class Texture;
 } // namespace gfx
 namespace scene {
+class Model;
 class RenderScene;
 }
 namespace landscape {

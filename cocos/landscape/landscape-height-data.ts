@@ -6,7 +6,7 @@ import { JSB } from 'internal:constants';
 declare const jsb: any;
 
 export const LANDSCAPE_TILE_RESOLUTION = 129;
-// Total X * Z sectors; must match native LandscapeConfig.h and the importer.
+// Total X * Z sectors; must match native Config.h and the importer.
 const MAX_SECTOR_COUNT = 64;
 
 /** CPU-only description of the finest source grid. */

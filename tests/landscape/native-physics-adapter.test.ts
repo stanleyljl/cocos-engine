@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { runInNewContext } from 'vm';
-import { createNativeLandscapeShapeType, LandscapePhysicsHeightfield,
+import { createNativeLandscapeShapeType, LandscapeHeightfieldData,
     LandscapePhysicsCollider, LandscapePhysicsMeshCollider } from '../../cocos/landscape/landscape-physics-collider';
 import { selector } from '../../cocos/physics/framework/physics-selector';
 
@@ -37,7 +37,7 @@ function setup (cookSucceeds = true, resourceID = 7) {
         jsbPhy: { TerrainShape: NativeShape, CONFIG: { heightScale: 1 / 512 } },
     });
     class Resource {
-        create (samples: Uint16Array, holes: Uint8Array, resolution: number, id: number) {
+        createHeightfield (samples: Uint16Array, holes: Uint8Array, resolution: number, id: number) {
             expect(holes).toEqual(new Uint8Array([1, 0, 0, 0]));
             expect(samples).toHaveLength(9); expect(resolution).toBe(3); expect(id).toBe(42);
             order.push('cook'); return cookSucceeds ? resourceID : 0xFFFFFFFF;
@@ -47,7 +47,7 @@ function setup (cookSucceeds = true, resourceID = 7) {
     }
     const Type = createNativeLandscapeShapeType(Base, Resource);
     const wrapper = new Type();
-    const heightfield = new LandscapePhysicsHeightfield(new Uint16Array(9).fill(32768), {
+    const heightfield = new LandscapeHeightfieldData(new Uint16Array(9).fill(32768), {
         resolution: 3, tileSize: 2, heightScale: 3000, heightBias: 0, tilesX: 1, tilesZ: 1, level: 0, files: {},
     }, new Uint8Array([1, 0, 0, 0]));
     const collider = { node: { updateWorldTransform () {} }, terrain: heightfield } as any;

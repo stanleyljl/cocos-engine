@@ -47,7 +47,7 @@ async function main() {
         console.log(`PASS: ${name}, ${effect.shaders.length} shader programs`);
     }
     // Moving builtin effects changes their runtime names, even when UUIDs stay fixed.
-    for (const file of ['LandscapeRenderer.cpp', 'VTRenderer.cpp', 'VTPageProcessing.cpp', 'DecalRenderer.cpp']) {
+    for (const file of ['Renderer.cpp', 'VTRenderer.cpp', 'VTPageStages.cpp', 'DecalRenderer.cpp']) {
         const source = fs.readFileSync(path.join(engine, 'native/cocos/landscape', file), 'utf8');
         for (const match of source.matchAll(/"(landscape\/builtin-landscape[^"\s]*)"/g)) {
             if (!effectNames.has(match[1])) throw new Error(`${file} references missing effect ${match[1]}`);

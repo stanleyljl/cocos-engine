@@ -1624,35 +1624,35 @@ endif()
 
 ##### landscape
 cocos_source_files(
-                 cocos/landscape/LandscapeConfig.h
-                 cocos/landscape/LandscapeData.h
-                 cocos/landscape/LandscapeData.cpp
-                 cocos/landscape/LandscapeQuery.h
-                 cocos/landscape/LandscapeQuery.cpp
-                 cocos/landscape/LandscapeHeightfield.h
-                 cocos/landscape/LandscapeHeightfield.cpp
+                 cocos/landscape/Config.h
+                 cocos/landscape/Data.h
+                 cocos/landscape/Data.cpp
+                 cocos/landscape/Query.h
+                 cocos/landscape/Query.cpp
+                 cocos/landscape/PhysicsResources.h
+                 cocos/landscape/PhysicsResources.cpp
                  cocos/landscape/GridMesh.h
                  cocos/landscape/GridMesh.cpp
-                 cocos/landscape/SourceDataManager.h
-                 cocos/landscape/SourceDataManager.cpp
+                 cocos/landscape/Residency.h
+                 cocos/landscape/Residency.cpp
                  cocos/landscape/MaterialLibrary.h
                  cocos/landscape/MaterialLibrary.cpp
                  cocos/landscape/VTRenderer.h
                  cocos/landscape/VTRenderer.cpp
-                 cocos/landscape/VTPageProcessing.h
-                 cocos/landscape/VTPageProcessing.cpp
+                 cocos/landscape/VTPageStages.h
+                 cocos/landscape/VTPageStages.cpp
                  cocos/landscape/DecalRenderer.h
                  cocos/landscape/DecalRenderer.cpp
                  cocos/landscape/Quadtree.h
                  cocos/landscape/Quadtree.cpp
-                 cocos/landscape/LandscapeSchedule.h
-                 cocos/landscape/LandscapeSchedule.cpp
-                 cocos/landscape/LandscapeRenderer.h
-                 cocos/landscape/LandscapeRenderer.cpp
+                 cocos/landscape/Schedule.h
+                 cocos/landscape/Schedule.cpp
+                 cocos/landscape/Renderer.h
+                 cocos/landscape/Renderer.cpp
                  cocos/landscape/Landscape.h
                  cocos/landscape/Landscape.cpp
-                 cocos/landscape/LandscapeAsset.h
-                 cocos/landscape/LandscapeAsset.cpp
+                 cocos/landscape/Asset.h
+                 cocos/landscape/Asset.cpp
 )
 
 ##### scene

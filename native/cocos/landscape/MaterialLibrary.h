@@ -25,7 +25,7 @@
 #pragma once
 
 #include "base/Ptr.h"
-#include "landscape/LandscapeAsset.h"
+#include "base/std/container/vector.h"
 #include "math/Vec4.h"
 
 namespace cc {
@@ -35,6 +35,7 @@ class Texture;
 class Sampler;
 }
 namespace landscape {
+class LandscapeAsset;
 
 // All packed material layers and their mip chains, in two texture arrays.
 class MaterialLibrary {

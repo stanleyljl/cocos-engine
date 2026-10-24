@@ -6,7 +6,7 @@
 #include <memory>
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
-#include "landscape/LandscapeData.h"
+#include "landscape/Data.h"
 #include "math/Vec3.h"
 
 namespace cc {

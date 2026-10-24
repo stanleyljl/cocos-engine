@@ -5,7 +5,7 @@ const path = require('path');
 const { PNG } = require('pngjs');
 
 const DEFAULT_SECTOR_SIZE = 4096;
-// Total X * Y sectors; must match native LandscapeConfig.h.
+// Total X * Y sectors; must match native Config.h.
 const MAX_SECTOR_COUNT = 64;
 const DEFAULT_TILE_SIZE = 129;
 const DEFAULT_MAX_LEVEL = 5;

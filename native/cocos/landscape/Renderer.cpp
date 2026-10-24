@@ -21,6 +21,8 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 ****************************************************************************/
+#include "landscape/Renderer.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,16 +35,20 @@
 #include "core/assets/RenderingSubMesh.h"
 #include "core/geometry/AABB.h"
 #include "core/scene-graph/Node.h"
-#include "landscape/LandscapeRenderer.h"
+#include "landscape/DecalRenderer.h"
 #include "landscape/GridMesh.h"
+#include "landscape/Asset.h"
+#include "landscape/Schedule.h"
+#include "landscape/Quadtree.h"
 #include "landscape/MaterialLibrary.h"
-#include "landscape/SourceDataManager.h"
+#include "landscape/Residency.h"
 #include "landscape/VTRenderer.h"
 #include "math/Vec4.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "renderer/gfx-base/states/GFXSampler.h"
+#include "scene/Model.h"
 #include "scene/Pass.h"
 #include "scene/RenderScene.h"
 
@@ -94,7 +100,8 @@ void setRuntimeTexture(Material *material, const char *name, gfx::Texture *textu
 
 } // namespace
 
-LandscapeRenderer::LandscapeRenderer() = default;
+LandscapeRenderer::LandscapeRenderer(Quadtree &quadtree)
+: _quadtree(quadtree) {}
 
 LandscapeRenderer::~LandscapeRenderer() {
     destroy();
@@ -132,9 +139,9 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     _instanceAttributeScratch = Float32Array(4);
     _asset = asset;
     _data = asset->data();
-    _sourceData = std::make_unique<SourceDataManager>();
-    if (!_sourceData->init(device, asset, config::PAGE_POOL_LAYERS, _heightUnorm)) {
-        _sourceData.reset();
+    _residency = std::make_unique<LandscapeResidency>();
+    if (!_residency->init(device, asset, config::PAGE_POOL_LAYERS, _heightUnorm)) {
+        _residency.reset();
         return false;
     }
     _materialLibrary = std::make_unique<MaterialLibrary>();
@@ -145,12 +152,12 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
         return false;
     }
     _vtRenderer = std::make_unique<VTRenderer>();
-    if (!_vtRenderer->init(*asset, *_sourceData, *_materialLibrary, *_decals)) {
+    if (!_vtRenderer->init(*asset, *_residency, *_materialLibrary, *_decals)) {
         CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
         _vtRenderer.reset();
         return false;
     }
-    _schedule = std::make_unique<LandscapeSchedule>(*asset, *_sourceData, *_vtRenderer);
+    _schedule = std::make_unique<LandscapeSchedule>(*asset, *_residency, *_vtRenderer, _quadtree);
     _decals->setEnabled(_debugData.decal3DEnabled);
     _decals->setWireframe(_debugData.wireframe);
     _decals->setCastShadow(_castShadow);
@@ -158,6 +165,10 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     bindRuntimeTextures();
     updateMaterialProperties();
     return true;
+}
+
+bool LandscapeRenderer::isReady() const {
+    return _schedule->ready();
 }
 
 void LandscapeRenderer::setLodRanges(const ccstd::vector<float> &morphStart, const ccstd::vector<float> &morphEnd) {
@@ -181,14 +192,14 @@ void LandscapeRenderer::bindRuntimeTextures() {
     // Bind full VT textures with anisotropic mip filtering for terrain and decals.
     auto &vt = *_vtRenderer;
     for (auto *material : surfaceMaterials()) {
-        setRuntimeTexture(material, "holeSplatmap", _sourceData->splatArray(), _sourceData->splatSampler());
-        setRuntimeTexture(material, "heightmap", _sourceData->heightArray(), _sourceData->heightSampler());
+        setRuntimeTexture(material, "holeSplatmap", _residency->splatArray(), _residency->splatSampler());
+        setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _sourceData->splatSampler());
+        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
         setRuntimeTexture(material, "vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
     }
     for (auto *material : _decals->materials()) {
-        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _sourceData->heightSampler());
+        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
     }
 }
 
@@ -282,10 +293,10 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
 
     const auto region = _data.nodeRegion(node.address());
     gridParams.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
-    const auto edges = _schedule->currentTree().edgeMasks(node.address());
+    const auto edges = _quadtree.edgeMasks(node.address());
     gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edges.coarser), static_cast<float>(edges.finer), 0};
 
-    const auto tile = _sourceData->resolve(node.address());
+    const auto tile = _residency->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
                "[Landscape] unprepared exact height source: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
                node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
@@ -293,7 +304,7 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
     // z = source tile size, w = shared height/splat array layer. For LODs finer than the
     // generated tile level, keep the complete source-tile range here: the
     // shader's local position selects the corresponding subregion of that tile.
-    gridParams.tile = _sourceData->shaderParams(tile);
+    gridParams.tile = _residency->shaderParams(tile);
     return gridParams;
 }
 
@@ -310,14 +321,14 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
     model->updateWorldBound();
 }
 
-void LandscapeRenderer::preparePasses(ExpectedTree expected) {
+void LandscapeRenderer::preparePasses() {
     const auto frame = Root::getInstance()->getFrameCount();
     auto *oldMappings = _vtRenderer->pageTable().texture();
-    _schedule->update(std::move(expected), _viewPosition - _node->getWorldPosition(), frame);
+    _schedule->update(frame);
     if (oldMappings != _vtRenderer->pageTable().texture()) {
         bindRuntimeTextures();
     }
-    if (!_schedule->currentTree().changedNodes().empty()) {
+    if (!_quadtree.changedNodes().empty()) {
         syncTerrainModels();
     }
     _decals->updateView(_viewPosition);
@@ -345,10 +356,10 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool
             decalLift = std::max(decalLift, layer.heightScale);
         }
     }
-    _schedule->currentTree().cull([&](NodeAddress address, bool leaf) {
+    _quadtree.cull([&](NodeAddress address, bool leaf) {
         if (!leaf) {
-            const auto node = _schedule->geometry(address);
-            const auto region = _data.nodeRegion(address);
+            const auto node = _quadtree.geometry(address);
+            const auto region = _quadtree.region(address);
             // Include the bound source's height range (also for shared sources
             // below minTileLevel) and raised decals before pruning a subtree.
             const float top = node.maxY + decalLift;
@@ -379,7 +390,7 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool
                     return false;
                 }
             }
-            _decals->collectPassModels(_schedule->currentTree().nodes().at(address.key()).geometry, frustum, shadow, models);
+            _decals->collectPassModels(_quadtree.nodes().at(address.key()).geometry, frustum, shadow, models);
         }
         return true;
     });
@@ -430,8 +441,8 @@ void LandscapeRenderer::syncTerrainModels() {
     // Every committed node uses the same full grid. Neighbors only refresh the
     // morph/stitch edge masks; material changes update the mapping without replacing models.
     ccstd::vector<uint32_t> changedMappings;
-    const auto &changed = _schedule->currentTree().changedNodes();
-    const auto &nodes = _schedule->currentTree().nodes();
+    const auto &changed = _quadtree.changedNodes();
+    const auto &nodes = _quadtree.nodes();
     changedMappings.reserve(changed.size());
     // Release removed owners before assigning their blocks to new LOD nodes.
     for (const auto key : changed) {
@@ -525,7 +536,7 @@ void LandscapeRenderer::refreshTerrainMaterials() {
         const auto &draw = entry.second;
         if (draw.model) {
             draw.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
-            const auto &node = _schedule->currentTree().nodes().at(entry.first).geometry;
+            const auto &node = _quadtree.nodes().at(entry.first).geometry;
             resolveGridParams(node, static_cast<uint32_t>(draw.mapping)).apply(draw.model, _instanceAttributeScratch);
         }
     }
@@ -601,7 +612,7 @@ void LandscapeRenderer::destroy() {
     _vtRenderer.reset();
     _decals.reset();
 
-    _sourceData.reset();
+    _residency.reset();
     _asset = nullptr;
     _mesh = nullptr;
     _materialSolid = nullptr;

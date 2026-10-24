@@ -26,55 +26,232 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
-#include "core/geometry/AABB.h"
 #include "core/geometry/Frustum.h"
-#include "landscape/LandscapeAsset.h"
+#include "landscape/Asset.h"
 
 namespace cc {
 namespace landscape {
 
-namespace {
-float distanceToAABB(const Vec3 &point, const geometry::AABB &box) {
-    const Vec3 &center = box.getCenter();
-    const Vec3 &halfExtents = box.getHalfExtents();
-    const float dx = std::max(0.0F, std::abs(point.x - center.x) - halfExtents.x);
-    const float dy = std::max(0.0F, std::abs(point.y - center.y) - halfExtents.y);
-    const float dz = std::max(0.0F, std::abs(point.z - center.z) - halfExtents.z);
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-float maxDistanceToAABB(const Vec3 &point, const geometry::AABB &box) {
-    const Vec3 &center = box.getCenter();
-    const Vec3 &halfExtents = box.getHalfExtents();
-    const float dx = std::abs(point.x - center.x) + halfExtents.x;
-    const float dy = std::abs(point.y - center.y) + halfExtents.y;
-    const float dz = std::abs(point.z - center.z) + halfExtents.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-} // namespace
-
-Quadtree::Quadtree() {
-    _box = ccnew geometry::AABB();
-}
-
-Quadtree::~Quadtree() = default;
-
 bool Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
-    if (!asset.valid() || lodQualityScale <= 0.0F) {
+    return asset.valid() && init(asset.data(), asset.heightRanges(), lodQualityScale);
+}
+
+bool Quadtree::init(const LandscapeData &data, const ccstd::vector<HeightRange> &heightRanges, float lodQualityScale) {
+    if (!data.valid() || lodQualityScale <= 0.0F) {
         return false;
     }
-    _data = asset.data();
-    _selected.clear();
-    _nodeIndexLayout = NodeIndexLayout(_data);
-    const auto &heightRanges = asset.heightRanges();
+    _data = data;
+    _nodeIndexLayout = NodeIndexLayout(data);
     if (heightRanges.size() != _nodeIndexLayout.nodeCount()) {
         return false;
     }
     _heightRanges = heightRanges;
+    _nodes.clear();
+    _changed.clear();
+    _rootRanges.clear();
+    _passes.clear();
+    _passCount = 0;
+    _rootLevel = data.maxLevel;
+    uint32_t sectors = 1;
+    while (sectors < std::max(data.sectorsX, data.sectorsZ)) {
+        sectors *= 2;
+        ++_rootLevel;
+    }
+    buildRoot(root());
     computeRanges(lodQualityScale);
     return true;
+}
+
+uint8_t Quadtree::childMask(NodeAddress node) const {
+    if (node.level == 0) {
+        return 0;
+    }
+    if (node.level <= _data.maxLevel) {
+        return config::ALL_QUADRANTS;
+    }
+    uint8_t mask = 0;
+    const auto shift = node.level - 1 - _data.maxLevel;
+    for (uint32_t q = 0; q < 4; ++q) {
+        const auto next = child(node, q);
+        if ((next.x << shift) < _data.sectorsX && (next.z << shift) < _data.sectorsZ) {
+            mask |= static_cast<uint8_t>(1U << q);
+        }
+    }
+    return mask;
+}
+
+LandscapeRegion Quadtree::region(NodeAddress node) const {
+    const float size = std::ldexp(_data.sectorSize, static_cast<int>(node.level) - static_cast<int>(_data.maxLevel));
+    return {node.x * size, node.z * size, size};
+}
+
+HeightRange Quadtree::heightRange(NodeAddress node) const {
+    if (node.level > _data.maxLevel) {
+        return _rootRanges.at(node.key());
+    }
+    return _heightRanges[_nodeIndexLayout.globalNodeIndex(node.level, node.x, node.z)];
+}
+
+HeightRange Quadtree::buildRoot(NodeAddress node) {
+    if (node.level == _data.maxLevel) {
+        Node leaf;
+        leaf.geometry = geometry(node);
+        _nodes.emplace(node.key(), std::move(leaf));
+        return heightRange(node);
+    }
+    HeightRange bounds{std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
+    const auto mask = childMask(node);
+    for (uint32_t q = 0; q < 4; ++q) {
+        if (mask & (1U << q)) {
+            const auto next = buildRoot(child(node, q));
+            bounds.minY = std::min(bounds.minY, next.minY);
+            bounds.maxY = std::max(bounds.maxY, next.maxY);
+        }
+    }
+    _rootRanges.emplace(node.key(), bounds);
+    return bounds;
+}
+
+QuadNode Quadtree::geometry(NodeAddress node) const {
+    auto bounds = heightRange(node);
+    if (node.level < _data.minTileLevel) {
+        const auto source = heightRange(node.ancestor(_data.minTileLevel));
+        bounds.minY = std::min(bounds.minY, source.minY);
+        bounds.maxY = std::max(bounds.maxY, source.maxY);
+    }
+    return {node.level, node.x, node.z, bounds.minY, bounds.maxY};
+}
+
+void Quadtree::beginUpdate(const Vec3 &camera, const Vec3 &worldOrigin) {
+    const Vec3 local = camera - worldOrigin;
+    _viewChanged = local != _camera || worldOrigin != _worldOrigin;
+    _camera = local;
+    _worldOrigin = worldOrigin;
+    _passCount = 0;
+}
+
+void Quadtree::includePass(const geometry::Frustum &frustum, bool preloadNearby) {
+    if (_passCount == _passes.size()) {
+        _passes.emplace_back();
+        _viewChanged = true;
+    }
+    auto &pass = _passes[_passCount++];
+    _viewChanged |= pass.preloadNearby != preloadNearby;
+    pass.preloadNearby = preloadNearby;
+    for (size_t i = 0; i < pass.planes.size(); ++i) {
+        const auto &plane = *frustum.planes[i];
+        const Vec4 value{plane.n.x, plane.n.y, plane.n.z, plane.d};
+        _viewChanged |= pass.planes[i] != value;
+        pass.planes[i] = value;
+    }
+}
+
+void Quadtree::endUpdate() {
+    _viewChanged |= _passCount != _passes.size();
+    _passes.resize(_passCount);
+}
+
+float Quadtree::distance(NodeAddress node) const {
+    const auto bounds = heightRange(node);
+    const auto area = region(node);
+    const float x = std::max({area.x - _camera.x, _camera.x - area.x - area.size, 0.0F});
+    const float y = std::max({bounds.minY - _camera.y, _camera.y - bounds.maxY, 0.0F});
+    const float z = std::max({area.z - _camera.z, _camera.z - area.z - area.size, 0.0F});
+    return x * x + y * y + z * z;
+}
+
+bool Quadtree::visible(NodeAddress node, bool colorOnly) const {
+    const float minDistance = distance(node);
+    const float range = _lodRange[std::min(node.level, _data.maxLevel)];
+    if (minDistance > range * range) {
+        return false;
+    }
+    const float preload = _lodRange[std::min(1U, _data.maxLevel)];
+    const auto bounds = heightRange(node);
+    const auto area = region(node);
+    const Vec3 center{area.x + area.size * 0.5F + _worldOrigin.x, (bounds.minY + bounds.maxY) * 0.5F + _worldOrigin.y, area.z + area.size * 0.5F + _worldOrigin.z};
+    const Vec3 extent{area.size * 0.5F, (bounds.maxY - bounds.minY) * 0.5F, area.size * 0.5F};
+    for (const auto &pass : _passes) {
+        if (colorOnly && !pass.preloadNearby) {
+            continue;
+        }
+        if (pass.preloadNearby && minDistance <= preload * preload) {
+            return true;
+        }
+        // Same conservative six-plane test as AABB::aabbFrustum. Store plane
+        // values so rotating/replacing a pass invalidates settled scheduling.
+        const bool intersects = std::all_of(pass.planes.begin(), pass.planes.end(), [&](const Vec4 &plane) {
+            const float radius = extent.x * std::abs(plane.x) + extent.y * std::abs(plane.y) + extent.z * std::abs(plane.z);
+            return center.x * plane.x + center.y * plane.y + center.z * plane.z + radius >= plane.w;
+        });
+        if (intersects) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Quadtree::needsSplit(NodeAddress node) const {
+    if (node.level == 0 || !visible(node, false)) {
+        return false;
+    }
+    // Inspect only the next level. Loading never creates a separate target tree.
+    for (uint32_t q = 0; q < 4; ++q) {
+        if (visible(child(node, q), false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ccstd::vector<Quadtree::Candidate> Quadtree::candidates() {
+    ccstd::vector<Candidate> result;
+    _visibilityDistanceTooSmall = false;
+    cull([&](NodeAddress node, bool leaf) {
+        if (node.level > _data.maxLevel) {
+            return true;
+        }
+        const bool refine = needsSplit(node);
+        const bool color = visible(node, true);
+        const float nearDistance = distance(node);
+        if (leaf) {
+            if (refine) {
+                result.push_back({node, Operation::SPLIT, color, nearDistance});
+            }
+            result.push_back({node, Operation::REFRESH, color, nearDistance});
+            if (node.level < _data.maxLevel && visible(node, false)) {
+                const auto bounds = heightRange(node);
+                const auto area = region(node);
+                const float x = std::max(std::abs(area.x - _camera.x), std::abs(area.x + area.size - _camera.x));
+                const float y = std::max(std::abs(bounds.minY - _camera.y), std::abs(bounds.maxY - _camera.y));
+                const float z = std::max(std::abs(area.z - _camera.z), std::abs(area.z + area.size - _camera.z));
+                const float morphStart = _lodMorphStart[node.level + 1];
+                _visibilityDistanceTooSmall |= x * x + y * y + z * z > morphStart * morphStart;
+            }
+        } else if (!refine && hasLeafChildren(node)) {
+            result.push_back({node, Operation::MERGE, color, nearDistance});
+        }
+        return true;
+    });
+    std::sort(result.begin(), result.end(), [](const Candidate &a, const Candidate &b) {
+        if ((a.operation == Operation::MERGE) != (b.operation == Operation::MERGE)) {
+            return a.operation == Operation::MERGE;
+        }
+        if (a.visible != b.visible) {
+            return a.visible;
+        }
+        if (a.distance != b.distance) {
+            return a.distance < b.distance;
+        }
+        if (a.operation != b.operation) {
+            return a.operation < b.operation;
+        }
+        return a.node.key() < b.node.key();
+    });
+    return result;
 }
 
 void Quadtree::computeRanges(float lodQualityScale) {
@@ -111,152 +288,11 @@ void Quadtree::computeRanges(float lodQualityScale) {
     }
 }
 
-void Quadtree::nodeHeightRange(uint32_t level, uint32_t ix, uint32_t iz, float &minY, float &maxY) const {
-    minY = _data.minHeight();
-    maxY = _data.maxHeight();
-    if (_heightRanges.empty() || _sectorX >= _data.sectorsX || _sectorZ >= _data.sectorsZ ||
-        level > _data.maxLevel) {
-        return;
-    }
-    const size_t index = _nodeIndexLayout.sectorNodeIndex(_sectorX, _sectorZ, level, ix, iz);
-    if (index >= _heightRanges.size()) {
-        return;
-    }
-    const HeightRange &range = _heightRanges[index];
-    minY = range.minY;
-    maxY = range.maxY;
-}
-
-const ccstd::vector<QuadNode> &Quadtree::select(const Vec3 &camPos, const geometry::Frustum &frustum, const Vec3 &landscapeWorldOrigin, uint32_t sectorX, uint32_t sectorZ, bool preloadNearby) {
-    _camPos = camPos;
-    _frustum = &frustum;
-    _landscapeWorldOrigin = landscapeWorldOrigin;
-    _sectorX = sectorX;
-    _sectorZ = sectorZ;
-    _selected.clear();
-    _visibilityDistanceTooSmall = false;
-    if (!_data.valid() || sectorX >= _data.sectorsX || sectorZ >= _data.sectorsZ) {
-        return _selected;
-    }
-    // Keep the two nearest LOD bands ready in every direction. This is a
-    // residency demand only; actual color/shadow draws still use their frustum.
-    _preloadDistance = preloadNearby ? _lodRange[std::min(1U, _data.maxLevel)] : -1.0F;
-    traverse(_data.maxLevel, 0U, 0U);
-    return _selected;
-}
-
-Quadtree::SelectResult Quadtree::traverse(uint32_t level, uint32_t ix, uint32_t iz) {
-    const float size = _data.nodeSize(level);
-    float minY = _data.minHeight();
-    float maxY = _data.maxHeight();
-    nodeHeightRange(level, ix, iz, minY, maxY);
-    const auto address = _data.nodeInSector(_sectorX, _sectorZ, level, ix, iz);
-    const auto region = _data.nodeRegion(address);
-    const float x = region.x + _landscapeWorldOrigin.x;
-    const float z = region.z + _landscapeWorldOrigin.z;
-    _box->setCenter(x + size * 0.5F, (minY + maxY) * 0.5F + _landscapeWorldOrigin.y, z + size * 0.5F);
-    _box->setHalfExtents(size * 0.5F, (maxY - minY) * 0.5F, size * 0.5F);
-
-    const float minDistance = distanceToAABB(_camPos, *_box);
-    if (minDistance > _preloadDistance && !_box->aabbFrustum(*_frustum)) {
-        return SelectResult::CULLED;
-    }
-
-    if (minDistance > _lodRange[level]) {
-        return SelectResult::OUT_OF_RANGE;
-    }
-    const float maxDistance = maxDistanceToAABB(_camPos, *_box);
-    const auto addSelection = [&](uint8_t quadrantMask) {
-        _selected.push_back(QuadNode{level, address.x, address.z, minY, maxY, quadrantMask});
-        if (level < _data.maxLevel && maxDistance > _lodMorphStart[level + 1U]) {
-            _visibilityDistanceTooSmall = true;
-        }
-    };
-
-    if (level == 0U || minDistance > _lodRange[level - 1U]) {
-        addSelection(config::ALL_QUADRANTS);
-        return SelectResult::SELECTED;
-    }
-
-    uint8_t parentMask = 0U;
-    for (uint32_t dz = 0; dz < 2U; ++dz) {
-        for (uint32_t dx = 0; dx < 2U; ++dx) {
-            const uint32_t quadrant = dz * 2U + dx;
-            const auto childResult = traverse(level - 1U, ix * 2U + dx, iz * 2U + dz);
-            if (childResult == SelectResult::OUT_OF_RANGE) {
-                parentMask |= static_cast<uint8_t>(1U << quadrant);
-            }
-        }
-    }
-    if (parentMask != 0U) {
-        addSelection(parentMask);
-    }
-    return SelectResult::SELECTED;
-}
-
-void ExpectedTree::include(const ccstd::vector<QuadNode> &nodes, bool colorPass) {
-    for (const auto &node : nodes) {
-        auto address = node.address();
-        while (address.level < _maxLevel) {
-            address = address.ancestor(address.level + 1);
-            auto &priority = _demands[address.key()].refinement;
-            priority = std::max(priority, _maxLevel - node.level + 1);
-        }
-        if (!colorPass) {
-            continue;
-        }
-        // Visibility is scheduling priority, not draw culling. Preserve conservative
-        // overlap for partially selected nodes and their descendants.
-        address = node.address();
-        _demands[address.key()].covered = true;
-        for (;;) {
-            _demands[address.key()].containsVisible = true;
-            if (address.level == _maxLevel) {
-                break;
-            }
-            address = address.ancestor(address.level + 1);
-        }
-    }
-}
-
-uint32_t ExpectedTree::refinementPriority(NodeAddress node) const {
-    const auto it = _demands.find(node.key());
-    return it == _demands.end() ? 0 : it->second.refinement;
-}
-
-bool ExpectedTree::visible(NodeAddress node) const {
-    const auto it = _demands.find(node.key());
-    if (it != _demands.end() && it->second.containsVisible) {
-        return true;
-    }
-    while (node.level < _maxLevel) {
-        node = node.ancestor(node.level + 1);
-        const auto ancestor = _demands.find(node.key());
-        if (ancestor != _demands.end() && ancestor->second.covered) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void CurrentTree::init(const LandscapeData &data) {
-    _data = data;
-    _nodes.clear();
-    _changed.clear();
-    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
-        for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            Node node;
-            node.geometry = {data.maxLevel, x, z, data.minHeight(), data.maxHeight()};
-            _nodes.emplace(node.geometry.address().key(), std::move(node));
-        }
-    }
-}
-
-NodeAddress CurrentTree::child(NodeAddress node, uint32_t quadrant) {
+NodeAddress Quadtree::child(NodeAddress node, uint32_t quadrant) {
     return {node.level - 1, node.x * 2 + (quadrant & 1), node.z * 2 + (quadrant >> 1)};
 }
 
-bool CurrentTree::hasLeafChildren(NodeAddress node) const {
+bool Quadtree::hasLeafChildren(NodeAddress node) const {
     if (node.level == 0) {
         return false;
     }
@@ -268,27 +304,12 @@ bool CurrentTree::hasLeafChildren(NodeAddress node) const {
     return true;
 }
 
-ccstd::vector<CurrentTree::Candidate> CurrentTree::candidates(const ExpectedTree &expected) const {
-    ccstd::vector<Candidate> result;
-    cull([&](NodeAddress node, bool leaf) {
-        const bool refine = expected.refinementPriority(node) != 0;
-        if (leaf) {
-            if (refine) {
-                result.push_back({node, Operation::SPLIT});
-            }
-            // A refused split must not prevent this leaf's material from updating.
-            result.push_back({node, Operation::REFRESH});
-        } else if (!refine && hasLeafChildren(node)) {
-            result.push_back({node, Operation::MERGE});
-        }
-        return true;
-    });
-    return result;
-}
-
-bool CurrentTree::plan(Candidate candidate, Change &change) const {
+bool Quadtree::plan(Candidate candidate, Change &change) const {
     change = {};
     const auto node = candidate.node;
+    if (node.level > _data.maxLevel) {
+        return false;
+    }
     if (candidate.operation == Operation::REFRESH) {
         if (!_nodes.count(node.key())) {
             return false;
@@ -340,7 +361,7 @@ bool CurrentTree::plan(Candidate candidate, Change &change) const {
     return true;
 }
 
-void CurrentTree::commit(const Change &change, ccstd::vector<Node> &prepared) {
+void Quadtree::commit(const Change &change, ccstd::vector<Node> &prepared) {
     // Mark old and new neighbors: both sides of a changed LOD boundary need
     // refreshed morph masks, even when their geometry and materials stay put.
     for (const auto node : change.removed) {
@@ -366,8 +387,8 @@ void CurrentTree::commit(const Change &change, ccstd::vector<Node> &prepared) {
     }
 }
 
-NodeAddress CurrentTree::at(uint32_t x, uint32_t z) const {
-    NodeAddress node{_data.maxLevel, x >> _data.maxLevel, z >> _data.maxLevel};
+NodeAddress Quadtree::at(uint32_t x, uint32_t z) const {
+    NodeAddress node{_rootLevel, x >> _rootLevel, z >> _rootLevel};
     while (!_nodes.count(node.key()) && node.level > 0) {
         --node.level;
         node.x = x >> node.level;
@@ -376,7 +397,7 @@ NodeAddress CurrentTree::at(uint32_t x, uint32_t z) const {
     return node;
 }
 
-CurrentTree::EdgeMasks CurrentTree::edgeMasks(NodeAddress node) const {
+Quadtree::EdgeMasks Quadtree::edgeMasks(NodeAddress node) const {
     EdgeMasks masks;
     neighbors(node, [&](NodeAddress neighbor, uint32_t edge) {
         if (neighbor.level > node.level) {

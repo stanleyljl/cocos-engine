@@ -28,9 +28,10 @@ try {
   const region = gl.getAttribLocation(p,'a_vtRegion');
   const ubo = gl.createBuffer(); gl.bindBufferBase(gl.UNIFORM_BUFFER,0,ubo);
   gl.uniformBlockBinding(p,gl.getUniformBlockIndex(p,'Constants'),0);
-  const constants = new Float32Array(2336);
-  constants.set([1,1,0,1],0); constants.set([0,0,0,0],4);
-  constants.set([1,1,0,0],136); constants.set([1,3,2,0],140);
+  const constants = new Float32Array(2320);
+  constants.set([1,1,0,1],0);
+  constants.set([1,1,0,0],132);
+  constants.set([1,3,2,0],136);
   const tex = (name,unit,target) => {
     gl.activeTexture(gl.TEXTURE0+unit); const t=gl.createTexture(); gl.bindTexture(target,t);
     gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
@@ -49,13 +50,9 @@ try {
   tex('decalNormalMap',7,gl.TEXTURE_2D_ARRAY);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,128,255,255]));
   tex('decalIndexMap',10,gl.TEXTURE_2D);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
   const sourceTable=tex('normalSourceMap',11,gl.TEXTURE_2D);
-  const sourceRegions=new Float32Array(16*4);
-  for(let q=0;q<16;q++)sourceRegions.set([0,0,1,Math.min(1,Math.max(0,q%4-1))+2*Math.min(1,Math.max(0,Math.floor(q/4)-1))],q*4);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,16,1,0,gl.RGBA,gl.FLOAT,sourceRegions);
-  const cliffSourceTable=tex('cliffSourceMap',12,gl.TEXTURE_2D);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,1,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,1,0]));
-  const cliffHeight=tex('terrainHeightMap',13,gl.TEXTURE_2D_ARRAY);
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([0,0]));
+  const sourceRegions=new Float32Array(4*4);
+  for(let q=0;q<4;q++)sourceRegions.set([0,0,1,q],q*4);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,4,1,0,gl.RGBA,gl.FLOAT,sourceRegions);
   const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
   gl.activeTexture(gl.TEXTURE0+5);
   for(let i=0;i<2;i++) { const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,null); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0); }
@@ -78,9 +75,11 @@ try {
     }
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,samples);
     for (let i = 0; i < 32; i++) {
-      constants.set([scale, 1, 0, 0], 8 + i * 4);
+      constants.set([scale, 1, 0, 0], 4 + i * 4);
     }
-    constants[140]=strength; gl.bindBuffer(gl.UNIFORM_BUFFER,ubo); gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
+    constants[136]=strength;
+    gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);
+    gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,x-span*.5,y-span*.5,span,0); gl.drawArrays(gl.TRIANGLES,0,6);
     const output=[]; for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(slot%atlasCount,Math.floor(slot/atlasCount),1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);output.push(...b);}
     if(gl.getError()!==gl.NO_ERROR) throw new Error('WebGL error'); return output;
@@ -91,7 +90,7 @@ try {
     const spatial = x + y <= 1 ? [1-x-y, x, y, 0] : [0, 1-y, 1-x, x+y-1];
     const w = new Array(8).fill(0);
     pairs.forEach(([a,b,t],i)=>{w[a]+=spatial[i]*(1-t/31);w[b]+=spatial[i]*t/31;});
-    return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(128,128,255,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
+    return [0,1,2].map(c=>255*w.reduce((s,t,i)=>s+t*(colors[i][c]/255)**2,0)).concat(255,128,128,...[2,3].map(c=>w.reduce((s,t,i)=>s+t*normals[i][c],0)));
   };
   const repeat=p=>[p,p,p,p];
   close(render(repeat([0,1,0])),expected(repeat([0,0,0])),'pure bottom');
@@ -99,7 +98,9 @@ try {
   gl.activeTexture(gl.TEXTURE3);
   const quadrants = [[255,0,0,255],[0,255,0,255],[0,0,255,255],[255,255,255,255]];
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(quadrants.flat()));
-  constants[136]=1/8;constants[137]=1/4;constants[138]=1;
+  constants[132]=1/8;
+  constants[133]=1/4;
+  constants[134]=1;
   // Each quadrant supplies raw modulation gain, not a target color.
   for(let z=0;z<2;z++)for(let x=0;x<2;x++){
     const tint=quadrants[z*2+x];
@@ -108,7 +109,7 @@ try {
   }
   gl.activeTexture(gl.TEXTURE3);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
-  constants.set([1,1,0,0],136);
+  constants.set([1,1,0,0],132);
 
   close(render(repeat([1,0,31])),expected(repeat([0,0,0])),'pure top');
   close(render(repeat([3,3,14])),expected(repeat([3,3,14])),'identical IDs');
@@ -167,59 +168,59 @@ try {
   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D_ARRAY,splat);
   gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.R16UI,129,129,1,0,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(129*129));
   const readPixel=(x,y)=>{const out=[];for(let i=0;i<2;i++){gl.readBuffer(gl.COLOR_ATTACHMENT0+i);const b=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);out.push(...b);}return out;};
-  const compose=(baked,detail)=>{
+  const compose=(detail)=>{
     gl.useProgram(p);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.viewport(0,0,2,2);
-    constants.set([2,2,0,1],0);constants[4]=baked?1:0;
+    constants.set([2,2,0,1],0);
     gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.vertexAttrib4f(region,0,0,1,0);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtSource'),0,0,1,0);
-    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,constants?.[2192]||0,0,0);
+    gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,constants?.[2188]||0,0,0);
     gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D_ARRAY,nra);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:8},()=>[...detail,80,210]).flat()));
     gl.drawArrays(gl.TRIANGLES,0,6);
     return Array.from({length:4},(_,q)=>readPixel(q%2,q>>1));
   };
   for(const detail of [[128,128],[204,128],[128,30],[250,128],[40,200]]){
-    const off=compose(false,detail),on=compose(true,detail);
+    const on=compose(detail);
     const dx=detail[0]/127.5-1,dy=detail[1]/127.5-1;
     const d=unit([dx,dy,Math.sqrt(Math.max(0,1-dx*dx-dy*dy))]);
     for(let q=0;q<4;q++){
-      close([off[q][4],off[q][3],off[q][5]],enc(d),'OFF tangent normal');
       const ng=decode(terrainBytes.slice(q*2,q*2+2)),t=unit([ng[1],-ng[0],0]);
       const bt=[ng[1]*t[2]-ng[2]*t[1],ng[2]*t[0]-ng[0]*t[2],ng[0]*t[1]-ng[1]*t[0]];
-      const expected=unit(ng.map((n,i)=>t[i]*d[0]+bt[i]*d[1]+n*d[2]));
-      close([on[q][4],on[q][3],on[q][5]],enc(expected),'ON quadrant '+q);
-      close(on[q].slice(0,3),off[q].slice(0,3),'unchanged color',0);
-      close(on[q].slice(6),off[q].slice(6),'unchanged roughness and AO',0);
+      const expectedNormal=unit(ng.map((n,i)=>t[i]*d[0]+bt[i]*d[1]+n*d[2]));
+      close([on[q][4],on[q][3],on[q][5]],enc(expectedNormal),'composed quadrant '+q);
+      close(on[q].slice(0,3),expected(repeat([0,0,0])).slice(0,3),'unchanged color');
+      close(on[q].slice(6),[80,210],'unchanged roughness and AO',0);
     }
   }
-  const below=compose(true,[250,128])[1];
+  const below=compose([250,128])[1];
   if(below[3]>=128)throw new Error('Negative vertical normal was lost');checks++;
 
   // An opaque decal must replace the material normal BEFORE the terrain frame
   // is applied. This also covers the normal consumed by raised decal meshes.
-  const decalReference=compose(true,[204,128]);
-  constants.set([0,0,1,0],144);constants[2192]=1;
+  const decalReference=compose([204,128]);
+  constants.set([0,0,1,0],140);
+  constants[2188]=1;
   gl.activeTexture(gl.TEXTURE6);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,255]));
   gl.activeTexture(gl.TEXTURE7);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([204,128,80,210]));
-  const decalBaked=compose(true,[30,220]);
+  const decalBaked=compose([30,220]);
   for(let q=0;q<4;q++){
     close(decalBaked[q].slice(3),decalReference[q].slice(3),'decal and geometry normal composition order');
     close(decalBaked[q].slice(0,3),[50,25,10],'decal color survives signed normal packing');
   }
-  constants[2192]=0;
+  constants[2188]=0;
 
-  // Render a page INCLUDING its gutters. Sixteen distinct source regions
-  // expose accidental edge clamping or incorrect neighbor/row selection.
+  // Render a page including gutters. Four padded source tiles retain the
+  // nearest interior quadrant outside the page boundary.
   {
-    const size=12,bytes=new Uint8Array(16*2);
-    for(let q=0;q<16;q++){
-      bytes.set([75+(q%4)*30,80+Math.floor(q/4)*28],q*2);
-      sourceRegions.set([(q%4-1)*.5,(Math.floor(q/4)-1)*.5,.5,q],q*4);
+    const size=12,bytes=new Uint8Array(4*2);
+    for(let q=0;q<4;q++){
+      bytes.set([75+(q%2)*30,80+Math.floor(q/2)*28],q*2);
+      sourceRegions.set([(q%2)*.5,Math.floor(q/2)*.5,.5,q],q*4);
     }
     gl.useProgram(p);gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,16,0,gl.RG,gl.UNSIGNED_BYTE,bytes);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,bytes);
     gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,4,1,gl.RGBA,gl.FLOAT,sourceRegions);
     gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D_ARRAY,nra);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,8,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:8},()=>[128,128,80,210]).flat()));
     gl.activeTexture(gl.TEXTURE5);
@@ -229,113 +230,15 @@ try {
       gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0);
     }
     gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,0,0,0);
-    constants.set([size,size,2,1],0);constants[4]=1;
+    constants.set([size,size,2,1],0);
     gl.bindBuffer(gl.UNIFORM_BUFFER,ubo);gl.bufferData(gl.UNIFORM_BUFFER,constants,gl.DYNAMIC_DRAW);
     gl.viewport(0,0,size,size);gl.drawArrays(gl.TRIANGLES,0,6);
     for(let y=0;y<size;y++)for(let x=0;x<size;x++){
-      const cell=v=>Math.max(0,Math.min(3,Math.floor(((v+.5)-2)/8*2)+1));
-      const q=cell(x)+4*cell(y),pixel=readPixel(x,y);
+      const cell=v=>Math.max(0,Math.min(1,Math.floor(((v+.5)-2)/8*2)));
+      const q=cell(x)+2*cell(y),pixel=readPixel(x,y);
       close([pixel[4],pixel[3],pixel[5]],enc(decode(bytes.slice(q*2,q*2+2))),'normal gutter neighbor '+x+','+y,3);
     }
     // Restore the original sources used below by the Base Pass baseline.
-    gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
-  }
-
-  // Exercise the actual cliff shader with nonconstant source textures: constant
-  // color tests cannot detect a reversed height byte order or wrong projection UV.
-  {
-    const materialSize=16, pixels=new Uint8Array(materialSize*materialSize*8*4);
-    for(let layer=0;layer<8;layer++)for(let y=0;y<materialSize;y++)for(let x=0;x<materialSize;x++){
-      pixels.set([24+x*13,24+y*13,50+layer*20,layer%2?255:0],((layer*materialSize+y)*materialSize+x)*4);
-    }
-    gl.useProgram(p);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
-    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D_ARRAY,ah);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.REPEAT);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,materialSize,materialSize,8,0,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
-    const setNormal=n=>{
-      gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
-      gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array(Array.from({length:4},()=>n).flat()));
-    };
-    const setHeight=value=>{
-      const h=Math.round(value*65535);gl.activeTexture(gl.TEXTURE13);gl.bindTexture(gl.TEXTURE_2D_ARRAY,cliffHeight);
-      gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array([h>>8,h&255]));
-    };
-    sourceRegions.fill(0);for(let q=0;q<16;q++)sourceRegions.set([0,0,1,0],q*4);
-    gl.activeTexture(gl.TEXTURE11);gl.bindTexture(gl.TEXTURE_2D,sourceTable);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,16,1,gl.RGBA,gl.FLOAT,sourceRegions);
-    constants.set([1,1,0,1],0);
-    constants.set([1,1,0,0],2324);constants.set([1,0,0,0],2328);constants[4]=1;
-    const material=repeat([0,0,0]);
-    const at={x:.27,y:.31,span:.01};
-    for(const n of [[255,128],[0,128],[128,255],[128,0],[210,210]]){
-      setNormal(n);setHeight(.16);
-      const low=render(material,at);setHeight(.66);const high=render(material,at);
-      if(Math.abs(high[1]-low[1])<40)throw new Error('Cliff side UV does not follow uint16 height: '+n);checks++;
-      const ref=render(material,at);
-      // Fixed reference + fixed world position: changing VT footprint or the
-      // normal source's bounds cannot shift the material phase.
-      close(render(material,{...at,span:.03}),ref,'cliff material phase across page scales',0);
-      close(render(material,{...at,sourceSize:2}),ref,'cliff UV independent of material source resolution',0);
-      const normal=unit([ref[4]/127.5-1,ref[3]/127.5-1,ref[5]/127.5-1]);
-      close(normal.map(v=>v*127.5+127.5),enc(decode(n)),'flat material recovers signed terrain normal',3);
-      close(render(repeat([0,1,16]),at),render(repeat([1,1,0]),at),'height blending retained on cliffs',1);
-      constants[4]=0;const off=render(material,at);constants[4]=1;
-      close(off.slice(0,3),ref.slice(0,3),'F11 does not change cliff color',0);
-      close([off[4],off[3],off[5]],[128,128,255],'F11 OFF keeps tangent encoding',2);
-    }
-    // An asset-defined material override uses the same layer and scale in
-    // both projection states, without recoloring it through the global map.
-    setNormal([255,128]);setHeight(.16);
-    for (const state of [1,-1]) {
-      constants.set([.65,0,0,0],2332);
-      constants[2324]=state;constants[2327]=7;
-      const override=render(material,at);
-      constants[2327]=0;
-      close(render(repeat([6,6,0]),at),override,'override layer identical in both projection states',0);
-      constants[2327]=7;constants[138]=1;
-      close(render(material,at),override,'configured override bypasses global tint',0);
-      constants[138]=0;
-    }
-    constants[2324]=1;constants[2327]=0;constants[138]=1;
-    const tintedLayer=render(repeat([6,6,0]),at);
-    constants[2327]=7;constants[2333]=1;
-    close(render(material,at),tintedLayer,'override can retain global color modulation',0);
-    constants[2327]=0;constants[138]=0;
-    const paintedSlope=render(material,at);
-    constants[2327]=7;constants[2332]=0;
-    close(render(material,at),paintedSlope,'asset slope threshold controls override coverage',0);
-    constants[2332]=.65;constants[2333]=0;
-    constants[2324]=1;constants[2327]=7;
-    setNormal([128,128]);
-    const untouchedFlat=render(material,at);constants[2327]=0;
-    close(render(material,at),untouchedFlat,'override leaves flat material unchanged',0);
-    setNormal([128,128]);setHeight(.16);
-    const flat=render(material,at);constants[2324]=0;
-    close(render(material,at),flat,'flat ground preserves planar rendering',0);
-    constants[2324]=1;constants[4]=1;
-    // Neighbor reference tiles agree at their shared endpoint, including when
-    // the bake footprint crosses the boundary. The height field is continuous.
-    setNormal([255,128]);constants[2328]=.5;
-    gl.activeTexture(gl.TEXTURE12);gl.bindTexture(gl.TEXTURE_2D,cliffSourceTable);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,2,1,0,gl.RGBA,gl.FLOAT,new Float32Array([0,0,.5,0,.5,0,.5,1]));
-    const heights=new Uint8Array(16);
-    for(let layer=0;layer<2;layer++)for(let y=0;y<2;y++)for(let x=0;x<2;x++){
-      const h=Math.round((.1+(layer+x)*.1)*65535);heights.set([h>>8,h&255],(layer*4+y*2+x)*2);
-    }
-    gl.activeTexture(gl.TEXTURE13);gl.bindTexture(gl.TEXTURE_2D_ARRAY,cliffHeight);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,2,2,2,0,gl.RG,gl.UNSIGNED_BYTE,heights);
-    close(render(material,{...at,x:.49999}),render(material,{...at,x:.50001}),'cliff reference tile seam',0);
-    // Planar decals must remain above projected materials.
-    setNormal([255,128]);constants.set([0,0,1,0],144);constants[2192]=1;
-    gl.activeTexture(gl.TEXTURE6);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([50,25,10,255]));
-    // render() sets the per-page decal count; supply it explicitly after upload.
-    render(material,at);gl.vertexAttrib4f(gl.getAttribLocation(p,'a_vtPage'),0,1,0,0);gl.drawArrays(gl.TRIANGLES,0,6);
-    close(readPixel(0,0).slice(0,3),[50,25,10],'decal stays on top of cliff projection',0);
-    constants[2192]=0;constants[2324]=0;
     gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrain);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RG8,1,1,4,0,gl.RG,gl.UNSIGNED_BYTE,terrainBytes);
   }
@@ -388,10 +291,9 @@ try {
   const fs=unlit=>[
     'precision highp float;precision highp int;precision highp sampler2DArray;',
     '#define LANDSCAPE_DEBUG_UNLIT '+unlit,'#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_MAX_LOD_LEVELS 9',
-    'uniform sampler2D vtPageMap,vtAlbedo,vtNormalRoughnessAO;uniform sampler2DArray terrainNormalMap;',
-    'uniform vec4 mainColor,terrainParams,sectorParams,morphCameraPos,vtLayout,rvtNormalParams,v_vtParams,lodMorph[9];',
-    'uniform float v_normalMorph;const float v_lod=0.0;',
-    'const vec2 v_normalUV=vec2(0.5);const float v_normalLayer=0.0;void discardLandscapeHole(){}',
+    'uniform sampler2D vtPageMap,vtAlbedo,vtNormalRoughnessAO;',
+    'uniform vec4 mainColor,terrainParams,sectorParams,morphCameraPos,vtLayout,v_vtParams,lodMorph[9];',
+    'const float v_lod=0.0;void discardLandscapeHole(){}',
     'const vec2 FSInput_texcoord=vec2(0.5,-0.5);const vec3 FSInput_worldPos=vec3(0);',
     'const vec3 FSInput_worldNormal=vec3(0,1,0),FSInput_worldTangent=vec3(1,0,0);const float FSInput_mirrorNormal=1.0;',
     'struct SurfacesMaterialData {vec4 baseColor;vec3 worldNormal;float roughness;float ao;float metallic;float specularIntensity;vec3 emissive;};',
@@ -412,15 +314,15 @@ try {
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RG8,256,1,0,gl.RG,gl.UNSIGNED_BYTE,new Uint8Array(512));
-  const baseRender=(baked,morph,n,unlit=0)=>{
+  const baseRender=(n,unlit=0)=>{
     const program=basePrograms[unlit];gl.useProgram(program);
     const pos=gl.getAttribLocation(program,'a_position');gl.enableVertexAttribArray(pos);gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
     const u=(name,...values)=>gl.uniform4f(gl.getUniformLocation(program,name),...values);
-    u('mainColor',1,1,1,1);u('vtLayout',1,1,0,0);u('v_vtParams',0,0,1,0);u('rvtNormalParams',baked?1:0,0,0,0);
+    u('mainColor',1,1,1,1);
+    u('vtLayout',1,1,0,0);
+    u('v_vtParams',0,0,1,0);
     u('sectorParams',1,1,0,0);
     gl.uniform1i(gl.getUniformLocation(program,'vtPageMap'),10);
-    gl.uniform1f(gl.getUniformLocation(program,'v_normalMorph'),morph);
-    gl.uniform1i(gl.getUniformLocation(program,'terrainNormalMap'),4);
     gl.uniform1i(gl.getUniformLocation(program,'vtAlbedo'),8);gl.uniform1i(gl.getUniformLocation(program,'vtNormalRoughnessAO'),9);
     const packed=enc(n);
     for(const [i,data]of[[0,[32,64,96,packed[1]]],[1,[packed[0],packed[2],80,210]]]){
@@ -429,17 +331,10 @@ try {
     gl.viewport(0,0,1,1);gl.drawArrays(gl.TRIANGLES,0,6);return readPixel(0,0);
   };
   for(const n of [[.4,.8,.2],[.5,-.7,.3],[-.3,.1,-.8]].map(unit)){
-    const reference=baseRender(true,0,n);
+    const reference=baseRender(n);
     close(reference.slice(4,7),enc(n),'Base Pass local-to-world normal');
-    for(const morph of [0,.3,.8,1]){
-      close(baseRender(true,morph,n),reference,'baked normal independent of geometry morph',0);
-      close(baseRender(true,morph,n).slice(0,4),[32,64,96,255],'normal Y never changes opacity',0);
-      close(baseRender(true,morph,n,1).slice(0,4),[32,64,96,255],'F7 unchanged',0);
-    }
-  }
-  for(const morph of [0,.3,.8,1]){
-    const xz=[...terrainBytes.slice(0,2)];
-    close(baseRender(false,morph,[0,0,1]).slice(4,7),enc(decode(xz)),'OFF uses the committed normal tile');
+    close(reference.slice(0,4),[32,64,96,255],'normal Y never changes opacity',0);
+    close(baseRender(n,1).slice(0,4),[32,64,96,255],'unlit preserves albedo',0);
   }
   if(gl.getError()!==gl.NO_ERROR)throw new Error('WebGL Base Pass error');
   // Execute the production lookup, including slot 255, row addressing, growth

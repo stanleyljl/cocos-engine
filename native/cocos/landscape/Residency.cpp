@@ -22,7 +22,7 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/SourceDataManager.h"
+#include "landscape/Residency.h"
 
 #include <algorithm>
 #include <cmath>
@@ -31,8 +31,8 @@
 
 #include "base/Log.h"
 #include "base/Macros.h"
-#include "landscape/LandscapeAsset.h"
-#include "landscape/LandscapeConfig.h"
+#include "landscape/Asset.h"
+#include "landscape/Config.h"
 #include "renderer/gfx-base/GFXDef-common.h"
 #include "renderer/gfx-base/GFXDef.h"
 #include "renderer/gfx-base/GFXDevice.h"
@@ -41,13 +41,13 @@
 namespace cc {
 namespace landscape {
 
-SourceDataManager::SourceDataManager() = default;
+LandscapeResidency::LandscapeResidency() = default;
 
-SourceDataManager::~SourceDataManager() {
+LandscapeResidency::~LandscapeResidency() {
     destroy();
 }
 
-bool SourceDataManager::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
+bool LandscapeResidency::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
     if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
         return false;
@@ -75,7 +75,7 @@ bool SourceDataManager::init(gfx::Device *device, LandscapeAsset *asset, uint32_
     return true;
 }
 
-void SourceDataManager::destroy() {
+void LandscapeResidency::destroy() {
     _data = {};
     _capacity = 0;
     _slots.clear();
@@ -91,7 +91,7 @@ void SourceDataManager::destroy() {
     _device = nullptr;
 }
 
-bool SourceDataManager::canReserve(const ccstd::vector<NodeAddress> &sources) const {
+bool LandscapeResidency::canReserve(const ccstd::vector<NodeAddress> &sources) const {
     if (sources.size() > _capacity) {
         return false;
     }
@@ -103,7 +103,7 @@ bool SourceDataManager::canReserve(const ccstd::vector<NodeAddress> &sources) co
     return true;
 }
 
-bool SourceDataManager::reserve(const ccstd::vector<NodeAddress> &sources) {
+bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
     if (!canReserve(sources)) {
         return false;
     }
@@ -138,7 +138,7 @@ bool SourceDataManager::reserve(const ccstd::vector<NodeAddress> &sources) {
     return true;
 }
 
-bool SourceDataManager::loadReserved(bool synchronous) {
+bool LandscapeResidency::loadReserved(bool synchronous) {
     if (_asset->loadingFailed()) {
         return false;
     }
@@ -170,7 +170,7 @@ bool SourceDataManager::loadReserved(bool synchronous) {
     return !_asset->loadingFailed();
 }
 
-void SourceDataManager::update(uint32_t budget) {
+void LandscapeResidency::update(uint32_t budget) {
     LandscapeAsset::TileData tile;
     for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
         _inFlight.erase(tile.key);
@@ -178,27 +178,27 @@ void SourceDataManager::update(uint32_t budget) {
     }
 }
 
-int SourceDataManager::resident(NodeAddress source) const {
+int LandscapeResidency::resident(NodeAddress source) const {
     const auto it = _slots.find(source.key());
     return it != _slots.end() && it->second.ready ? static_cast<int>(it->second.layer) : -1;
 }
 
-SourceDataManager::Tile SourceDataManager::resolve(NodeAddress node) const {
+LandscapeResidency::Tile LandscapeResidency::resolve(NodeAddress node) const {
     const uint32_t level = std::max(node.level, _data.minTileLevel);
     const NodeAddress source{level, node.x >> (level - node.level), node.z >> (level - node.level)};
     return {source, resident(source)};
 }
 
-Vec4 SourceDataManager::shaderParams(const Tile &tile) const {
+Vec4 LandscapeResidency::shaderParams(const Tile &tile) const {
     const auto region = _data.nodeRegion(tile.address);
     return {region.x, region.z, region.size, static_cast<float>(tile.layer)};
 }
 
-bool SourceDataManager::ready() const {
+bool LandscapeResidency::ready() const {
     return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
 }
 
-bool SourceDataManager::initSlots(const LandscapeData &data, uint32_t layerCount) {
+bool LandscapeResidency::initSlots(const LandscapeData &data, uint32_t layerCount) {
     CC_ASSERT(_device == nullptr && _slots.empty() && _inFlight.empty());
     const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
     if (!data.valid() || layerCount == 0) {
@@ -213,21 +213,21 @@ bool SourceDataManager::initSlots(const LandscapeData &data, uint32_t layerCount
     return true;
 }
 
-int SourceDataManager::reservedLayer(NodeAddress source) const {
+int LandscapeResidency::reservedLayer(NodeAddress source) const {
     const auto it = _slots.find(source.key());
     return it != _slots.end() ? static_cast<int>(it->second.layer) : -1;
 }
 
-void SourceDataManager::publish(uint64_t key) {
+void LandscapeResidency::publish(uint64_t key) {
     _slots.at(key).ready = true;
 }
 
-bool SourceDataManager::validSource(NodeAddress source) const {
+bool LandscapeResidency::validSource(NodeAddress source) const {
     return source.level >= _data.minTileLevel && source.level <= _data.maxLevel &&
            source.x < _data.nodesX(source.level) && source.z < _data.nodesZ(source.level);
 }
 
-bool SourceDataManager::initTextures() {
+bool LandscapeResidency::initTextures() {
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
@@ -250,7 +250,7 @@ bool SourceDataManager::initTextures() {
     return true;
 }
 
-void SourceDataManager::initSamplers() {
+void LandscapeResidency::initSamplers() {
     gfx::SamplerInfo si;
     // R16_UNORM heights and normals use hardware filtering. RG8 heights are
     // decoded before interpolation with texelFetch, which ignores the sampler.
@@ -266,7 +266,7 @@ void SourceDataManager::initSamplers() {
     _splatSampler = _device->getSampler(si);
 }
 
-void SourceDataManager::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
+void LandscapeResidency::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
     const auto it = _slots.find(key);
     if (it == _slots.end() || it->second.ready) {
         return;
@@ -278,7 +278,7 @@ void SourceDataManager::uploadTile(uint64_t key, const uint8_t *height, const ui
     publish(key);
 }
 
-void SourceDataManager::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
+void LandscapeResidency::uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const {
     if (array == nullptr || data == nullptr) {
         return;
     }

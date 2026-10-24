@@ -25,6 +25,19 @@
 - When adding or changing Effect or native sampler configurations, explicitly set `addressU`, `addressV`, and `addressW` together, including for 2D textures. Keep all three modes consistent unless differing modes are required by the sampling behavior. An omitted `addressW` defaults to `WRAP`; setting only U/V to `CLAMP` triggers "Samplers with different wrapping modes may case reduced performance". This has recurred in Landscape's `vtPageMap`; check compiled sampler configurations after Effect changes and fix the configuration rather than suppressing the warning.
 - During development, do not preserve compatibility with old data. Update affected code and data together, removing obsolete fields, migration paths, and compatibility fallbacks within the scope of the change. Only introduce backward compatibility when the user explicitly requests it.
 
+# C++ engineering and architecture
+
+- Before implementation, identify module responsibilities, data owners, dependency direction and behavior that must remain unchanged. Check callers, build registration, generated bindings, resources and comments before moving public declarations.
+- Keep each module focused on one coherent responsibility. Dependencies flow from coordination to functional modules to foundational data; foundational data must not depend on renderers, scenes or schedulers. Avoid circular dependencies.
+- Place types by meaning and ownership: shared plain data in the appropriate foundational header, internal state inside its owning module, and GPU layouts/resources in the rendering layer. Do not turn a common data header into a catch-all.
+- Keep one authoritative source for mutable state. Avoid storing values that can be obtained from the owner; when a derived cache is necessary, document its invalidation and update owner. Immutable configuration snapshots and GPU upload representations are not independent sources of truth.
+- Make ownership and lifetime explicit: owning pointers, borrowed references and shared ownership must be distinguishable. Required dependencies must be initialized before runtime objects are published or used; do not hide failed initialization behind runtime null checks.
+- Keep interfaces small and headers self-contained. Include complete definitions only when required; otherwise use forward declarations and put implementation dependencies in source files. Do not include a whole subsystem merely to obtain one data type.
+- For asynchronous work, define preparation, readiness and commit boundaries. Preserve the last valid state until a complete replacement is ready; failures must not publish partially updated state.
+- Prefer simple, local implementations. Add abstractions, files, special cases or stored state only when a concrete need and maintenance benefit justify them. Keep small related helpers together.
+- Refactoring preserves behavior, data layout, defaults and externally visible interfaces unless a behavior change is explicitly approved. Review initialization failure and destruction order as well as the successful path.
+- Match validation to the change: check dependency/build/binding integrity for structural changes, run authorized functional regression for behavior changes, and draw performance conclusions only from comparable Release measurements. Compilation alone does not prove behavioral equivalence.
+
 # Keyboard shortcuts and window title
 
 - Whenever PC controls are added or changed, update the mobile touch controls in the same change. Keep actions, camera modes, labels, debug options and input-reset behavior consistent across both, and verify keyboard/touch parity.
@@ -45,8 +58,8 @@
 # Deferred Landscape work
 
 - Multi-camera Landscape support is deferred until the user explicitly resumes it (recorded 2026-10-21). Do not implement it as part of unrelated refactoring.
-- Current limitations: LOD selection uses one main camera; ExpectedTree/CurrentTree, morph camera parameters, decal visibility/fade and resource reservations are shared rather than independent per view.
-- Proposed direction to evaluate when resumed: keep ExpectedTree/CurrentTree, draw instances and morph/decal view state per view; share height data, TilePagePool and VT atlas; aggregate resource demands across views before scheduling to avoid mutual eviction. Shadow passes should use their owning view's LOD and morph. Preserve existing single-camera behavior and morph transitions. Confirm whether the use case is camera switching, shared-LOD secondary views or simultaneous independent views before choosing the scope.
+- Current limitations: LOD selection uses one main camera; the committed Quadtree, morph camera parameters, decal visibility/fade and resource reservations are shared rather than independent per view.
+- Proposed direction to evaluate when resumed: keep the committed Quadtree, draw instances and morph/decal view state per view; share height data, TilePagePool and VT atlas; aggregate resource demands across views before scheduling to avoid mutual eviction. Shadow passes should use their owning view's LOD and morph. Preserve existing single-camera behavior and morph transitions. Confirm whether the use case is camera switching, shared-LOD secondary views or simultaneous independent views before choosing the scope.
 
 # Progress communication
 

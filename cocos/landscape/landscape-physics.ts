@@ -10,7 +10,7 @@ import { TerrainCollider } from '../physics/framework/components/colliders/terra
 import { PhysicsSystem } from '../physics/framework/physics-system';
 import { PhysicsMaterial } from '../physics/framework/assets/physics-material';
 import { selector } from '../physics/framework/physics-selector';
-import { LandscapePhysicsCollider, LandscapePhysicsMeshCollider, LandscapePhysicsHeightfield } from './landscape-physics-collider';
+import { LandscapePhysicsCollider, LandscapePhysicsMeshCollider, LandscapeHeightfieldData } from './landscape-physics-collider';
 import type { Landscape } from './landscape';
 import { LandscapeHeightGrid, LandscapeHeightLayout, LandscapeHeightLoader, LandscapeWorldBounds } from './landscape-height-data';
 
@@ -542,7 +542,7 @@ export class LandscapePhysics {
         try {
             node.parent = this._landscape.node;
             const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
-            const heightfield = new LandscapePhysicsHeightfield(samples, layout, holes);
+            const heightfield = new LandscapeHeightfieldData(samples, layout, holes);
             node.setPosition(local.x + x0 * spacing, heightfield.localOriginY, local.z + z0 * spacing);
             let collider: TerrainCollider | MeshCollider;
             // Native PhysX supports hole materials directly. Its current Wasm
