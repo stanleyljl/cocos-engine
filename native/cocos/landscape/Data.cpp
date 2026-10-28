@@ -110,12 +110,6 @@ LandscapeRegion LandscapeData::nodeRegion(NodeAddress address) const {
     return {address.x * size, address.z * size, size};
 }
 
-NodeAddress LandscapeData::nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const {
-    const uint32_t side = nodesPerSectorSide(level);
-    assert(sectorX < sectorsX && sectorZ < sectorsZ && localX < side && localZ < side);
-    return {level, sectorX * side + localX, sectorZ * side + localZ};
-}
-
 NodeIndexLayout::NodeIndexLayout(const LandscapeData &data) {
     if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS ||
         static_cast<uint64_t>(data.sectorsX) * data.sectorsZ > config::MAX_SECTOR_COUNT) {

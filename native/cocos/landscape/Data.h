@@ -156,8 +156,6 @@ struct LandscapeData {
     // Explicitly clamps gutter probes and inclusive outer-edge samples.
     NodeAddress nodeAtClamped(uint32_t level, LandscapePoint position) const;
     LandscapeRegion nodeRegion(NodeAddress address) const;
-    // Convert sector-relative node indices to indices across all sectors.
-    NodeAddress nodeInSector(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const;
 };
 
 // Index layout for flat node metadata storage: sectors in row-major (Z, X) order, then

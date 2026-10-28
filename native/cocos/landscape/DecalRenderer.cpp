@@ -112,10 +112,10 @@ bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm
         !_wire->getPasses() || _wire->getPasses()->empty()) {
         return false;
     }
-    // Keep a disabled model for the first real draw and warm its pipelines.
-    // Creating shader objects alone does not compile programs on GLES3.
+    // Prepare model shader variants and the instanced pipeline before the first decal appears.
+    // The disabled model stays in the pool for the first real draw.
     _pool.push_back(createModel());
-    warmupPipelines();
+    compilePipelines();
     return true;
 }
 
@@ -367,7 +367,7 @@ IntrusivePtr<scene::Model> DecalRenderer::createModel() {
     return model;
 }
 
-void DecalRenderer::warmupPipelines() {
+void DecalRenderer::compilePipelines() {
     if (_pool.empty()) {
         return;
     }
@@ -375,7 +375,8 @@ void DecalRenderer::warmupPipelines() {
     auto *renderPass = Root::getInstance()->getMainWindow()->getFramebuffer()->getRenderPass();
     const auto &passes = *subModel->getPasses();
     for (uint32_t i = 0; i < passes.size(); ++i) {
-        // Build the real instanced layout without adding a draw to a live queue.
+        // Use the real instance layout without adding a draw to a live render queue.
+        // Creating shader objects alone does not compile programs on GLES3.
         pipeline::InstancedBuffer instances(passes[i]);
         instances.merge(subModel, i);
         for (const auto &instance : instances.getInstances()) {
@@ -525,8 +526,7 @@ void DecalRenderer::onGlobalPipelineStateChanged() {
     for (const auto &model : _pool) {
         model->onGlobalPipelineStateChanged();
     }
-    // Scene activation can change fog/shadow macros after material initialization.
-    warmupPipelines();
+    compilePipelines();
 }
 
 void DecalRenderer::setEnabled(bool enabled) {
@@ -553,7 +553,7 @@ void DecalRenderer::refreshMaterials() {
         model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
     }
     refreshInstances(_viewPosition);
-    warmupPipelines();
+    compilePipelines();
 }
 
 void DecalRenderer::setCastShadow(bool enabled) {

@@ -121,7 +121,6 @@ private:
     };
     ccstd::vector<PassSelection> _passes;
     size_t _passCount{0};
-    bool _visibilityDistanceWarning{false};
     Vec3 _lodViewPosition;
 
     LandscapeDebugData _debugData;

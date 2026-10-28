@@ -404,20 +404,6 @@ ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) cons
     return it == _files.end() ? ccstd::string{} : it->second;
 }
 
-bool LandscapeAsset::loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat, TileData &tile) const {
-    const uint32_t side = _data.nodesPerSectorSide(level);
-    if (!valid() || (heightFormat != gfx::Format::RG8 && heightFormat != gfx::Format::R16UI) ||
-        level < _data.minTileLevel || side == 0 ||
-        x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
-        return false;
-    }
-    tile.key = makeNodeKey(level, x, z);
-    const ccstd::string directory = "nodes/L" + std::to_string(level) + "/";
-    const ccstd::string suffix = std::to_string(x) + "_" + std::to_string(z) + ".png";
-    return decodeTileSet(resolveFile(directory + "h_" + suffix), resolveFile(directory + "s_" + suffix),
-                         resolveFile(directory + "n_" + suffix), heightFormat, tile);
-}
-
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat) {
     if (loadingFailed() || (heightFormat != gfx::Format::RG8 && heightFormat != gfx::Format::R16UI) ||
         level < _data.minTileLevel || level > _data.maxLevel) {
@@ -467,7 +453,7 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Fo
 
 void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
     const uint32_t side = _data.nodesPerSectorSide(_data.minTileLevel);
-    if (!valid() || x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
+    if (x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         completion({}, false);
         return;
     }
@@ -518,7 +504,7 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
 }
 
 bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const {
-    if (!_data.valid() || level > _data.maxLevel) {
+    if (level > _data.maxLevel) {
         return false;
     }
     const size_t offset = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);

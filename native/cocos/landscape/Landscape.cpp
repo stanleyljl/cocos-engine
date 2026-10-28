@@ -90,14 +90,11 @@ void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
         return;
     }
     auto quadtree = std::make_unique<Quadtree>();
-    if (!quadtree->init(*asset, _lodQualityScale)) {
-        return;
-    }
+    quadtree->init(*asset, _lodQualityScale);
     auto renderer = std::make_unique<LandscapeRenderer>(*quadtree);
     if (!renderer->init(_node.get(), _scene, asset.get())) {
         return;
     }
-    renderer->setLodRanges(quadtree->lodMorphStart(), quadtree->lodMorphEnd());
     applyRendererSettings(*renderer);
     logLodRanges(*asset, *quadtree);
 
@@ -129,8 +126,9 @@ void Landscape::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtr
     const auto &data = asset.data();
     CC_LOG_INFO("[Landscape] LOD ranges:");
     for (uint32_t level = 0; level <= data.maxLevel; ++level) {
+        const auto &range = quadtree.lodMorphRanges()[level];
         CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
-                    level, quadtree.lodMorphStart()[level], quadtree.lodMorphEnd()[level]);
+                    level, range.start, range.end);
     }
 #else
     CC_UNUSED_PARAM(asset);
@@ -202,7 +200,7 @@ void Landscape::addPass(const geometry::Frustum &frustum, bool shadow) {
     pass.frustum = &frustum;
     pass.shadow = shadow;
     pass.models.clear();
-    _quadtree->includePass(frustum, !shadow);
+    _quadtree->addPass(frustum, !shadow);
 }
 
 bool Landscape::queryTransformValid() const {
@@ -279,15 +277,11 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     if ((camera.getVisibility() & layer) != layer) {
         return;
     }
-    _visibilityDistanceWarning = false;
-
     // All passes share one LOD position and the same current rendering tree.
     _quadtree->beginUpdate(_lodViewPosition, _node->getWorldPosition());
     addPass(camera.getFrustum(), false);
     const uint32_t cascadesToDeduplicate = collectShadowPasses(sceneData);
-    _quadtree->endUpdate();
     preparePassModels(cascadesToDeduplicate);
-    _visibilityDistanceWarning = _quadtree->visibilityDistanceTooSmall();
     reportVisibilityDistanceStatus();
 }
 
@@ -324,8 +318,9 @@ uint32_t Landscape::collectShadowPasses(const pipeline::PipelineSceneData &scene
 }
 
 void Landscape::reportVisibilityDistanceStatus() {
-    if (_visibilityDistanceWarning != _lastVisibilityDistanceWarning) {
-        if (_visibilityDistanceWarning) {
+    const bool warning = _quadtree->hasMorphRangeWarning();
+    if (warning != _lastVisibilityDistanceWarning) {
+        if (warning) {
             CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
         }
 #if CC_LANDSCAPE_DEBUG
@@ -333,12 +328,12 @@ void Landscape::reportVisibilityDistanceStatus() {
             CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
         }
 #endif
-        _lastVisibilityDistanceWarning = _visibilityDistanceWarning;
+        _lastVisibilityDistanceWarning = warning;
     }
 }
 
 void Landscape::preparePassModels(uint32_t cascadesToDeduplicate) {
-    // Only committed leaves draw; incomplete replacements retain their parents.
+    // Only selected renderable nodes draw; incomplete replacements retain their parents.
     _renderer->preparePasses();
     for (size_t i = 0; i < _passCount; ++i) {
         auto &pass = _passes[i];
@@ -463,15 +458,15 @@ void Landscape::drawDebugBounds() {
     static_assert(sizeof(colors) / sizeof(colors[0]) == config::MAX_LOD_LEVELS,
                   "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
-    _quadtree->cull([&](NodeAddress address, bool leaf) {
-        const auto node = leaf ? _quadtree->nodes().at(address.key()).geometry : _quadtree->geometry(address);
+    _quadtree->cull([&](NodeAddress address, bool renderable) {
+        const auto &node = _quadtree->find(address)->geometry;
         const auto region = _quadtree->region(address);
         const auto &origin = _node->getWorldPosition();
         const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + node.maxY) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z, region.size * 0.5F, (node.maxY - node.minY) * 0.5F, region.size * 0.5F};
         if (!bounds.aabbFrustum(camera->getFrustum())) {
             return false;
         }
-        if (!leaf) {
+        if (!renderable) {
             return true;
         }
         const float quadrantSize = region.size * 0.5F;

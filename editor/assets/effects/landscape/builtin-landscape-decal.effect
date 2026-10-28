@@ -122,7 +122,7 @@ CCProgram landscape-vertex %{
   #endif
   #if USE_INSTANCING
     in vec4 a_gridInst; // parent local XZ origin, node size, LOD
-    in vec4 a_mappingInst; // local table slot, coarser/finer neighbor edge masks, unused W
+    in vec4 a_mappingInst; // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
     in vec4 a_tileInst; // source tile local XZ origin, size, paired array layer
     in vec4 a_decalRegion; // minimum XZ, world size, height texture layer
     in vec4 a_decalGrid; // fixed XZ origin, width and depth; independent of LOD

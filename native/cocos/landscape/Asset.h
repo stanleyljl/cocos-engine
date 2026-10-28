@@ -82,14 +82,13 @@ public:
     LandscapeAsset();
     ~LandscapeAsset() override;
 
-    // Main thread: resolve the manifest once and anchor its files to that package.
+    // Main thread: validate the manifest once and anchor its files to that package.
+    // Runtime consumers require load() to succeed before accessing this asset.
     bool load(const ccstd::string &manifestPath);
-    // Main-thread synchronous decode for roots and the initial view warmup.
-    // Height output is RG8 or R16UI, matching LandscapeResidency's upload representation.
-    bool loadTileSet(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat, TileData &tile) const;
     // Call on the main thread: builds absolute paths from the resolved manifest;
     // background I/O bypasses FileUtils' unsynchronized relative-path cache.
     // Only complete height/splat/normal sets are available through takeReadyTile().
+    // Height output is RG8 or R16UI, matching LandscapeResidency's upload representation.
     // LandscapeResidency owns request deduplication and the in-flight limit.
     bool requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat);
     bool takeReadyTile(TileData &tile);
@@ -113,8 +112,6 @@ public:
     uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
     const ccstd::vector<HeightRange> &heightRanges() const { return _heightRanges; }
-    const ccstd::string &dataDir() const { return _dataDir; }
-    bool valid() const { return _data.valid(); }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
 

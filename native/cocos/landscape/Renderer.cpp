@@ -110,7 +110,7 @@ LandscapeRenderer::~LandscapeRenderer() {
 bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset) {
     CC_ASSERT(_node == nullptr && _scene == nullptr);
     auto *device = Root::getInstance()->getDevice();
-    if (node == nullptr || scene == nullptr || asset == nullptr || !asset->valid()) {
+    if (node == nullptr || scene == nullptr || asset == nullptr) {
         return false;
     }
 
@@ -168,19 +168,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
 }
 
 bool LandscapeRenderer::isReady() const {
-    return _schedule->ready();
-}
-
-void LandscapeRenderer::setLodRanges(const ccstd::vector<float> &morphStart, const ccstd::vector<float> &morphEnd) {
-    const size_t count = std::min({morphStart.size(), morphEnd.size(),
-                                   static_cast<size_t>(config::MAX_LOD_LEVELS)});
-    _morphStart.assign(config::MAX_LOD_LEVELS, 0.0F);
-    _morphEnd.assign(config::MAX_LOD_LEVELS, 0.0F);
-    for (size_t i = 0; i < count; ++i) {
-        _morphStart[i] = morphStart[i];
-        _morphEnd[i] = morphEnd[i];
-    }
-    updateMaterialProperties();
+    return _ready;
 }
 
 std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
@@ -254,10 +242,11 @@ void LandscapeRenderer::updateMaterialProperties() {
         _debugData.showRanges ? 1.0F : 0.0F,
     };
     ccstd::vector<Vec4> lodMorph(config::MAX_LOD_LEVELS);
-    for (uint32_t i = 0; i < config::MAX_LOD_LEVELS; ++i) {
-        const float start = i < _morphStart.size() ? _morphStart[i] : 0.0F;
-        const float end = i < _morphEnd.size() ? _morphEnd[i] : 0.0F;
-        lodMorph[i] = Vec4{start, end, 0.0F, 0.0F};
+    const auto &ranges = _quadtree.lodMorphRanges();
+    const size_t count = std::min(ranges.size(), lodMorph.size());
+    // Keep the shader's fixed-size array, leaving unused LOD entries zeroed.
+    for (size_t i = 0; i < count; ++i) {
+        lodMorph[i] = Vec4{ranges[i].start, ranges[i].end, 0.0F, 0.0F};
     }
 
     const VTPageLayout layout(_data.sectorSize);
@@ -293,8 +282,8 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
 
     const auto region = _data.nodeRegion(node.address());
     gridParams.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
-    const auto edges = _quadtree.edgeMasks(node.address());
-    gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edges.coarser), static_cast<float>(edges.finer), 0};
+    const auto edges = _quadtree.findRenderable(node.address())->edgeMask;
+    gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edges), 0, 0};
 
     const auto tile = _residency->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
@@ -323,13 +312,22 @@ void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &n
 
 void LandscapeRenderer::preparePasses() {
     const auto frame = Root::getInstance()->getFrameCount();
-    auto *oldMappings = _vtRenderer->pageTable().texture();
-    _schedule->update(frame);
-    if (oldMappings != _vtRenderer->pageTable().texture()) {
+    auto *previousMappings = _vtRenderer->pageTable().texture();
+    // The four stages run in order. Resource publication never selects draws.
+    _quadtree.updateTarget();
+    _schedule->prepareResources(frame);
+    _quadtree.selectRenderables();
+    _ready = _ready || _schedule->isSettled();
+    syncRenderables(frame, previousMappings);
+}
+
+void LandscapeRenderer::syncRenderables(uint32_t frame, gfx::Texture *previousMappings) {
+    if (previousMappings != _vtRenderer->pageTable().texture()) {
         bindRuntimeTextures();
     }
     if (!_quadtree.changedNodes().empty()) {
         syncTerrainModels();
+        _quadtree.clearChangedNodes();
     }
     _decals->updateView(_viewPosition);
     if (!isReady()) {
@@ -356,9 +354,9 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool
             decalLift = std::max(decalLift, layer.heightScale);
         }
     }
-    _quadtree.cull([&](NodeAddress address, bool leaf) {
-        if (!leaf) {
-            const auto node = _quadtree.geometry(address);
+    _quadtree.cull([&](NodeAddress address, bool renderable) {
+        if (!renderable) {
+            const auto &node = _quadtree.find(address)->geometry;
             const auto region = _quadtree.region(address);
             // Include the bound source's height range (also for shared sources
             // below minTileLevel) and raised decals before pruning a subtree.
@@ -390,7 +388,7 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool
                     return false;
                 }
             }
-            _decals->collectPassModels(_quadtree.nodes().at(address.key()).geometry, frustum, shadow, models);
+            _decals->collectPassModels(_quadtree.findRenderable(address)->geometry, frustum, shadow, models);
         }
         return true;
     });
@@ -438,15 +436,14 @@ void LandscapeRenderer::recycleModel(GridDraw &draw) {
 }
 
 void LandscapeRenderer::syncTerrainModels() {
-    // Every committed node uses the same full grid. Neighbors only refresh the
+    // Every renderable node uses the same full grid. Neighbors only refresh the
     // morph/stitch edge masks; material changes update the mapping without replacing models.
     ccstd::vector<uint32_t> changedMappings;
     const auto &changed = _quadtree.changedNodes();
-    const auto &nodes = _quadtree.nodes();
     changedMappings.reserve(changed.size());
     // Release removed owners before assigning their blocks to new LOD nodes.
     for (const auto key : changed) {
-        if (nodes.count(key) == 0) {
+        if (!_quadtree.findRenderable(NodeAddress::fromKey(key))) {
             const auto it = _draws.find(key);
             if (it != _draws.end()) {
                 recycleModel(it->second);
@@ -456,17 +453,17 @@ void LandscapeRenderer::syncTerrainModels() {
         }
     }
     for (const auto key : changed) {
-        const auto it = nodes.find(key);
-        if (it == nodes.end()) {
+        const auto *renderable = _quadtree.findRenderable(NodeAddress::fromKey(key));
+        if (!renderable) {
             continue;
         }
         auto &draw = _draws[key];
-        const auto &node = it->second.geometry;
+        const auto &node = renderable->geometry;
         if (draw.mapping < 0) {
             draw.mapping = static_cast<int>(_vtRenderer->pageTable().allocate());
         }
         const auto mapping = static_cast<uint32_t>(draw.mapping);
-        if (_vtRenderer->pageTable().update(mapping, it->second.material, *_vtRenderer)) {
+        if (_vtRenderer->pageTable().update(mapping, renderable->material, *_vtRenderer)) {
             changedMappings.push_back(mapping);
         }
         if (!draw.model) {
@@ -536,7 +533,7 @@ void LandscapeRenderer::refreshTerrainMaterials() {
         const auto &draw = entry.second;
         if (draw.model) {
             draw.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
-            const auto &node = _quadtree.nodes().at(entry.first).geometry;
+            const auto &node = _quadtree.findRenderable(NodeAddress::fromKey(entry.first))->geometry;
             resolveGridParams(node, static_cast<uint32_t>(draw.mapping)).apply(draw.model, _instanceAttributeScratch);
         }
     }
@@ -589,6 +586,7 @@ void LandscapeRenderer::setUnlit(bool enabled) {
 }
 
 void LandscapeRenderer::destroy() {
+    _ready = false;
     _schedule.reset();
     const auto removeModel = [](const IntrusivePtr<scene::Model> &model) {
         if (model == nullptr) {

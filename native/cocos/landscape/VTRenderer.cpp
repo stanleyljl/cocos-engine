@@ -208,14 +208,17 @@ void VTRenderer::destroy() {
     _refineFarDetail = true;
 }
 
-uint32_t VTRenderer::renderPages(LandscapeResidency &residency, uint32_t maxPages) {
+uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages) {
     if (maxPages == 0) {
         return 0;
     }
-    // Select dirty reserved pages and prepare inputs only when every source is resident.
+    // The scheduler supplies pages of loaded nodes, including invalidated ready
+    // pages. Compose only when every shared page input is resident as well.
     _batch.clear();
-    for (const uint32_t slot : _reservedSlots) {
+    for (const auto address : pages) {
+        const uint32_t slot = _lookup.at(address.key());
         const auto &page = _pages[slot];
+        CC_ASSERT(page.lastReserved == _reservation);
         if (!page.needsComposition()) {
             continue;
         }
@@ -441,7 +444,7 @@ gfx::Texture *VTRenderer::normalRoughnessAO() const {
 }
 
 bool VTRenderer::initPages(const LandscapeData &data, uint32_t capacity) {
-    if (!data.valid() || capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
+    if (capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
         return false;
     }
     _pages.clear();

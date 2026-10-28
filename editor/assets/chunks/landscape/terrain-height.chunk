@@ -61,18 +61,18 @@ vec4 morphTerrainVertex(vec2 grid, float height, float targetHeight) {
   // Distance morph applies throughout the grid. At committed 2:1 boundaries,
   // the fine edge must meet the coarse lattice even if streaming is delayed.
   // Conversely, keep that coarse edge fixed while it has finer neighbors.
-  int coarser = int(a_mappingInst.y + 0.5);
-  int finer = int(a_mappingInst.z + 0.5);
-  int edgeX = grid.x < 0.5 ? 1 : (grid.x > 15.5 ? 2 : 0);
-  int edgeZ = grid.y < 0.5 ? 4 : (grid.y > 15.5 ? 8 : 0);
-  if ((coarser & edgeX) != 0) {
+  // Two bits per edge (left, right, bottom, top): 00 same/boundary, 01 coarser, 10 finer.
+  int edges = int(a_mappingInst.y + 0.5);
+  int edgeX = grid.x < 0.5 ? 1 : (grid.x > 15.5 ? 4 : 0);
+  int edgeZ = grid.y < 0.5 ? 16 : (grid.y > 15.5 ? 64 : 0);
+  if ((edges & edgeX) != 0) {
     collapse.y = 1.0;
-  } else if ((finer & edgeX) != 0) {
+  } else if ((edges & (edgeX << 1)) != 0) {
     collapse.y = 0.0;
   }
-  if ((coarser & edgeZ) != 0) {
+  if ((edges & edgeZ) != 0) {
     collapse.x = 1.0;
-  } else if ((finer & edgeZ) != 0) {
+  } else if ((edges & (edgeZ << 1)) != 0) {
     collapse.x = 0.0;
   }
   vec2 odd = mod(grid, 2.0);

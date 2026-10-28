@@ -385,7 +385,7 @@ export class Landscape extends Component {
         return source.status;
     }
 
-    /** Initial view has reached the configured geometry and VT precision and can render. */
+    /** Initial capacity-admitted view resources have finished loading and composition; stays true during later streaming. */
     public get isReady (): boolean {
         return this._native ? this._native.isReady() : false;
     }

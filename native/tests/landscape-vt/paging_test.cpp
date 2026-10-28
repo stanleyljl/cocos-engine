@@ -5,6 +5,7 @@
 #include "landscape/VTPageStages.h"
 #include "landscape/VTRenderer.h"
 #include "base/Log.h"
+#include "base/std/container/unordered_map.h"
 #include "core/Root.h"
 #include "core/assets/Material.h"
 #include "core/assets/RenderTexture.h"
@@ -42,9 +43,6 @@ void gfx::Texture::initialize(const gfx::TextureInfo &) {
 void gfx::CommandBuffer::initialize(const gfx::CommandBufferInfo &) {
     std::abort();
 }
-bool landscape::LandscapeAsset::loadTileSet(uint32_t, uint32_t, uint32_t, gfx::Format, TileData &) const {
-    std::abort();
-}
 bool landscape::LandscapeAsset::requestTile(uint32_t, uint32_t, uint32_t, gfx::Format) {
     std::abort();
 }
@@ -56,6 +54,10 @@ bool landscape::LandscapeAsset::takeReadyTile(TileData &) {
 // The CPU suite exercises VTRenderer's real residency algorithms without a GPU.
 // Device/processing entry points abort if reached; app regressions cover rendering.
 namespace cc::landscape {
+// This executable supplies synthetic assets and never starts asset IO.
+LandscapeAsset::LandscapeAsset() = default;
+LandscapeAsset::~LandscapeAsset() = default;
+
 VTPageComposer::VTPageComposer() {
     std::abort();
 }
@@ -123,6 +125,7 @@ VTPageCompressor::~VTPageCompressor() = default;
 
 #include <iostream>
 #include <map>
+#include <optional>
 #include <random>
 #include <set>
 
@@ -134,8 +137,6 @@ namespace {
 class ResidencyFixture final : public LandscapeResidency {
 public:
     using LandscapeResidency::initSlots;
-    using LandscapeResidency::reservedSources;
-    using LandscapeResidency::reservedLayer;
     using LandscapeResidency::publish;
 };
 
@@ -158,11 +159,31 @@ void require(bool condition, const char *message) {
     }
 }
 
+VTGridMapping testMapping(NodeAddress address) {
+    VTGridMapping mapping;
+    mapping.pages = {{address.level, address.x, address.z}};
+    return mapping;
+}
+
 class TreeFixture final : public Quadtree {
 public:
-    void init(const LandscapeData &data) {
+    void init(const LandscapeData &data, bool initializeResources = true) {
         const ccstd::vector<HeightRange> ranges(NodeIndexLayout(data).nodeCount(), {data.minHeight(), data.maxHeight()});
-        require(Quadtree::init(data, ranges, 1.0F), "Tree metadata initialization");
+        LandscapeAsset asset;
+        // The fixture owns this non-const asset. Populate its synthetic metadata
+        // through the existing views, then exercise the public initialization path.
+        const_cast<LandscapeData &>(asset.data()) = data;
+        const_cast<ccstd::vector<HeightRange> &>(asset.heightRanges()) = ranges;
+        Quadtree::init(asset);
+        if (initializeResources) {
+            for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+                for (uint32_t x = 0; x < data.sectorsX; ++x) {
+                    const NodeAddress address{data.maxLevel, x, z};
+                    require(publish(address, testMapping(address)), "Initialize synthetic sector resources");
+                }
+            }
+            require(selectRenderables(), "Initial sector coverage");
+        }
     }
 };
 
@@ -173,8 +194,15 @@ struct CameraView {
 };
 
 void applyView(Quadtree &tree, const CameraView &view) {
+    ccstd::unordered_map<uint64_t, uint8_t> previous;
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        const auto address = node.geometry.address();
+        previous.emplace(address.key(), node.edgeMask);
+    });
+    tree.clearChangedNodes();
     const auto &targets = view.geometry.empty() ? view.surface : view.geometry;
-    cc::Vec3 camera{0, 0, 0};
+    // An empty view represents a distant camera, not a hidden nearby terrain.
+    cc::Vec3 camera{0, tree.lodMorphRanges().back().end * 4, 0};
     if (!targets.empty()) {
         const auto area = tree.region(targets.front().address());
         camera.set(area.x + area.size * 0.5F, 0.5F, area.z + area.size * 0.5F);
@@ -196,57 +224,114 @@ void applyView(Quadtree &tree, const CameraView &view) {
             frustum.planes[4]->d = -1000;
             frustum.planes[5]->n.set(0, -1, 0);
             frustum.planes[5]->d = -1000;
-            tree.includePass(frustum, pass == &view.surface);
+            tree.addPass(frustum, pass == &view.surface);
         }
     }
-    tree.endUpdate();
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
+    // Target updates may delete old children. Subsequent selection must report their
+    // retired draws and changed shared edges before the renderer consumes them.
+    for (const auto &entry : previous) {
+        if (!tree.findRenderable(NodeAddress::fromKey(entry.first))) {
+            require(tree.changedNodes().count(entry.first) != 0, "Deleted target draw lost its retirement notification");
+        }
+    }
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        const auto address = node.geometry.address();
+        const auto old = previous.find(address.key());
+        const auto edges = node.edgeMask;
+        if (old == previous.end() || old->second != edges) {
+            require(tree.changedNodes().count(address.key()) != 0, "Target change lost a morph edge notification");
+        }
+    });
 }
 
 // Compare topology independently of the material records now owned by Quadtree.
-ccstd::unordered_set<uint64_t> leafKeys(const Quadtree &tree) {
+ccstd::unordered_set<uint64_t> renderableKeys(const Quadtree &tree) {
     ccstd::unordered_set<uint64_t> result;
-    for (const auto &entry : tree.nodes()) {
-        result.insert(entry.first);
-    }
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        result.insert(node.geometry.address().key());
+    });
     return result;
 }
 
-ccstd::vector<NodeAddress> addedNodes(const Quadtree::Change &change) {
-    return change.added;
+ccstd::unordered_set<uint64_t> targetKeys(const Quadtree &tree) {
+    ccstd::unordered_set<uint64_t> result;
+    tree.forEachNode([&](const Quadtree::Node &node) {
+        if (!node.children) {
+            result.insert(node.geometry.address().key());
+        }
+        return true;
+    });
+    return result;
 }
 
-// Topology-only tests supply explicit synthetic bounds; production supplies
-// asset bounds and VT mappings through LandscapeSchedule's admitted transaction.
-void commitTopology(Quadtree &tree, const Quadtree::Change &change, const LandscapeData &data) {
-    ccstd::unordered_map<uint64_t, Quadtree::EdgeMasks> oldEdges;
-    for (const auto &entry : tree.nodes()) {
-        oldEdges.emplace(entry.first, tree.edgeMasks(entry.second.geometry.address()));
-    }
-    tree.clearChanges();
-    ccstd::vector<Quadtree::Node> prepared;
-    for (const auto node : change.added) {
-        prepared.push_back({{node.level, node.x, node.z, data.minHeight(), data.maxHeight()}, {}});
-    }
-    tree.commit(change, prepared);
-    for (const auto node : change.removed) {
-        require(tree.changedNodes().count(node.key()) != 0, "Renderer was not notified of a removed node");
-    }
-    for (const auto &entry : tree.nodes()) {
-        const auto old = oldEdges.find(entry.first);
-        const auto edges = tree.edgeMasks(entry.second.geometry.address());
-        if (old == oldEdges.end() || old->second.coarser != edges.coarser || old->second.finer != edges.finer) {
-            require(tree.changedNodes().count(entry.first) != 0, "Renderer would retain stale morph edge constraints");
+// Inspect coverage through public traversal rather than exposing engine internals.
+NodeAddress rootAddress(const Quadtree &tree) {
+    NodeAddress root;
+    tree.forEachNode([&](const Quadtree::Node &node) {
+        root = node.geometry.address();
+        return false;
+    });
+    return root;
+}
+
+NodeAddress renderableAt(const Quadtree &tree, uint32_t x, uint32_t z) {
+    NodeAddress result;
+    bool found = false;
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        const auto address = node.geometry.address();
+        if ((x >> address.level) == address.x && (z >> address.level) == address.z) {
+            require(!found, "Multiple render nodes cover the same point");
+            result = address;
+            found = true;
+        }
+    });
+    require(found, "No render node covers the requested point");
+    return result;
+}
+
+// Verify changed-node notifications independently of the production selection.
+void selectAndCheckChanges(Quadtree &tree) {
+    ccstd::unordered_map<uint64_t, uint8_t> previous;
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        const auto address = node.geometry.address();
+        previous.emplace(address.key(), node.edgeMask);
+    });
+    tree.clearChangedNodes();
+    require(tree.selectRenderables(), "Complete ready roots must always provide coverage");
+    for (const auto &entry : previous) {
+        if (!tree.findRenderable(NodeAddress::fromKey(entry.first))) {
+            require(tree.changedNodes().count(entry.first) != 0, "Removed draw was not reported");
         }
     }
+    tree.forEachRenderable([&](const Quadtree::Node &node) {
+        const auto address = node.geometry.address();
+        const auto old = previous.find(address.key());
+        const auto edges = node.edgeMask;
+        require(node.ready, "Selected node is not ready");
+        if (old == previous.end() || old->second != edges) {
+            require(tree.changedNodes().count(address.key()) != 0, "Morph neighbor notification was lost");
+        }
+    });
 }
 
-ccstd::vector<Quadtree::Candidate> topologyCandidates(Quadtree &tree, const CameraView &view) {
-    applyView(tree, view);
-    auto result = tree.candidates();
-    result.erase(std::remove_if(result.begin(), result.end(), [](const auto &candidate) {
-        return candidate.operation == Quadtree::Operation::REFRESH;
-    }), result.end());
-    return result;
+void completeTarget(Quadtree &tree) {
+    for (uint32_t step = 0; step < 4096; ++step) {
+        bool loaded = false;
+        for (const auto &request : tree.requests()) {
+            if (!tree.find(request)->ready) {
+                require(tree.publish(request, testMapping(request)), "Parent must precede child readiness");
+                loaded = true;
+            }
+        }
+        selectAndCheckChanges(tree);
+        if (!loaded) {
+            require(renderableKeys(tree) == targetKeys(tree), "Ready selection must converge to its balanced target");
+            return;
+        }
+    }
+    require(false, "Target loading did not converge");
 }
 
 CameraView testView(const ccstd::vector<QuadNode> &geometry, const ccstd::vector<QuadNode> &surface = {}) {
@@ -317,20 +402,30 @@ void testHeightReservations() {
     require(residency.resident({0, 0, 0}) == -1, "Missing height source must not resolve to a ready root");
     ccstd::vector<NodeAddress> transition{root, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}};
     require(residency.reserve(transition), "all-or-nothing height split reservation");
-    require(residency.resident(root) == layer && residency.reservedSources().size() == 5, "Displayed height layer moved during preparation");
+    require(residency.resident(root) == layer && !residency.ready(), "Displayed height layer moved or incomplete reservation became ready");
     for (size_t i = 1; i < transition.size(); ++i) {
         require(residency.resident(transition[i]) == -1, "Reservation was mistaken for uploaded data");
     }
     auto excess = transition;
     excess.push_back({0, 0, 0});
-    require(!residency.reserve(excess) && residency.resident(root) == layer && residency.reservedSources().size() == 5, "Capacity refusal modified live slots");
+    require(!residency.reserve(excess) && residency.resident(root) == layer && !residency.ready(), "Capacity refusal modified live slots");
     std::set<uint32_t> layers;
-    for (const auto source : residency.reservedSources()) {
-        layers.insert(static_cast<uint32_t>(residency.reservedLayer(source)));
+    ccstd::vector<int> bindings;
+    // Publish exactly the admitted inputs. Missing reservations fail publication;
+    // extra unfinished reservations keep ready() false. Inspect real draw bindings.
+    for (const auto source : transition) {
+        residency.publish(source.key());
+        const int binding = residency.resident(source);
+        require(binding >= 0, "Admitted source did not become resident");
+        bindings.push_back(binding);
+        layers.insert(static_cast<uint32_t>(binding));
     }
-    require(layers.size() == 5 && *layers.rbegin() < residency.layerCount(), "Reserved layers overlap or exceed capacity");
-    require(residency.reserve(transition) && residency.resident(root) == layer && residency.reservedSources().size() == 5,
+    require(residency.ready() && layers.size() == 5 && *layers.rbegin() < residency.layerCount(), "Reserved layers overlap, exceed capacity or retain unexpected pending inputs");
+    require(residency.reserve(transition) && residency.ready() && residency.resident(root) == layer,
             "Reserving the same unique working set changed its bindings");
+    for (size_t i = 0; i < transition.size(); ++i) {
+        require(residency.resident(transition[i]) == bindings[i], "Repeated reservation changed a child binding");
+    }
     transition.erase(transition.begin());
     require(residency.reserve(transition), "release retired parent");
     for (const auto n : transition) {
@@ -464,18 +559,21 @@ void testRegionalInvalidation() {
             "decal removal must refresh the same footprint without rebuilding unrelated pages");
 }
 
-// Independent raster oracle: full coverage, no overlaps, and 2:1 at EVERY cell
-// boundary (including all four sectors), rather than using production neighbors.
-void checkCut(const Quadtree &selection, const LandscapeData &d) {
+// Independent raster oracle: full coverage, no overlaps, 2:1 at EVERY cell
+// boundary, and no avoidable coarse draws. Does not use production edge masks.
+void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = false) {
+    const auto keys = target ? targetKeys(selection) : renderableKeys(selection);
     const uint32_t w = d.sectorsX << d.maxLevel, h = d.sectorsZ << d.maxLevel;
     std::vector<int> cells(w * h, -1);
-    for (const auto key : leafKeys(selection)) {
+    for (const auto key : keys) {
         const auto n = NodeAddress::fromKey(key);
+        if (!target) {
+            require(selection.findRenderable(n) != nullptr, "Draw lookup disagrees with traversal");
+        }
         for (uint32_t z = n.z << n.level; z < (n.z + 1) << n.level; ++z) {
             for (uint32_t x = n.x << n.level; x < (n.x + 1) << n.level; ++x) {
                 require(cells[z * w + x] == -1, "Draw coverage overlaps");
                 cells[z * w + x] = static_cast<int>(n.level);
-                require(selection.at(x, z).key() == key, "Draw lookup disagrees with raster coverage");
             }
         }
     }
@@ -490,6 +588,28 @@ void checkCut(const Quadtree &selection, const LandscapeData &d) {
                 require(std::abs(level - cells[(z - 1) * w + x]) <= 1, "Unbalanced vertical sector edge");
             }
         }
+    }
+    if (target) {
+        return;
+    }
+    for (const auto key : keys) {
+        const auto address = NodeAddress::fromKey(key);
+        const auto &node = *selection.find(address);
+        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
+            continue;
+        }
+        const uint32_t x = address.x << address.level;
+        const uint32_t z = address.z << address.level;
+        const uint32_t size = 1U << address.level;
+        const int level = static_cast<int>(address.level);
+        bool blocked = false;
+        for (uint32_t offset = 0; offset < size; ++offset) {
+            blocked |= x > 0 && cells[(z + offset) * w + x - 1] > level;
+            blocked |= x + size < w && cells[(z + offset) * w + x + size] > level;
+            blocked |= z > 0 && cells[(z - 1) * w + x + offset] > level;
+            blocked |= z + size < h && cells[(z + size) * w + x + offset] > level;
+        }
+        require(blocked, "Ready detail was omitted without a coarser neighbor blocking refinement");
     }
 }
 
@@ -511,20 +631,20 @@ double sourceHeight(const LandscapeData &d, NodeAddress geometry, double x, doub
 
 void checkStitchedEdges(const Quadtree &selection, const LandscapeData &d) {
     ccstd::vector<QuadNode> nodes;
-    for (const auto key : leafKeys(selection)) {
+    for (const auto key : renderableKeys(selection)) {
         const auto n = NodeAddress::fromKey(key);
         nodes.push_back({n.level, n.x, n.z, 0, 1});
     }
     for (const auto &node : nodes) {
         const auto n = node.address();
         const double size = d.nodeSize(n.level), x = n.x * size, z = n.z * size, step = size / 16;
-        const auto masks = selection.edgeMasks(n);
+        const auto mask = selection.findRenderable(n)->edgeMask;
         for (uint32_t edge = 0; edge < 4; ++edge) {
             if ((edge == 0 && x == 0) || (edge == 1 && x + size == d.width()) || (edge == 2 && z == 0) || (edge == 3 && z + size == d.depth())) {
                 continue;
             }
             for (uint32_t j = 0; j <= 16; ++j) {
-                const double along = (masks.coarser & (1U << edge)) ? j - (j & 1) : j;
+                const double along = (mask & (1U << (edge * 2))) ? j - (j & 1) : j;
                 const double px = edge < 2 ? x + (edge == 1 ? size : 0) : x + along * step;
                 const double pz = edge < 2 ? z + along * step : z + (edge == 3 ? size : 0);
                 const double probeX = edge < 2 ? px + (edge == 0 ? -1 : 1) * 1e-5 : x + std::clamp(static_cast<double>(j), 0.001, 15.999) * step;
@@ -536,8 +656,8 @@ void checkStitchedEdges(const Quadtree &selection, const LandscapeData &d) {
                         continue;
                     }
                     found = true;
-                    require(((masks.coarser & (1U << edge)) != 0) == (peer.level > n.level), "Coarser edge mask does not describe the actual neighbor");
-                    require(((masks.finer & (1U << edge)) != 0) == (peer.level < n.level), "Finer edge mask does not describe the actual neighbor");
+                    require(((mask & (1U << (edge * 2))) != 0) == (peer.level > n.level), "Coarser edge mask does not describe the actual neighbor");
+                    require(((mask & (2U << (edge * 2))) != 0) == (peer.level < n.level), "Finer edge mask does not describe the actual neighbor");
                     require(std::abs(sourceHeight(d, n, px, pz) - sourceHeight(d, peer.address(), px, pz)) < 1e-6, "Exact height sources disagree at a stitched vertex");
                     const double coordinate = edge < 2 ? (pz - peerZ) : (px - peerX);
                     const double lattice = coordinate / (peerSize / 16);
@@ -550,243 +670,183 @@ void checkStitchedEdges(const Quadtree &selection, const LandscapeData &d) {
     }
 }
 
-// The same balanced transactions must converge under a synchronous warmup or
-// delayed streaming, even when either cache cannot hold the requested detail.
-void testCapacityLimitedTransitions() {
-    const auto d = cacheData(4, 2, 2);
-    // Four resident roots plus four replacement children need eight slots
-    // during an atomic split, even though the resulting cut has seven leaves.
-    for (const auto capacities : {std::pair<uint32_t, uint32_t>{4, 256}, {256, 4}, {4, 4},
-                                 {7, 256}, {256, 7}, {7, 7}, {8, 8}}) {
-        TreeFixture selection;
-        selection.init(d);
-        CameraView view;
-        ResidencyFixture residency;
-        require(residency.initSlots(d, capacities.first), "Initialize source reservations");
-        VTResidencyFixture pages;
-        require(pages.initPages(d, capacities.second), "root-only VT capacity must initialize");
-        ccstd::vector<NodeAddress> roots;
-        ccstd::vector<VTPageAddress> materials;
-        for (const auto key : leafKeys(selection)) {
-            const auto n = NodeAddress::fromKey(key);
-            roots.push_back(n); materials.push_back({n.level, n.x, n.z});
-        }
-        require(residency.reserve(roots) && pages.reserve(materials), "exact root capacity must fit");
-        view = testView({QuadNode{0, 15, 15, 0, 1}}, {});
-        bool planned = false;
-        for (const auto &request : topologyCandidates(selection, view)) {
-            Quadtree::Change change;
-            if (!selection.plan(request, change)) continue;
-            planned = true;
-            auto sources = roots;
-            auto pending = materials;
-            for (const auto n : addedNodes(change)) {
-                sources.push_back(n); pending.push_back({n.level, n.x, n.z});
-            }
-            const bool fits = residency.canReserve(sources) && pages.canReserve(pending);
-            require(fits == (capacities.first == 8 && capacities.second == 8), "atomic split capacity boundary");
-            checkCut(selection, d); checkStitchedEdges(selection, d);
-        }
-        require(planned && leafKeys(selection).size() == 4, "capacity probe must retain complete roots");
+// CPU resource driver: real reservations and tree selection, synthetic IO/GPU
+// completion. This fixture deliberately has no split/merge or topology planner.
+class StreamingFixture {
+public:
+    StreamingFixture(LandscapeData data, uint32_t sourceCapacity, uint32_t pageCapacity)
+    : data(data) {
+        tree.init(data);
+        require(residency.initSlots(data, sourceCapacity), "Initialize source cache");
+        require(pages.initPages(data, pageCapacity), "Initialize VT cache");
+        require(reserve(std::nullopt), "Coarse coverage must fit");
+        complete(256);
     }
-    for (const auto capacities : {std::pair<uint32_t, uint32_t>{12, 256}, {256, 12}, {12, 12},
-                                 {19, 256}, {256, 19}, {19, 19}, {20, 256}, {256, 20}, {20, 20}}) {
-        ccstd::unordered_set<uint64_t> warmupCut;
-        for (const bool delayed : {false, true}) {
-            TreeFixture selection;
-            selection.init(d);
-            CameraView view;
-            ResidencyFixture residency;
-            require(residency.initSlots(d, capacities.first), "Initialize source reservations");
-            VTResidencyFixture pages;
-            require(pages.initPages(d, capacities.second), "capacity test VT init");
-            const auto reserve = [&](const Quadtree::Change &change) {
-                ccstd::vector<NodeAddress> sources;
-                ccstd::vector<VTPageAddress> materials;
-                const auto add = [&](NodeAddress n) {
-                    sources.push_back(n);
-                    materials.push_back({n.level, n.x, n.z});
-                };
-                for (const auto key : leafKeys(selection)) add(NodeAddress::fromKey(key));
-                for (const auto node : addedNodes(change)) add(node);
-                if (!residency.canReserve(sources) || !pages.canReserve(materials)) return false;
-                return residency.reserve(sources) && pages.reserve(materials);
-            };
-            const auto complete = [&](uint32_t budget) {
-                for (const auto source : residency.reservedSources()) {
-                    residency.publish(source.key());
-                }
-                ccstd::vector<uint32_t> updates;
-                collectUpdates(pages, updates, budget);
-                publishPages(pages, updates);
-            };
-            require(reserve({}), "minimum root coverage must fit");
-            complete(capacities.second);
-            size_t refused = 0, commits = 0;
-            for (const auto target : {QuadNode{0, 15, 15, 0, 1}, QuadNode{0, 24, 24, 0, 1},
-                                     QuadNode{0, 0, 0, 0, 1}, QuadNode{0, 31, 0, 0, 1},
-                                     QuadNode{0, 0, 31, 0, 1}, QuadNode{0, 31, 31, 0, 1},
-                                     QuadNode{0, 16, 16, 0, 1}, QuadNode{0, 15, 15, 0, 1}}) {
-                view = testView({target}, {});
-                bool settled = false;
-                for (uint32_t step = 0; step < 256; ++step) {
-                    bool changed = false;
-                    for (const auto &request : topologyCandidates(selection, view)) {
-                        Quadtree::Change change;
-                        if (!selection.plan(request, change)) continue;
-                        const auto before = leafKeys(selection);
-                        if (!reserve(change)) {
-                            ++refused;
-                            require(leafKeys(selection) == before, "capacity refusal partially split neighbors");
-                            checkCut(selection, d);
-                            checkStitchedEdges(selection, d);
-                            continue;
-                        }
-                        do {
-                            complete(delayed ? 1U : capacities.second);
-                            require(leafKeys(selection) == before, "incomplete pages changed committed coverage");
-                        } while (!pages.ready());
-                        commitTopology(selection, change, d);
-                        require(reserve({}), "committed cut exceeds capacity");
-                        checkCut(selection, d);
-                        checkStitchedEdges(selection, d);
-                        ++commits;
-                        changed = true;
-                        break;
-                    }
-                    if (!changed) {
-                        settled = true;
-                        break;
-                    }
-                }
-                require(settled && pages.ready(), "capacity-limited cut must settle with complete material coverage");
-                // Corner targets can reach full detail with fewer balancing
-                // neighbors. Capacity refusal is checked across the route below.
-                if (target.ix == 15 && target.iz == 15) {
-                    require(selection.at(target.ix, target.iz).level > target.level, "central target must exceed cache capacity");
-                }
-                for (const auto key : leafKeys(selection)) {
-                    const auto n = NodeAddress::fromKey(key);
-                    require(residency.resident(n) >= 0 && pages.resolve({n.level, n.x, n.z}) >= 0,
-                            "capacity-limited coverage lost a published resource");
-                }
-            }
-            require(refused > 0 && commits > 1, "capacity test must exercise refusal and recovery");
-            if (!delayed) warmupCut = leafKeys(selection);
-            else require(leafKeys(selection) == warmupCut, "warmup and streaming produced different balanced cuts");
-        }
-    }
-    std::cout << "PASS: source/VT/both capacity limits, warmup/streaming parity, balanced coarse coverage and movement\n";
-}
 
-void testLocalTransitions() {
-    auto d = cacheData(4, 2, 2);
-    d.minTileLevel = 2;
-    TreeFixture selection;
-    selection.init(d);
-    CameraView view;
-    ResidencyFixture residency;
-    require(residency.initSlots(d, 64), "Initialize source reservations");
-    VTResidencyFixture pages;
-    require(pages.initPages(d, 64), "transaction pages init");
-    Quadtree::Change pending;
-    std::mt19937 random(731);
-    size_t commits = 0, refused = 0;
-    for (uint32_t frame = 0; frame < 1600; ++frame) {
-        const uint32_t quadrant = frame / 200;
-        const uint32_t x = quadrant & 1 ? 16 : 15, z = quadrant & 2 ? 16 : 15;
-        view = testView({{0, x, z, 0, 1}}, {});
-        auto resources = [&](const Quadtree::Change &change) {
-            ccstd::vector<NodeAddress> result;
-            ccstd::unordered_set<uint64_t> unique;
-            const auto add = [&](NodeAddress node) {
-                const auto source = node.ancestor(std::max(node.level, d.minTileLevel));
-                if (unique.insert(source.key()).second) {
-                    result.push_back(source);
-                }
-            };
-            for (const auto key : leafKeys(selection)) {
-                add(NodeAddress::fromKey(key));
-            }
-            for (const auto node : addedNodes(change)) {
-                add(node);
-            }
-            return result;
-        };
-        auto material = [&](const Quadtree::Change &change) {
-            ccstd::vector<VTPageAddress> result;
-            for (const auto key : leafKeys(selection)) {
-                const auto n = NodeAddress::fromKey(key);
-                result.push_back({n.level, n.x, n.z});
-            }
-            for (auto n : addedNodes(change)) {
-                result.push_back({n.level, n.x, n.z});
-            }
-            return result;
-        };
-        if (pending.empty()) {
-            for (const auto &request : topologyCandidates(selection, view)) {
-                Quadtree::Change change;
-                if (!selection.plan(request, change)) {
-                    continue;
-                }
-                if (!residency.canReserve(resources(change)) || !pages.canReserve(material(change)) || frame % 19 == 0) {
-                    ++refused;
-                    continue;
-                }
-                pending = std::move(change);
-                break;
-            }
+    void setView(const CameraView &view) {
+        applyView(tree, view);
+        selectAndCheckChanges(tree);
+        if (pending && !tree.find(*pending)) {
+            pending.reset();
         }
-        const auto before = leafKeys(selection);
-        require(residency.reserve(resources(pending)) && pages.reserve(material(pending)), "Admitted local resources did not fit");
-        for (const auto source : residency.reservedSources()) {
-            if (random() % 3) {
+        require(reserve(pending), "Target coarsening must not increase reservations");
+    }
+
+    bool request() {
+        if (pending) {
+            return true;
+        }
+        for (const auto &entry : tree.requests()) {
+            if (tree.find(entry)->ready) {
+                continue;
+            }
+            if (reserve(entry)) {
+                pending = entry;
+                return true;
+            }
+            ++refused;
+        }
+        return false;
+    }
+
+    void complete(uint32_t budget, std::mt19937 *random = nullptr) {
+        for (const auto source : sources) {
+            if (!random || (*random)() % 3 != 0) {
                 residency.publish(source.key());
             }
         }
-        ccstd::vector<uint32_t> candidates;
-        collectUpdates(pages, candidates, static_cast<uint32_t>(pages.capacity()));
-        ccstd::vector<uint32_t> updates;
-        for (const auto slot : candidates) {
-            // Model missing source data outside the page cache, as the renderer does.
-            if (random() % 3 && updates.size() < 2) {
-                updates.push_back(slot);
-            }
+        if (residency.ready()) {
+            ccstd::vector<uint32_t> updates;
+            collectUpdates(pages, updates, budget);
+            publishPages(pages, updates);
         }
-        publishPages(pages, updates);
-        const bool ready = std::all_of(residency.reservedSources().begin(), residency.reservedSources().end(), [&](auto n) { return residency.resident(n) >= 0; });
-        if (ready && pages.ready() && !pending.empty()) {
-            commitTopology(selection, pending, d);
-            // Verify the production commit changed precisely the requested set.
-            auto expected = before;
-            for (auto n : pending.removed) {
-                expected.erase(n.key());
-            }
-            for (auto n : addedNodes(pending)) {
-                expected.insert(n.key());
-            }
-            require(leafKeys(selection) == expected, "Commit touched nodes outside the local transaction");
-            pending = {};
-            ++commits;
-        } else {
-            require(leafKeys(selection) == before, "Pending preparation changed displayed geometry");
+        if (pending && residency.ready() && pages.ready()) {
+            require(tree.publish(*pending, testMapping(*pending)), "Ready resource publication failed");
+            pending.reset();
+            ++published;
+            selectAndCheckChanges(tree);
+            require(reserve(std::nullopt), "Ready ancestors must fit after publication");
         }
-        checkCut(selection, d);
-        if (frame % 16 == 0) {
-            checkStitchedEdges(selection, d);
+    }
+
+    void check() const {
+        checkCut(tree, data);
+        tree.forEachNode([&](const Quadtree::Node &node) {
+            if (!node.ready) {
+                return true;
+            }
+            require(node.loaded, "Ready node must retain its loaded source data");
+            const auto address = node.geometry.address();
+            if (address.level < data.maxLevel) {
+                require(tree.find(address.ancestor(address.level + 1))->ready, "Ready ancestor invariant violated");
+            }
+            const auto source = address.ancestor(std::max(address.level, data.minTileLevel));
+            require(residency.resident(source) >= 0, "Ready node lost its exact height source");
+            for (const auto page : node.material.pages) {
+                require(pages.resolve(page) >= 0, "Ready ancestor lost its material page");
+            }
+            return true;
+        });
+    }
+
+    bool reserve(std::optional<NodeAddress> demand) {
+        ccstd::vector<NodeAddress> required;
+        ccstd::vector<VTPageAddress> material;
+        ccstd::unordered_set<uint64_t> unique;
+        const auto add = [&](NodeAddress address) {
+            const auto source = address.ancestor(std::max(address.level, data.minTileLevel));
+            if (unique.insert(source.key()).second) {
+                required.push_back(source);
+            }
+            material.push_back({address.level, address.x, address.z});
+        };
+        tree.forEachNode([&](const Quadtree::Node &node) {
+            if (node.ready) {
+                add(node.geometry.address());
+            }
+            return true;
+        });
+        if (demand) {
+            add(*demand);
         }
-        if (frame > 15) {
-            for (const auto key : leafKeys(selection)) {
-                const auto n = NodeAddress::fromKey(key);
-                require(residency.resident(n.ancestor(std::max(n.level, d.minTileLevel))) >= 0 &&
-                            pages.resolve({n.level, n.x, n.z}) >= 0,
-                        "Committed geometry lost an exact source/page");
+        if (!residency.canReserve(required) || !pages.canReserve(material)) {
+            return false;
+        }
+        require(residency.reserve(required) && pages.reserve(material), "Validated reservation failed");
+        sources = std::move(required);
+        return true;
+    }
+
+    LandscapeData data;
+    TreeFixture tree;
+    ResidencyFixture residency;
+    VTResidencyFixture pages;
+    std::optional<NodeAddress> pending;
+    ccstd::vector<NodeAddress> sources;
+    size_t refused{0};
+    size_t published{0};
+};
+
+void testCapacityLimitedTransitions() {
+    const auto data = cacheData(4, 2, 2);
+    for (const auto capacities : {std::pair<uint32_t, uint32_t>{4, 256}, {256, 4}, {4, 4},
+                                 {7, 256}, {256, 7}, {7, 7}, {8, 8}, {12, 256}, {256, 12},
+                                 {12, 12}, {19, 19}, {20, 256}, {256, 20}, {20, 20}}) {
+        ccstd::unordered_set<uint64_t> immediateCompletion;
+        for (const bool delayed : {false, true}) {
+            StreamingFixture stream(data, capacities.first, capacities.second);
+            for (const auto target : {QuadNode{0, 15, 15, 0, 1}, QuadNode{0, 24, 24, 0, 1},
+                                     QuadNode{0, 0, 0, 0, 1}, QuadNode{0, 31, 0, 0, 1},
+                                     QuadNode{0, 0, 31, 0, 1}, QuadNode{0, 31, 31, 0, 1}}) {
+                stream.setView(testView({target}));
+                uint32_t step = 0;
+                while (stream.request()) {
+                    require(++step < 1024, "Capacity-limited loading failed to settle");
+                    const auto before = renderableKeys(stream.tree);
+                    const bool missingPages = !stream.pages.ready();
+                    stream.complete(0);
+                    if (missingPages) {
+                        require(renderableKeys(stream.tree) == before, "Missing pages changed coverage");
+                    }
+                    stream.complete(delayed ? 1U : 256U);
+                    stream.check();
+                }
+                stream.check();
+                checkStitchedEdges(stream.tree, data);
+                if (std::min(capacities.first, capacities.second) < 8) {
+                    require(renderableKeys(stream.tree).size() == 4, "Incomplete sibling resources must retain all sector roots");
+                }
+            }
+            require(stream.refused > 0, "Capacity test never refused a demand");
+            if (!delayed) {
+                immediateCompletion = renderableKeys(stream.tree);
+            } else {
+                require(renderableKeys(stream.tree) == immediateCompletion, "Immediate and delayed completion diverged");
             }
         }
     }
-    require(commits > 20 && refused > 0, "Insufficient local transition coverage");
-    std::cout << "PASS: 1600 streaming frames, local deltas, cross-sector balance, stitched heights and delayed exact resources\n";
+    std::cout << "PASS: ancestor reservations, source/VT limits, delayed completion and moving views\n";
+}
+
+void testStreamingSelection() {
+    auto data = cacheData(4, 2, 2);
+    data.minTileLevel = 2;
+    StreamingFixture stream(data, 64, 64);
+    std::mt19937 random(731);
+    for (uint32_t frame = 0; frame < 1600; ++frame) {
+        const uint32_t quadrant = frame / 80;
+        const uint32_t x = quadrant & 1 ? 31 : 0;
+        const uint32_t z = quadrant & 2 ? 31 : 0;
+        stream.setView(testView({{0, x, z, 0, 1}}));
+        stream.request();
+        stream.complete(frame % 19 == 0 ? 0U : 1U, &random);
+        stream.check();
+        if (frame % 16 == 0) {
+            checkStitchedEdges(stream.tree, data);
+        }
+    }
+    require(stream.published > 20, "Streaming test did not exercise enough asynchronous completions");
+    std::cout << "PASS: 1600 frames, moving targets, delayed IO/pages, ancestor retention and stitched edges\n";
 }
 
 void testSingleRoot() {
@@ -794,39 +854,172 @@ void testSingleRoot() {
         const auto d = cacheData(3, dimensions.first, dimensions.second);
         TreeFixture tree;
         tree.init(d);
+        const auto childMask = [&](NodeAddress address) {
+            const auto *node = tree.find(address);
+            require(node && node->children, "Management node must own four children");
+            uint8_t mask = 0;
+            for (uint32_t q = 0; q < 4; ++q) {
+                if (tree.find(node->children[q].geometry.address())) {
+                    mask |= static_cast<uint8_t>(1U << q);
+                } else {
+                    require(!node->children[q].children && !node->children[q].ready, "Empty sector must not allocate descendants or load resources");
+                }
+            }
+            return mask;
+        };
         uint32_t side = 1;
         uint32_t levels = 0;
         while (side < std::max(d.sectorsX, d.sectorsZ)) {
             side *= 2;
             ++levels;
         }
-        require(tree.root().level == d.maxLevel + levels, "Incorrect padded global root");
-        uint32_t leaves = 0;
-        tree.cull([&](NodeAddress node, bool leaf) {
-            if (leaf) {
-                ++leaves;
-                require(node.level == d.maxLevel && node.x < d.sectorsX && node.z < d.sectorsZ, "Absent sector became a leaf");
+        require(rootAddress(tree).level == d.maxLevel + levels, "Incorrect padded global root");
+        uint32_t renderableCount = 0;
+        tree.cull([&](NodeAddress node, bool renderable) {
+            if (renderable) {
+                ++renderableCount;
+                require(node.level == d.maxLevel && node.x < d.sectorsX && node.z < d.sectorsZ, "Absent sector became a renderable");
             }
             if (node.level > d.maxLevel) {
-                require(tree.childMask(node) != 0, "Empty management branch");
+                require(childMask(node) != 0, "Empty management branch");
             }
             return true;
         });
-        require(leaves == d.sectorsX * d.sectorsZ, "Single root does not cover all sectors");
+        require(renderableCount == d.sectorsX * d.sectorsZ, "Single root does not cover all sectors");
         if (d.sectorsX == 3 && d.sectorsZ == 3) {
-            require(tree.childMask(tree.root()) == 15, "3x3 root must have four valid quadrants");
-            require(tree.childMask({d.maxLevel + 1, 0, 0}) == 15, "3x3 upper-left group");
-            require(tree.childMask({d.maxLevel + 1, 1, 0}) == 5, "3x3 upper-right group");
-            require(tree.childMask({d.maxLevel + 1, 0, 1}) == 3, "3x3 lower-left group");
-            require(tree.childMask({d.maxLevel + 1, 1, 1}) == 1, "3x3 lower-right group");
+            require(childMask(rootAddress(tree)) == 15, "3x3 root must have four valid quadrants");
+            require(childMask({d.maxLevel + 1, 0, 0}) == 15, "3x3 upper-left group");
+            require(childMask({d.maxLevel + 1, 1, 0}) == 5, "3x3 upper-right group");
+            require(childMask({d.maxLevel + 1, 0, 1}) == 3, "3x3 lower-left group");
+            require(childMask({d.maxLevel + 1, 1, 1}) == 1, "3x3 lower-right group");
         }
-        Quadtree::Change change;
         if (levels) {
-            require(!tree.plan({tree.root(), Quadtree::Operation::MERGE}, change), "Management root must not request absent coarse geometry");
+            require(!tree.publish(rootAddress(tree), testMapping(rootAddress(tree))), "Management root must not own render resources");
         }
         checkCut(tree, d);
     }
     std::cout << "PASS: single padded root, 3x3 child masks, rectangular and 64-sector coverage\n";
+}
+
+void testReadySelection() {
+    const auto data = cacheData(3, 3, 3);
+    TreeFixture tree;
+    tree.init(data, false);
+    require(!tree.selectRenderables() && renderableKeys(tree).size() == 0, "Unready roots must not publish partial landscape coverage");
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            const NodeAddress address{3, x, z};
+            require(tree.publish(address, testMapping(address)), "Coarse resource publication failed");
+            if (x != 2 || z != 2) {
+                require(!tree.selectRenderables(), "Initialization published incomplete roots");
+            }
+        }
+    }
+    selectAndCheckChanges(tree);
+    const auto roots = renderableKeys(tree);
+    const auto near = testView({{0, 7, 0, 0, 1}});
+    applyView(tree, near);
+    const auto target = targetKeys(tree);
+    require(target.count(NodeAddress{0, 7, 0}.key()) != 0 && target.size() > roots.size(), "Distance target must be complete before loading");
+    require(renderableKeys(tree) == roots, "Target creation changed the rendered coverage");
+    require(!tree.publish({0, 7, 0}, testMapping({0, 7, 0})), "Child became ready before its ancestor");
+    auto &sector = *tree.find({3, 0, 0});
+    for (uint32_t q = 0; q < 4; ++q) {
+        require(!sector.children[q].loaded && !sector.children[q].ready, "New target nodes must start unloaded");
+        sector.children[q].loaded = true;
+    }
+    selectAndCheckChanges(tree);
+    require(renderableKeys(tree) == roots, "Loaded data without composition must not replace the parent");
+    for (uint32_t q = 0; q < 3; ++q) {
+        const auto address = sector.children[q].geometry.address();
+        require(tree.publish(address, testMapping(address)), "Publish partial sibling resources");
+    }
+    selectAndCheckChanges(tree);
+    require(renderableKeys(tree) == roots, "Three ready children must not replace their parent");
+    const auto fourth = sector.children[3].geometry.address();
+    require(tree.publish(fourth, testMapping(fourth)), "Publish last sibling");
+    selectAndCheckChanges(tree);
+    require(sector.ready && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
+    checkCut(tree, data);
+    // Load only one sector deeply. Neighbor roots stay coarse, so selection must
+    // retain coarse render nodes despite ready fine resources at the boundary.
+    for (uint32_t round = 0; round < 4; ++round) {
+        for (const auto &request : tree.requests()) {
+            const auto owner = request.ancestor(data.maxLevel);
+            if (owner.x == 0 && owner.z == 0 && !tree.find(request)->ready) {
+                require(tree.publish(request, testMapping(request)), "Load fine boundary resources");
+            }
+        }
+        selectAndCheckChanges(tree);
+        checkCut(tree, data);
+        checkStitchedEdges(tree, data);
+    }
+    require(tree.find({0, 7, 0})->ready && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
+    require(targetKeys(tree) == target, "Resource readiness rewrote the distance target");
+    completeTarget(tree);
+    checkCut(tree, data);
+    checkStitchedEdges(tree, data);
+    require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
+    applyView(tree, {});
+    selectAndCheckChanges(tree);
+    require(renderableKeys(tree) == roots && !sector.children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
+    applyView(tree, near);
+    const NodeAddress pending{2, 0, 0};
+    require(tree.find(pending) && !tree.find(pending)->ready, "Prepare moving-view load");
+    applyView(tree, {});
+    selectAndCheckChanges(tree);
+    require(!tree.find(pending) && !tree.publish(pending, testMapping(pending)), "Retired request resurrected an obsolete node");
+    applyView(tree, near);
+    completeTarget(tree);
+    require(renderableKeys(tree) == target, "Returning camera did not converge to the same target");
+    checkCut(tree, data, true);
+    std::cout << "PASS: ready ancestors, partial siblings, balanced selection and moving targets\n";
+}
+
+void testUpdateStages() {
+    const auto data = cacheData(3, 3, 3);
+    TreeFixture tree;
+    tree.init(data, false);
+    tree.beginUpdate({7.5F, 0.5F, 7.5F}, cc::Vec3::ZERO);
+    tree.updateTarget();
+    require(!tree.sectorRootsReady() && renderableKeys(tree).size() == 0, "Target stage published unready draws");
+    require(targetKeys(tree).size() > data.sectorsX * data.sectorsZ, "Target stage waited for resources");
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            const NodeAddress address{data.maxLevel, x, z};
+            require(tree.publish(address, testMapping(address)), "Prepare initial coverage without selecting draws");
+        }
+    }
+    require(tree.sectorRootsReady() && renderableKeys(tree).size() == 0, "Resource readiness must be independent of render selection");
+    // Several publications may share one resource stage. No intermediate draw
+    // selection is needed to request the next generation of resources.
+    for (uint32_t level = 0; level < data.maxLevel; ++level) {
+        for (const auto &request : tree.requests()) {
+            if (!tree.find(request)->ready) {
+                require(tree.publish(request, testMapping(request)), "Prepare descendants before selecting draws");
+            }
+        }
+        require(renderableKeys(tree).size() == 0, "Resource publication implicitly selected draws");
+    }
+    require(tree.selectRenderables(), "Select the prepared render set once");
+    require(tree.renderSelectionChanged() && renderableKeys(tree) == targetKeys(tree), "Batched publication did not reach the prepared target");
+    checkCut(tree, data);
+    checkStitchedEdges(tree, data);
+    const auto old = renderableKeys(tree);
+    tree.clearChangedNodes();
+    tree.beginUpdate({0, tree.lodMorphRanges().back().end * 4, 0}, cc::Vec3::ZERO);
+    tree.updateTarget();
+    require(tree.changedNodes().empty(), "Target update performed render synchronization");
+    require(tree.selectRenderables(), "Select coarse coverage after target deletion");
+    for (const auto key : old) {
+        if (!tree.findRenderable(NodeAddress::fromKey(key))) {
+            require(tree.changedNodes().count(key) != 0, "Stage boundary lost a retired draw notification");
+        }
+    }
+    checkCut(tree, data);
+    tree.clearChangedNodes();
+    require(tree.selectRenderables() && !tree.renderSelectionChanged() && tree.changedNodes().empty(), "Stable selection repeated draw changes");
+    std::cout << "PASS: separate target, resource and selection stages, batched readiness and retired draws\n";
 }
 
 void testCommittedVisibility() {
@@ -839,60 +1032,44 @@ void testCommittedVisibility() {
     // The frustum-like box at Y=[1,4] rejects the fine target, not the coarse draw.
     const auto visible = [&](double x0, double z0, double x1, double z1) {
         ccstd::unordered_set<uint64_t> result;
-        selection.cull([&](NodeAddress n, bool leaf) {
+        selection.cull([&](NodeAddress n, bool renderable) {
             const double size = selection.region(n).size;
             const double lowX = n.x * size;
             const double lowZ = n.z * size;
             const double maxY = n.level == 0 ? 0.0 : 10.0;
             const bool intersects = lowX < x1 && lowX + size > x0 && lowZ < z1 && lowZ + size > z0 && maxY >= 1.0;
-            if (intersects && leaf) {
-                require(result.insert(n.key()).second, "Duplicate visible leaf");
+            if (intersects && renderable) {
+                require(result.insert(n.key()).second, "Duplicate visible renderable");
             }
             return intersects;
         });
         return result;
     };
-    view = testView({}, {}); // The distance/target traversal selected nothing.
+    view = testView({}, {}); // Initial coverage consists of ready sector roots.
     const auto coarse = visible(0.25, 0.25, 0.75, 0.75);
     require(coarse.size() == 1 && coarse.count(NodeAddress{5, 0, 0}.key()),
             "An empty fine selection hid visible coarse geometry");
     view = testView({{0, 0, 0, 0, 0}}, {});
-    Quadtree::Change pending;
-    const auto requests = topologyCandidates(selection, view);
-    require(!requests.empty() && selection.plan(requests.front(), pending), "Visibility transition setup");
+    applyView(selection, view);
     require(visible(0.25, 0.25, 0.75, 0.75) == coarse,
-            "Unpublished refinement changed pass visibility");
-    // Commit refinement until the actual draw reaches the flat fine region.
-    for (uint32_t round = 0; round < 100; ++round) {
-        bool changed = false;
-        for (const auto &request : topologyCandidates(selection, view)) {
-            Quadtree::Change change;
-            if (selection.plan(request, change)) {
-                commitTopology(selection, change, d);
-                changed = true;
-                break;
-            }
-        }
-        if (!changed) {
-            break;
-        }
-    }
-    require(selection.at(0, 0).level == 0 && visible(0.25, 0.25, 0.75, 0.75).empty(),
+            "Unready target changed pass visibility");
+    completeTarget(selection);
+    require(renderableAt(selection, 0, 0).level == 0 && visible(0.25, 0.25, 0.75, 0.75).empty(),
             "Culling must follow the committed geometry's height bounds");
-    // Independent shadow/camera frusta must still find a different sector even
-    // when it is absent from the target list. Rejected subtrees stop at the root.
+    // Independent shadow/camera frusta must still find a distant coarse sector.
+    // Rejected subtrees stop at the root.
     const auto shadow = visible(32.25, 32.25, 32.75, 32.75);
     require(shadow.size() == 1 && shadow.count(NodeAddress{5, 1, 1}.key()),
             "Pass visibility leaked the main camera's target selection");
     uint32_t visited = 0;
-    selection.cull([&](NodeAddress n, bool leaf) {
+    selection.cull([&](NodeAddress n, bool renderable) {
         ++visited;
-        require(n.level == selection.root().level, "Rejected root still traversed its children");
-        require(leaf == (leafKeys(selection).count(n.key()) != 0), "Incorrect committed leaf classification");
+        require(n.level == rootAddress(selection).level, "Rejected root still traversed its children");
+        require(renderable == (renderableKeys(selection).count(n.key()) != 0), "Incorrect committed renderable classification");
         return false;
     });
     require(visited == 1,
-            "Invisible sectors must be pruned without scanning their leaves");
+            "Invisible sectors must be pruned without scanning their renderable nodes");
     std::cout << "PASS: actual-cut culling, empty targets, pending refinement, independent passes and subtree pruning\n";
 }
 
@@ -948,60 +1125,38 @@ void testStitchedPageBounds() {
     std::cout << "PASS: local grid mappings preserve cell coverage, stitched bounds and shader page origins\n";
 }
 
-void testIncrementalTree() {
+void testMaterialPublication() {
     const auto data = cacheData(3);
-    TreeFixture current;
-    current.init(data);
-    const auto original = leafKeys(current);
-    const auto nearView = testView({{0, 1, 1, 0, 1}});
-    applyView(current, nearView);
-    require(current.viewChanged(), "New view must invalidate settled scheduling");
-    applyView(current, nearView);
-    require(!current.viewChanged(), "Identical view must not restart settled scheduling");
-    const auto requests = topologyCandidates(current, nearView);
-    require(!requests.empty(), "Near camera must request refinement");
-    Quadtree::Change change;
-    require(current.plan(requests.front(), change), "Local balanced change");
-    require(leafKeys(current) == original, "Preparing children must retain the parent");
-    ccstd::vector<Quadtree::Node> prepared;
-    for (const auto node : change.added) {
-        require(node.level + 1 == data.maxLevel, "A split skipped an intermediate level");
-        prepared.push_back({{node.level, node.x, node.z, 0.25F, 1.0F}, {}});
-    }
-    const auto preparedKey = change.added.front().key();
-    const VTPageAddress preparedPage{1, 0, 0};
-    prepared.front().material.pages.push_back(preparedPage);
-    current.commit(change, prepared);
-    require(current.nodes().at(preparedKey).material.pages.front().key() == preparedPage.key() && current.nodes().at(preparedKey).geometry.minY == 0.25F,
-            "Commit must publish geometry and materials together");
-    checkCut(current, data);
-    checkStitchedEdges(current, data);
-    current.clearChanges();
-    const auto beforeMaterial = leafKeys(current);
-    require(current.plan({NodeAddress::fromKey(preparedKey), Quadtree::Operation::REFRESH}, change), "Material refresh plan");
-    prepared = {current.nodes().at(preparedKey)};
-    prepared.front().material.pages = {{2, 0, 0}};
-    current.commit(change, prepared);
-    require(leafKeys(current) == beforeMaterial && current.changedNodes().size() == 1, "Material refresh must retain topology");
-    require(current.plan({{2, 1, 0}, Quadtree::Operation::SPLIT}, change), "Prepare incomplete sibling merge");
-    commitTopology(current, change, data);
-    require(!current.plan({{3, 0, 0}, Quadtree::Operation::MERGE}, change) && change.empty(), "Incomplete siblings must not merge");
-    const auto displayed = leafKeys(current);
-    require(!topologyCandidates(current, {}).empty(), "An empty view must permit coarsening");
-    require(leafKeys(current) == displayed, "View changes must not remove displayed coverage");
-    // Rotation/pass changes are tracked independently of camera translation.
-    applyView(current, nearView);
-    const auto changedView = testView({{0, 7, 7, 0, 1}});
-    applyView(current, changedView);
-    require(current.viewChanged(), "Changed pass must invalidate scheduling");
+    TreeFixture tree;
+    tree.init(data);
+    const auto near = testView({{0, 1, 1, 0, 1}});
+    applyView(tree, near);
+    require(tree.viewChanged(), "New view must invalidate scheduling");
+    applyView(tree, near);
+    require(!tree.viewChanged(), "Identical view must preserve settled scheduling");
+    completeTarget(tree);
+    const auto before = renderableKeys(tree);
+    const auto address = NodeAddress::fromKey(*before.begin());
+    auto *node = tree.find(address);
+    const auto oldMaterial = node->material;
+    auto replacement = testMapping(address.ancestor(data.maxLevel));
+    require(node->ready && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
+    tree.clearChangedNodes();
+    require(tree.publish(address, replacement), "Material refresh publication failed");
+    require(renderableKeys(tree) == before && tree.changedNodes().size() == 1 && tree.changedNodes().count(address.key()), "Material refresh changed topology or missed notification");
+    require(node->material.pages.front().key() == replacement.pages.front().key(), "New mapping was not published");
     ccstd::unordered_set<uint64_t> refresh;
-    for (const auto candidate : current.candidates()) {
-        if (candidate.operation == Quadtree::Operation::REFRESH) {
-            require(refresh.insert(candidate.node.key()).second, "Duplicate material candidate");
+    for (const auto &request : tree.requests()) {
+        if (tree.find(request)->ready) {
+            require(refresh.insert(request.key()).second, "Duplicate material refresh request");
         }
     }
-    require(refresh == leafKeys(current), "Every leaf must retain material updates");
-    std::cout << "PASS: incremental next-level requests, atomic resources, view changes and material refresh\n";
+    require(refresh == before, "Every displayed node must support material refresh");
+    applyView(tree, testView({{0, 7, 7, 0, 1}}));
+    require(tree.viewChanged(), "Changed pass must invalidate scheduling");
+    selectAndCheckChanges(tree);
+    checkCut(tree, data);
+    std::cout << "PASS: atomic material publication, retained mappings, stable views and refresh requests\n";
 }
 
 void testDistanceAndPasses() {
@@ -1015,43 +1170,52 @@ void testDistanceAndPasses() {
     }
     const cc::Vec3 camera{0.5F, 0.5F, 0.5F};
     tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.includePass(hidden, false);
-    tree.endUpdate();
-    auto requests = tree.candidates();
-    require(std::none_of(requests.begin(), requests.end(), [](const auto &c) { return c.operation == Quadtree::Operation::SPLIT; }), "Invisible shadow pass refined terrain");
+    tree.addPass(hidden, false);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
+    auto requests = tree.requests();
+    const auto hiddenRequests = requests;
+    const auto target = targetKeys(tree);
+    require(std::any_of(requests.begin(), requests.end(), [&](const auto &c) { return !tree.find(c)->ready; }), "Hidden terrain lost distance-required subdivision");
     tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.includePass(hidden, true);
-    tree.endUpdate();
-    requests = tree.candidates();
-    require(std::any_of(requests.begin(), requests.end(), [](const auto &c) { return c.operation == Quadtree::Operation::SPLIT && c.visible; }), "Offscreen near-camera preload was lost");
+    tree.addPass(hidden, true);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
+    requests = tree.requests();
+    require(requests.size() == hiddenRequests.size() && std::equal(requests.begin(), requests.end(), hiddenRequests.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Main pass changed LOD request order");
+    require(targetKeys(tree) == target, "Main pass changed target topology");
     cc::geometry::Frustum visible;
     for (auto *plane : visible.planes) {
         plane->n.set(1, 0, 0);
         plane->d = -100000.0F;
     }
     tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.includePass(visible, false);
-    tree.endUpdate();
+    tree.addPass(visible, false);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
     require(tree.viewChanged(), "Pass change without translation must invalidate scheduling");
-    requests = tree.candidates();
-    require(std::any_of(requests.begin(), requests.end(), [](const auto &c) { return c.operation == Quadtree::Operation::SPLIT && !c.visible; }), "Shadow refinement must not acquire color priority");
+    require(targetKeys(tree) == target, "Shadow visibility changed target topology");
+    requests = tree.requests();
+    require(requests.size() == hiddenRequests.size() && std::equal(requests.begin(), requests.end(), hiddenRequests.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Shadow visibility changed LOD request order");
     tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.includePass(visible, false);
-    tree.endUpdate();
+    tree.addPass(visible, false);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
     require(!tree.viewChanged(), "Stable pass repeated scheduling");
-    // Compare next-level requests to an independent distance-to-child oracle.
+    // Compare requested children to an independent distance-to-child oracle.
     for (const float height : {0.5F, 2.0F, 5.0F, 10.0F, 100.0F}) {
         tree.beginUpdate({12, height, 12}, cc::Vec3::ZERO);
-        tree.includePass(visible, false);
-        tree.endUpdate();
+        tree.addPass(visible, false);
+        tree.updateTarget();
+        require(tree.selectRenderables(), "Select draws after updating the distance target");
         ccstd::unordered_set<uint64_t> splits;
-        for (const auto &candidate : tree.candidates()) {
-            if (candidate.operation == Quadtree::Operation::SPLIT) {
-                splits.insert(candidate.node.key());
+        for (const auto &candidate : tree.requests()) {
+            if (!tree.find(candidate)->ready) {
+                splits.insert(candidate.ancestor(data.maxLevel).key());
             }
         }
-        for (const auto &entry : tree.nodes()) {
-            const auto node = entry.second.geometry.address();
+        tree.forEachRenderable([&](const Quadtree::Node &renderable) {
+            const auto node = renderable.geometry.address();
             bool refine = false;
             for (uint32_t q = 0; q < 4; ++q) {
                 const NodeAddress child{node.level - 1, node.x * 2 + (q & 1), node.z * 2 + (q >> 1)};
@@ -1059,29 +1223,105 @@ void testDistanceAndPasses() {
                 const float dx = std::max({area.x - 12, 12 - area.x - area.size, 0.0F});
                 const float dz = std::max({area.z - 12, 12 - area.z - area.size, 0.0F});
                 const float dy = std::max(height - 1, 0.0F);
-                refine |= std::sqrt(dx * dx + dy * dy + dz * dz) <= tree.lodMorphEnd()[child.level];
+                refine |= std::sqrt(dx * dx + dy * dy + dz * dz) <= tree.lodMorphRanges()[child.level].end;
             }
-            require((splits.count(node.key()) != 0) == refine, "Distance subdivision differs from child bounds oracle");
-        }
+            require(!refine || splits.count(node.key()) != 0, "Target omitted distance-required subdivision");
+            require((splits.count(node.key()) != 0) == static_cast<bool>(renderable.children), "Candidates differ from the balanced target");
+        });
     }
     // A translation of the entire terrain and pass must preserve local requests.
     tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.includePass(visible, false);
-    tree.endUpdate();
-    const auto before = tree.candidates();
+    tree.addPass(visible, false);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
+    const auto before = tree.requests();
     const cc::Vec3 offset{137, 29, -81};
     for (auto *plane : visible.planes) {
         plane->d += offset.x;
     }
     tree.beginUpdate(camera + offset, offset);
-    tree.includePass(visible, false);
-    tree.endUpdate();
-    const auto after = tree.candidates();
+    tree.addPass(visible, false);
+    tree.updateTarget();
+    require(tree.selectRenderables(), "Select draws after updating the distance target");
+    const auto after = tree.requests();
     require(before.size() == after.size(), "World translation changed local subdivision");
     for (size_t i = 0; i < before.size(); ++i) {
-        require(before[i].node.key() == after[i].node.key() && before[i].operation == after[i].operation, "Translated candidate ordering changed");
+        require(before[i].key() == after[i].key(), "Translated candidate ordering changed");
     }
-    std::cout << "PASS: distance oracle, shadow demand, offscreen preload, stable views and world translation\n";
+    std::cout << "PASS: distance oracle, pass-independent targets and requests, stable views and world translation\n";
+}
+
+void testCameraRotation() {
+    const auto data = cacheData(3, 3, 3);
+    TreeFixture tree;
+    tree.init(data);
+    const cc::Vec3 camera{7.5F, 0.5F, 7.5F};
+    const auto update = [&](uint32_t direction, bool shadow) {
+        cc::geometry::Frustum frustum;
+        for (auto *plane : frustum.planes) {
+            plane->n.set(0, 1, 0);
+            plane->d = -1000;
+        }
+        // Rotate a 90-degree horizontal view around the same camera position.
+        const float angle = static_cast<float>(direction) * 0.785398163F;
+        for (uint32_t side = 0; side < 2; ++side) {
+            const float normal = angle + (side == 0 ? -0.785398163F : 0.785398163F);
+            auto &plane = *frustum.planes[side];
+            plane.n.set(std::cos(normal), 0, std::sin(normal));
+            plane.d = camera.x * plane.n.x + camera.z * plane.n.z;
+        }
+        tree.beginUpdate(camera, cc::Vec3::ZERO);
+        tree.addPass(frustum, true);
+        if (shadow) {
+            tree.addPass(frustum, false);
+        }
+        tree.updateTarget();
+        require(tree.selectRenderables(), "Select draws after updating the distance target");
+    };
+    update(0, false);
+    // Repeat with no fine data, incomplete siblings, and fully loaded detail.
+    for (uint32_t phase = 0; phase < 3; ++phase) {
+        if (phase == 1) {
+            auto &sector = *tree.find({data.maxLevel, 0, 0});
+            for (uint32_t q = 0; q < 3; ++q) {
+                const auto address = sector.children[q].geometry.address();
+                require(tree.publish(address, testMapping(address)), "Rotation setup could not publish partial siblings");
+            }
+            selectAndCheckChanges(tree);
+        } else if (phase == 2) {
+            completeTarget(tree);
+        }
+        const auto target = targetKeys(tree);
+        const auto draws = renderableKeys(tree);
+        ccstd::unordered_map<uint64_t, const Quadtree::Node *> nodes;
+        ccstd::unordered_set<uint64_t> ready;
+        tree.forEachNode([&](const Quadtree::Node &node) {
+            const auto key = node.geometry.address().key();
+            nodes.emplace(key, &node);
+            if (node.ready) {
+                ready.insert(key);
+            }
+            return true;
+        });
+        tree.clearChangedNodes();
+        for (uint32_t direction = 0; direction <= 8; ++direction) {
+            update(direction, direction % 2 != 0);
+            require(targetKeys(tree) == target, "Camera rotation or shadow pass changed the distance target");
+            require(renderableKeys(tree) == draws, "Camera rotation coarsened ready terrain");
+            require(tree.changedNodes().empty(), "Camera rotation changed draw materials or morph edges");
+            for (const auto &entry : nodes) {
+                const auto *node = tree.find(NodeAddress::fromKey(entry.first));
+                require(node == entry.second, "Camera rotation retired an existing node or pending request");
+                require(node->ready == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
+                if (node->ready) {
+                    require(node->material.pages.size() == 1 && node->material.pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
+                }
+            }
+            checkCut(tree, data);
+            checkStitchedEdges(tree, data);
+        }
+    }
+    std::cout << "PASS: full camera rotation, shadow changes, pending siblings and ready detail retention\n";
 }
 
 void testCoordinateLayouts() {
@@ -1106,7 +1346,7 @@ void testCoordinateLayouts() {
                     require(data.nodeSize(level) * side == 1000, "Node sizes do not cover the sector");
                     for (uint32_t z = 0; z < side; ++z) {
                         for (uint32_t x = 0; x < side; ++x) {
-                            const auto address = data.nodeInSector(sx, sz, level, x, z);
+                            const NodeAddress address{level, sx * side + x, sz * side + z};
                             require(layout.sectorNodeIndex(sx, sz, level, x, z) == expected, "Sector storage order changed");
                             require(layout.globalNodeIndex(level, address.x, address.z) == expected++, "Global storage order changed");
                             const auto decoded = NodeAddress::fromKey(address.key());
@@ -1389,12 +1629,15 @@ int main() {
     testPageRefreshAndReuse();
     testRegionalInvalidation();
     testCapacityLimitedTransitions();
-    testLocalTransitions();
+    testStreamingSelection();
     testSingleRoot();
+    testReadySelection();
+    testUpdateStages();
     testCommittedVisibility();
     testStitchedPageBounds();
-    testIncrementalTree();
+    testMaterialPublication();
     testDistanceAndPasses();
+    testCameraRotation();
     testAtlasFilterFootprint();
     testCoordinateLayouts();
     testPageCompositionBudget();

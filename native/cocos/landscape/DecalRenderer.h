@@ -56,7 +56,7 @@ class MaterialLibrary;
 struct LandscapeGridParams {
     Vec4 grid; // landscape-local XZ origin, size, geometry LOD
     Vec4 tile; // source tile XZ origin, size, texture array layer
-    Vec4 mapping; // local table slot, coarser/finer neighbor edge masks, unused W
+    Vec4 mapping; // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
     void apply(scene::Model *model, TypedArray &scratch) const;
 };
 
@@ -133,7 +133,7 @@ private:
     void appendDecal(NodeDraws &node, uint32_t decal);
     void initializeInstance(Instance &instance);
     IntrusivePtr<scene::Model> createModel();
-    void warmupPipelines();
+    void compilePipelines();
     void recycle(Draw &draw);
 
     IntrusivePtr<Node> _node;

@@ -49,7 +49,7 @@ LandscapeResidency::~LandscapeResidency() {
 
 bool LandscapeResidency::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
-    if (device == nullptr || asset == nullptr || !asset->valid() || layerCount == 0) {
+    if (device == nullptr || asset == nullptr || layerCount == 0) {
         return false;
     }
     if (!initSlots(asset->data(), layerCount)) {
@@ -138,7 +138,7 @@ bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
     return true;
 }
 
-bool LandscapeResidency::loadReserved(bool synchronous) {
+bool LandscapeResidency::loadReserved() {
     if (_asset->loadingFailed()) {
         return false;
     }
@@ -149,14 +149,6 @@ bool LandscapeResidency::loadReserved(bool synchronous) {
     for (const auto source : _working) {
         auto &slot = _slots.at(source.key());
         if (slot.ready || _inFlight.count(source.key())) {
-            continue;
-        }
-        if (synchronous) {
-            LandscapeAsset::TileData tile;
-            if (!_asset->loadTileSet(source.level, source.x, source.z, heightFormat, tile)) {
-                return false;
-            }
-            uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
             continue;
         }
         if (_inFlight.size() >= MAX_IN_FLIGHT) {
@@ -201,7 +193,7 @@ bool LandscapeResidency::ready() const {
 bool LandscapeResidency::initSlots(const LandscapeData &data, uint32_t layerCount) {
     CC_ASSERT(_device == nullptr && _slots.empty() && _inFlight.empty());
     const size_t rootCount = static_cast<size_t>(data.sectorsX) * data.sectorsZ;
-    if (!data.valid() || layerCount == 0) {
+    if (layerCount == 0) {
         return false;
     }
     if (rootCount > layerCount) {
@@ -211,11 +203,6 @@ bool LandscapeResidency::initSlots(const LandscapeData &data, uint32_t layerCoun
     _data = data;
     _capacity = layerCount;
     return true;
-}
-
-int LandscapeResidency::reservedLayer(NodeAddress source) const {
-    const auto it = _slots.find(source.key());
-    return it != _slots.end() ? static_cast<int>(it->second.layer) : -1;
 }
 
 void LandscapeResidency::publish(uint64_t key) {

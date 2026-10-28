@@ -50,14 +50,14 @@ public:
     LandscapeResidency();
     ~LandscapeResidency();
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
-    bool heightIsUnorm() const { return _heightUnorm; }
     void destroy();
     bool valid() const { return _heightArray && _splatArray && _normalArray; }
     // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<NodeAddress> &sources) const;
     // Reserve the whole working set or leave all current bindings untouched.
     bool reserve(const ccstd::vector<NodeAddress> &sources);
-    bool loadReserved(bool synchronous = false);
+    // Submit missing sources asynchronously; update() consumes completed uploads.
+    bool loadReserved();
     void update(uint32_t maxUploads);
     int resident(NodeAddress source) const;
     Tile resolve(NodeAddress node) const;
@@ -73,8 +73,6 @@ public:
 protected:
     // CPU reservation operations; runtime callers use init() and the upload path.
     bool initSlots(const LandscapeData &data, uint32_t layerCount);
-    const ccstd::vector<NodeAddress> &reservedSources() const { return _working; }
-    int reservedLayer(NodeAddress source) const;
     // Publish a reserved source only after all three texture uploads have been submitted.
     void publish(uint64_t key);
 

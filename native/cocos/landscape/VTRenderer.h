@@ -80,7 +80,7 @@ public:
     VTRenderer &operator=(const VTRenderer &) = delete;
     bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals);
     void destroy();
-    uint32_t renderPages(LandscapeResidency &residency, uint32_t maxPages);
+    uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
 
     enum class PageState {
         EMPTY,
@@ -110,7 +110,6 @@ public:
     // Invalidate intersecting cached pages, including their filtering gutters.
     void invalidate(LandscapeRegion region);
     bool ready() const;
-    size_t capacity() const { return _pages.size(); }
     bool needsComposition(VTPageAddress address) const;
     // Exact address only. An absent/unpublished page is an error at draw time.
     int resolve(VTPageAddress address) const;

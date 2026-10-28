@@ -80,10 +80,9 @@ public:
     // Runtime methods require successful initialization of all owned modules.
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
-    // Latched after the initial view settles within budget with all exact bindings ready.
+    // Initial display waits for asynchronous loading and composition; later streaming stays visible.
     bool isReady() const;
 
-    void setLodRanges(const ccstd::vector<float> &morphStart, const ccstd::vector<float> &morphEnd);
     bool addDecal(uint32_t id, float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
     void setDebugData(const LandscapeDebugData &data);
@@ -106,6 +105,7 @@ private:
     };
 
     void setUnlit(bool enabled);
+    void syncRenderables(uint32_t frame, gfx::Texture *previousMappings);
     void syncTerrainModels();
     void bindRuntimeTextures();
     void recycleModel(GridDraw &draw);
@@ -143,9 +143,8 @@ private:
     LandscapeData _data;
     uint32_t _holeMode{0};
     bool _heightUnorm{false};
+    bool _ready{false}; // Latched after the first settled render selection; reset on destroy.
     Vec3 _viewPosition;
-    ccstd::vector<float> _morphStart;
-    ccstd::vector<float> _morphEnd;
     bool _castShadow{true};
     bool _receiveShadow{true};
 };

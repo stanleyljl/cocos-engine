@@ -5,10 +5,10 @@
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- of the Software, and to permit persons to whom the Software is furnished to do so,
- subject to the following conditions:
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
 
  The above copyright notice and this permission notice shall be included in
  all copies or substantial portions of the Software.
@@ -21,175 +21,124 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 ****************************************************************************/
-
 #pragma once
 
 #include <array>
-#include "base/std/container/vector.h"
-#include "base/std/container/unordered_map.h"
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include "base/std/container/unordered_set.h"
+#include "base/std/container/vector.h"
 #include "landscape/Data.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
 
-namespace cc {
-namespace geometry {
+namespace cc::geometry {
 class Frustum;
-} // namespace geometry
+}
 
-namespace landscape {
-
+namespace cc::landscape {
 class LandscapeAsset;
 
-// One balanced rendering tree per Landscape. Distance requests only the next
-// local change; the schedule retains current coverage until its resources are ready.
+// Owns the target hierarchy, published node mappings and balanced render selection.
+// Schedule supplies completed resources; Renderer consumes selected nodes and changes.
 class Quadtree {
 public:
+    struct MorphRange {
+        float start{0.0F};
+        float end{0.0F};
+    };
     struct Node {
         QuadNode geometry;
         VTGridMapping material;
-    };
-    enum class Operation {
-        MERGE,
-        SPLIT,
-        REFRESH,
-    };
-    struct Candidate {
-        NodeAddress node;
-        Operation operation;
-        bool visible{false};
-        float distance{0.0F};
-    };
-    struct Change {
-        ccstd::vector<NodeAddress> removed;
-        ccstd::vector<NodeAddress> added;
-        bool empty() const {
-            return added.empty();
-        }
-    };
-    struct EdgeMasks {
-        uint8_t coarser{0};
-        uint8_t finer{0};
+        std::unique_ptr<Node[]> children; // Target structure: zero or four children.
+        bool loaded{false}; // Schedule has loaded and reserved the node's source tile.
+        bool ready{false}; // Complete mapping published; resource-owning ancestors are ready.
+        bool renderable{false}; // Selected in the complete, balanced render set.
+        uint8_t edgeMask{0};// Valid when renderable; Left, right, bottom, top: two bits each, 00 same/boundary, 01 coarser, 10 finer.
     };
 
-    bool init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
-    void beginUpdate(const Vec3 &camera, const Vec3 &worldOrigin);
-    void includePass(const geometry::Frustum &frustum, bool preloadNearby);
-    void endUpdate();
-    bool viewChanged() const {
-        return _viewChanged;
-    }
-    const Vec3 &camera() const {
-        return _camera;
-    }
-    const ccstd::vector<float> &lodMorphStart() const {
-        return _lodMorphStart;
-    }
-    const ccstd::vector<float> &lodMorphEnd() const {
-        return _lodMorphEnd;
-    }
-    bool visibilityDistanceTooSmall() const {
-        return _visibilityDistanceTooSmall;
-    }
-    NodeAddress root() const {
-        return {_rootLevel, 0, 0};
-    }
-    uint8_t childMask(NodeAddress node) const;
-    LandscapeRegion region(NodeAddress node) const;
-    QuadNode geometry(NodeAddress node) const;
-    const ccstd::unordered_map<uint64_t, Node> &nodes() const {
-        return _nodes;
-    }
-    const ccstd::unordered_set<uint64_t> &changedNodes() const {
-        return _changed;
-    }
-    void clearChanges() {
-        _changed.clear();
-    }
-    ccstd::vector<Candidate> candidates();
-    bool plan(Candidate candidate, Change &change) const;
-    void commit(const Change &change, ccstd::vector<Node> &prepared);
-    NodeAddress at(uint32_t x, uint32_t z) const;
-    EdgeMasks edgeMasks(NodeAddress node) const;
+    // Landscape validates LOD quality and loads the asset before initialization.
+    void init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
+    void beginUpdate(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
+    void addPass(const geometry::Frustum &frustum, bool includeNearby);
+    // Stage 1: update only the distance target. Selection follows resource preparation.
+    void updateTarget();
+    // Missing nodes whose parents are ready, then displayed/target-leaf refreshes.
+    // Each group is ordered by ascending LOD, with node keys breaking ties.
+    ccstd::vector<NodeAddress> requests() const;
+    // Called only after the complete source/mapping reservation is drawable;
+    // publication establishes both loaded and ready, including shared source tiles.
+    bool publish(NodeAddress address, VTGridMapping material);
+    // Stage 3: select a complete, balanced render set and report draw changes.
+    bool selectRenderables();
 
-    template <class Visit>
-    void neighbors(NodeAddress node, const Visit &visit) const {
-        const uint32_t x = node.x << node.level;
-        const uint32_t z = node.z << node.level;
-        const uint32_t size = 1U << node.level;
-        const uint32_t width = _data.sectorsX << _data.maxLevel;
-        const uint32_t depth = _data.sectorsZ << _data.maxLevel;
-        for (uint32_t edge = 0; edge < 4; ++edge) {
-            if ((edge == 0 && x == 0) || (edge == 1 && x + size == width) ||
-                (edge == 2 && z == 0) || (edge == 3 && z + size == depth)) {
-                continue;
-            }
-            uint32_t cursor = edge < 2 ? z : x;
-            const uint32_t end = cursor + size;
-            while (cursor < end) {
-                const auto neighbor = edge < 2 ? at(edge == 0 ? x - 1 : x + size, cursor)
-                                               : at(cursor, edge == 2 ? z - 1 : z + size);
-                visit(neighbor, edge);
-                cursor = ((edge < 2 ? neighbor.z : neighbor.x) + 1U) << neighbor.level;
-            }
-        }
-    }
+    // Queries and render-change notifications.
+    bool viewChanged() const { return _viewChanged; }
+    bool renderSelectionChanged() const { return _renderSelectionChanged; }
+    bool sectorRootsReady() const;
+    const Vec3 &localCameraPosition() const { return _localCameraPosition; }
+    const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
+    bool hasMorphRangeWarning() const { return _morphRangeWarning; }
+    // Includes management levels above sector roots, unlike source-tile sizing.
+    LandscapeRegion region(NodeAddress address) const;
+    const Node *find(NodeAddress address) const;
+    Node *find(NodeAddress address);
+    const Node *findRenderable(NodeAddress address) const;
+    const ccstd::unordered_set<uint64_t> &changedNodes() const { return _changedNodes; }
+    void clearChangedNodes() { _changedNodes.clear(); }
 
-    // Traverse current coverage from the single root, skipping absent children.
-    // Management branches are always internal and never own geometry/resources.
-    template <class Visit>
-    void cull(const Visit &visit) const {
-        visitNode(root(), visit);
-    }
-
-protected:
-    // Decoded metadata initialization also supports CPU-only topology validation.
-    bool init(const LandscapeData &data, const ccstd::vector<HeightRange> &heightRanges, float lodQualityScale);
+    // Traversal helpers. Boolean callbacks return false to skip a node's descendants.
+    void forEachNode(const std::function<bool(const Node &)> &visit) const;
+    void cull(const std::function<bool(NodeAddress, bool)> &visit) const;
+    void forEachRenderable(const std::function<void(const Node &)> &visit) const;
 
 private:
     struct Pass {
         std::array<Vec4, 6> planes;
-        bool preloadNearby{false};
+        bool includeNearby{false}; // Include near-camera nodes in morph diagnostics.
     };
-    template <class Visit>
-    void visitNode(NodeAddress node, const Visit &visit) const {
-        const bool leaf = _nodes.count(node.key()) != 0;
-        if (!visit(node, leaf) || leaf) {
-            return;
-        }
-        const auto mask = childMask(node);
-        for (uint32_t q = 0; q < 4; ++q) {
-            if (mask & (1U << q)) {
-                visitNode(child(node, q), visit);
-            }
-        }
-    }
-    static NodeAddress child(NodeAddress node, uint32_t quadrant);
-    bool hasLeafChildren(NodeAddress node) const;
-    HeightRange buildRoot(NodeAddress node);
-    HeightRange heightRange(NodeAddress node) const;
-    void computeRanges(float lodQualityScale);
-    bool visible(NodeAddress node, bool colorOnly) const;
-    bool needsSplit(NodeAddress node) const;
-    float distance(NodeAddress node) const;
 
+    // Target hierarchy and traversal.
+    void initLodMorphRanges(float lodQualityScale);
+    void buildRoot(Node &node, NodeAddress address);
+    void updateTarget(Node &node);
+    static NodeAddress child(NodeAddress address, uint32_t quadrant);
+    void visitNodes(const Node &node, const std::function<bool(const Node &)> &visit) const;
+    void visitNodes(Node &node, const std::function<bool(Node &)> &visit) const;
+
+    // Bounds include management levels above sector roots.
+    bool contains(NodeAddress address) const;
+    QuadNode geometry(NodeAddress address) const;
+    HeightRange heightRange(NodeAddress address) const;
+    float distanceSquared(NodeAddress address) const;
+    // Morph helpers; edge sampling requires a balanced render set.
+    NodeAddress renderableAt(uint32_t x, uint32_t z) const;
+    uint8_t computeEdgeMask(NodeAddress address) const;
+    bool morphRangeTooSmall(const Node &node) const;
+
+    // Immutable metadata copied from the validated asset.
     LandscapeData _data;
     NodeIndexLayout _nodeIndexLayout;
     ccstd::vector<HeightRange> _heightRanges;
-    ccstd::unordered_map<uint64_t, HeightRange> _rootRanges;
-    uint32_t _rootLevel{0};
-    ccstd::unordered_map<uint64_t, Node> _nodes;
-    ccstd::unordered_set<uint64_t> _changed;
-    ccstd::vector<float> _lodRange;
-    ccstd::vector<float> _lodMorphStart;
-    ccstd::vector<float> _lodMorphEnd;
-    Vec3 _camera;
+    std::unique_ptr<Node> _root;
+    // Snapshot of selected addresses, updated only by selectRenderables. IDs survive
+    // target deletion for retirement notifications; edge values remain on the nodes.
+    ccstd::unordered_set<uint64_t> _renderNodeKeys;
+    // Retained until the next selection so Schedule can rescan after draw syncing.
+    bool _renderSelectionChanged{false};
+    // Reuse the selected cut until target or readiness changes.
+    bool _needsRenderSelection{true};
+    // Renderer consumes these keys, including mapping-only updates and removals.
+    ccstd::unordered_set<uint64_t> _changedNodes;
+    // Fixed LOD transition ranges derived during initialization.
+    ccstd::vector<MorphRange> _lodMorphRanges;
+
+    Vec3 _localCameraPosition;
     Vec3 _worldOrigin;
     ccstd::vector<Pass> _passes;
-    size_t _passCount{0};
+    size_t _activePassCount{0};
     bool _viewChanged{true};
-    bool _visibilityDistanceTooSmall{false};
+    bool _morphRangeWarning{false};
 };
-
-} // namespace landscape
-} // namespace cc
+} // namespace cc::landscape
