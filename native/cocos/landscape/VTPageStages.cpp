@@ -64,8 +64,7 @@ constexpr uint32_t ASTC_BLOCK_BYTES = 16;
 // Internal projection policy; asset dimensions and VT filter support are supplied separately.
 constexpr float TRIPLANAR_BLEND_SHARPNESS = 4.0F;
 constexpr float TRIPLANAR_FADE_RATIO = 1.0F / 16.0F;
-static_assert(CC_LANDSCAPE_CLIFF_ANGLE >= 0.0F && CC_LANDSCAPE_CLIFF_ANGLE <= 90.0F, "Cliff angle must be between 0 and 90 degrees");
-const float CLIFF_NORMAL_Y = std::cos(CC_DEGREES_TO_RADIANS(CC_LANDSCAPE_CLIFF_ANGLE));
+const float CLIFF_NORMAL_Y = std::cos(CC_DEGREES_TO_RADIANS(config::CLIFF_ANGLE));
 constexpr uint32_t COMPRESSION_GROUP_SIDE = 8;
 
 void recordPagePass(gfx::CommandBuffer &commands, gfx::InputAssembler *inputAssembler, gfx::RenderPass *renderPass, scene::Pass *pass, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount) {

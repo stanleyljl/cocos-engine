@@ -27,14 +27,11 @@
 #include <cstdint>
 
 // Landscape diagnostics are independent of the engine's global debug mode.
-// Override with CC_LANDSCAPE_DEBUG=0 to remove informational logs and LOD stats.
+// Override with CC_LANDSCAPE_DEBUG=0 to remove informational logs, LOD stats and morph diagnostics.
 // Errors, operational warnings and visual debug controls remain available.
 #ifndef CC_LANDSCAPE_DEBUG
     #define CC_LANDSCAPE_DEBUG 1
 #endif
-
-// Slope threshold in degrees from horizontal, evaluated on the fixed sector source.
-#define CC_LANDSCAPE_CLIFF_ANGLE 60.0F
 
 namespace cc {
 namespace landscape {
@@ -43,6 +40,9 @@ namespace config {
 constexpr int VERTS_PER_NODE_SIDE = 17;
 constexpr float LOD_DISTANCE_RATIO = 2.0F;
 constexpr float MORPH_START_RATIO = 0.70F;
+// Slope threshold in degrees from horizontal, evaluated on the fixed sector source.
+constexpr float CLIFF_ANGLE = 60.0F;
+static_assert(CLIFF_ANGLE >= 0.0F && CLIFF_ANGLE <= 90.0F, "Cliff angle must be between 0 and 90 degrees");
 constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
 // Normal interiors share the height grid; real neighboring samples cover VT gutters.
 constexpr uint32_t SOURCE_NORMAL_BORDER = 8;

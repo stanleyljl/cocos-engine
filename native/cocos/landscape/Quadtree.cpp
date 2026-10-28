@@ -27,6 +27,7 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#include "base/Log.h"
 #include "core/geometry/Frustum.h"
 #include "landscape/Asset.h"
 
@@ -43,6 +44,9 @@ void Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
     _changedNodes.clear();
     _passes.clear();
     _activePassCount = 0;
+#if CC_LANDSCAPE_DEBUG
+    _lastMorphRangeWarning = false;
+#endif
     uint32_t rootLevel = _data.maxLevel;
     for (uint32_t side = 1; side < std::max(_data.sectorsX, _data.sectorsZ); side *= 2) {
         ++rootLevel;
@@ -247,7 +251,9 @@ bool Quadtree::selectRenderables() {
     // 3. Update node-owned morph edges and report changes against the previous render set.
     auto previousRenderKeys = std::move(_renderNodeKeys);
     _renderNodeKeys.clear();
-    _morphRangeWarning = false;
+#if CC_LANDSCAPE_DEBUG
+    bool morphRangeWarning = false;
+#endif
     visitNodes(*_root, [&](Node &node) {
         if (!node.renderable) {
             return true;
@@ -261,9 +267,11 @@ bool Quadtree::selectRenderables() {
             _renderSelectionChanged = true;
         }
         node.edgeMask = edges;
-        if (!_morphRangeWarning) {
-            _morphRangeWarning = morphRangeTooSmall(node);
+#if CC_LANDSCAPE_DEBUG
+        if (!morphRangeWarning) {
+            morphRangeWarning = morphRangeTooSmall(node);
         }
+#endif
         return false;
     });
     for (const auto removed : previousRenderKeys) {
@@ -271,6 +279,16 @@ bool Quadtree::selectRenderables() {
         _renderSelectionChanged = true;
     }
     _needsRenderSelection = false;
+#if CC_LANDSCAPE_DEBUG
+    if (morphRangeWarning != _lastMorphRangeWarning) {
+        if (morphRangeWarning) {
+            CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
+        } else {
+            CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
+        }
+        _lastMorphRangeWarning = morphRangeWarning;
+    }
+#endif
     return true;
 }
 
@@ -365,6 +383,7 @@ uint8_t Quadtree::computeEdgeMask(NodeAddress address) const {
     return edges;
 }
 
+#if CC_LANDSCAPE_DEBUG
 bool Quadtree::morphRangeTooSmall(const Node &node) const {
     const auto address = node.geometry.address();
     // Diagnose insufficient morph distance only for visible/nearby draws.
@@ -398,6 +417,7 @@ bool Quadtree::morphRangeTooSmall(const Node &node) const {
         });
     });
 }
+#endif
 
 // Helpers: node ownership and lookup.
 void Quadtree::buildRoot(Node &node, NodeAddress address) {

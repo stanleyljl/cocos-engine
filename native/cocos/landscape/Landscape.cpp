@@ -160,7 +160,6 @@ void Landscape::onDisable() {
     _quadtree = nullptr;
     _query = nullptr;
     _asset = nullptr;
-    _lastVisibilityDistanceWarning = false;
     _scene = nullptr;
     _node = nullptr;
 }
@@ -282,7 +281,6 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     addPass(camera.getFrustum(), false);
     const uint32_t cascadesToDeduplicate = collectShadowPasses(sceneData);
     preparePassModels(cascadesToDeduplicate);
-    reportVisibilityDistanceStatus();
 }
 
 uint32_t Landscape::collectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
@@ -315,21 +313,6 @@ uint32_t Landscape::collectShadowPasses(const pipeline::PipelineSceneData &scene
         }
     }
     return cascadesToDeduplicate;
-}
-
-void Landscape::reportVisibilityDistanceStatus() {
-    const bool warning = _quadtree->hasMorphRangeWarning();
-    if (warning != _lastVisibilityDistanceWarning) {
-        if (warning) {
-            CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
-        }
-#if CC_LANDSCAPE_DEBUG
-        else {
-            CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
-        }
-#endif
-        _lastVisibilityDistanceWarning = warning;
-    }
 }
 
 void Landscape::preparePassModels(uint32_t cascadesToDeduplicate) {

@@ -29,6 +29,7 @@
 #include <memory>
 #include "base/std/container/unordered_set.h"
 #include "base/std/container/vector.h"
+#include "landscape/Config.h"
 #include "landscape/Data.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
@@ -79,7 +80,6 @@ public:
     bool sectorRootsReady() const;
     const Vec3 &localCameraPosition() const { return _localCameraPosition; }
     const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
-    bool hasMorphRangeWarning() const { return _morphRangeWarning; }
     // Includes management levels above sector roots, unlike source-tile sizing.
     LandscapeRegion region(NodeAddress address) const;
     const Node *find(NodeAddress address) const;
@@ -115,7 +115,10 @@ private:
     // Morph helpers; edge sampling requires a balanced render set.
     NodeAddress renderableAt(uint32_t x, uint32_t z) const;
     uint8_t computeEdgeMask(NodeAddress address) const;
+#if CC_LANDSCAPE_DEBUG
+    // Diagnostics only; never changes selection, morph ranges or edge constraints.
     bool morphRangeTooSmall(const Node &node) const;
+#endif
 
     // Immutable metadata copied from the validated asset.
     LandscapeData _data;
@@ -139,6 +142,8 @@ private:
     ccstd::vector<Pass> _passes;
     size_t _activePassCount{0};
     bool _viewChanged{true};
-    bool _morphRangeWarning{false};
+#if CC_LANDSCAPE_DEBUG
+    bool _lastMorphRangeWarning{false}; // Log only diagnostic state transitions.
+#endif
 };
 } // namespace cc::landscape

@@ -109,7 +109,6 @@ private:
     scene::Camera *pickMainCamera() const;
     void addPass(const geometry::Frustum &frustum, bool shadow);
     uint32_t collectShadowPasses(const pipeline::PipelineSceneData &sceneData);
-    void reportVisibilityDistanceStatus();
     void preparePassModels(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
     bool queryTransformValid() const;
@@ -138,7 +137,6 @@ private:
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
     uint32_t _nextDecalId{1}; // Never reset when reloading this Landscape object.
-    bool _lastVisibilityDistanceWarning{false};
 };
 
 } // namespace landscape
