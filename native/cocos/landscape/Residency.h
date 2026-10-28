@@ -62,6 +62,7 @@ public:
     int resident(NodeAddress source) const;
     Tile resolve(NodeAddress node) const;
     Vec4 shaderParams(const Tile &tile) const;
+    float minimumNormalY(NodeAddress source) const;
     bool ready() const;
     gfx::Texture *heightArray() const { return _heightArray; }
     gfx::Texture *splatArray() const { return _splatArray; }
@@ -80,11 +81,12 @@ private:
     struct Slot {
         uint32_t layer;
         bool ready{false};
+        float minimumNormalY{1.0F}; // Replaced with the source tile on upload; retained by reservations.
     };
     bool validSource(NodeAddress source) const;
     bool initTextures();
     void initSamplers();
-    void uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal);
+    void uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal, float minimumNormalY);
     void uploadLayer(gfx::Texture *array, uint32_t layer, const uint8_t *data) const;
 
     gfx::Device *_device{nullptr};

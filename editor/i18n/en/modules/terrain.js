@@ -61,6 +61,9 @@ module.exports = {
                     decal3DEnabled: {
                         tooltip: 'Show nearby 3D decal meshes; disabling keeps flat RVT decals.',
                     },
+                    triplanarEnabled: {
+                        tooltip: 'Use a separate triplanar shader for cliff sectors; other sectors use XZ projection. Fixed sector-root projection data and XZ border bands prevent projection changes with LOD. Changes regenerate VT.',
+                    },
                     physicsWireframe: {
                         tooltip: 'Show loaded terrain collision meshes. The project physics debug view reads this switch and draws the wireframe.',
                     },

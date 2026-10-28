@@ -175,6 +175,12 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(9)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.triplanarEnabled.tooltip')
+    public triplanarEnabled = true;
+
+    @serializable
+    @editable
+    @displayOrder(10)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.physicsWireframe.tooltip')
     public physicsWireframe = false;
 
@@ -549,7 +555,8 @@ export class Landscape extends Component {
             | (Number(data.heightBlendEnabled) << 6)
             | (Number(data.refineFarDetail) << 7)
             | (Number(data.decal3DEnabled) << 8)
-            | (Number(data.physicsWireframe) << 9);
+            | (Number(data.triplanarEnabled) << 9)
+            | (Number(data.physicsWireframe) << 10);
         if (flags === this._appliedDebugFlags) {
             return;
         }

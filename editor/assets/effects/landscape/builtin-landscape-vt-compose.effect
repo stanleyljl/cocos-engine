@@ -6,6 +6,7 @@ CCEffect %{
     passes:
     - vert: vt-compose-vs:vert
       frag: vt-compose-fs
+      embeddedMacros: { LANDSCAPE_TRIPLANAR: false }
       depthStencilState:
         depthTest: false
         depthWrite: false
@@ -20,6 +21,10 @@ CCEffect %{
         materialParams: { value: [0.1, 1, 0, 0] }
         globalColorParams: { value: [1, 1, 0, 0] }
         heightBlendParams: { value: [1, 3, 2, 0] }
+        # Initialized from the asset and VT composition policy before drawing.
+        terrainHeightParams: { value: [0, 0, 0, 0] }
+        triplanarParams: { value: [0, 0, 0, 0] }
+        terrainHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         decalRegions: { value: [0, 0, 1, 0] }
         decalParams: { value: [0, 0, 0, 0] }
         decalLayerParams: { value: [0, 0, 0, 0] }
@@ -32,6 +37,19 @@ CCEffect %{
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap, addressW: wrap } }
         normalRoughnessAOMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap, addressW: wrap } }
+    - vert: vt-compose-vs:vert
+      frag: vt-compose-fs
+      propertyIndex: 0
+      embeddedMacros: { LANDSCAPE_TRIPLANAR: true }
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      rasterizerState:
+        cullMode: none
+      blendState:
+        targets:
+        - blend: false
+        - blend: false
 }%
 
 CCProgram vt-compose-uniforms %{
@@ -44,6 +62,8 @@ CCProgram vt-compose-uniforms %{
     vec4 materialParams[32]; // repeats/m, biome influence, unused, unused
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
+    vec4 terrainHeightParams; // height scale/bias, fixed projection tile size, unused
+    vec4 triplanarParams; // enabled, XZ-only band/source size, fade width/source size, blend sharpness
     vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
     vec4 decalParams; // placed decal count
     vec4 decalLayerParams[32]; // config::DECAL_LIBRARY_MAX; X: modulate terrain color
@@ -57,12 +77,16 @@ CCProgram vt-compose-vs %{
   in vec4 a_vtPage;
   in vec4 a_vtRegion;
   in vec4 a_vtSource;
+  in vec4 a_vtProjection;
 
   out vec2 v_localXZ;
   #if __VERSION__ >= 300
   flat out vec4 v_source;
   flat out vec2 v_decalPage;
   flat out vec4 v_region;
+  #if LANDSCAPE_TRIPLANAR
+    flat out vec4 v_projection;
+  #endif
 
   #else
   out vec4 v_source;
@@ -85,6 +109,9 @@ CCProgram vt-compose-vs %{
     v_decalPage = a_vtPage.xy;
     #if __VERSION__ >= 300
     v_region = a_vtRegion;
+    #if LANDSCAPE_TRIPLANAR
+      v_projection = a_vtProjection;
+    #endif
     #endif
     vec2 clipPos = atlasUv * 2.0 - 1.0;
     // Texture-to-clip conversion: screenSpaceSignY * clipSpaceSignY.
@@ -102,6 +129,7 @@ CCProgram vt-compose-fs %{
   #if __VERSION__ >= 300
   uniform highp usampler2DArray splatmap;
   uniform highp sampler2DArray terrainNormalMap;
+  uniform highp sampler2DArray terrainHeightMap;
   uniform highp sampler2D normalSourceMap;
   uniform highp sampler2DArray albedoHeightMap;
   uniform highp sampler2DArray normalRoughnessAOMap;
@@ -113,6 +141,9 @@ CCProgram vt-compose-fs %{
   flat in vec4 v_source;
   flat in vec2 v_decalPage;
   flat in vec4 v_region;
+  #if LANDSCAPE_TRIPLANAR
+    flat in vec4 v_projection;
+  #endif
 
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
@@ -299,21 +330,109 @@ CCProgram vt-compose-fs %{
     return blend;
   }
 
-  // All terrain materials use the same XZ projection, including steep slopes.
+  #if LANDSCAPE_TRIPLANAR
+  float sampleTerrainHeight() {
+    vec2 pixel = clamp((v_localXZ - v_projection.xy) / v_projection.z, vec2(0.0), vec2(1.0)) * float(LANDSCAPE_TILE_RESOLUTION - 1);
+    #if LANDSCAPE_HEIGHT_UNORM
+      float height = textureLod(terrainHeightMap, vec3((pixel + 0.5) / float(LANDSCAPE_TILE_RESOLUTION), v_projection.w), 0.0).r;
+    #else
+      // Decode the uint16 bytes before bilinear filtering, as in terrain-height.
+      ivec2 p = ivec2(floor(pixel));
+      ivec2 q = min(p + ivec2(1), ivec2(LANDSCAPE_TILE_RESOLUTION - 1));
+      int layer = int(v_projection.w);
+      vec2 decode = vec2(256.0, 1.0) / 65535.0;
+      float a = dot(floor(texelFetch(terrainHeightMap, ivec3(p, layer), 0).rg * 255.0 + 0.5), decode);
+      float b = dot(floor(texelFetch(terrainHeightMap, ivec3(q.x, p.y, layer), 0).rg * 255.0 + 0.5), decode);
+      float c = dot(floor(texelFetch(terrainHeightMap, ivec3(p.x, q.y, layer), 0).rg * 255.0 + 0.5), decode);
+      float d = dot(floor(texelFetch(terrainHeightMap, ivec3(q, layer), 0).rg * 255.0 + 0.5), decode);
+      vec2 f = fract(pixel);
+      float height = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    #endif
+    return height * terrainHeightParams.x + terrainHeightParams.y;
+  }
+
+  vec3 projectionWeights(vec3 normal) {
+    // Every LOD uses the same sector grid and fixed projection source. Both sides
+    // of a sector boundary are XZ-only throughout the largest page's gutter.
+    vec2 distanceToEdge = abs(fract(v_localXZ / terrainHeightParams.z + 0.5) - 0.5);
+    float fade = smoothstep(triplanarParams.y, triplanarParams.y + triplanarParams.z, min(distanceToEdge.x, distanceToEdge.y));
+    // Unity Shader Graph Triplanar: normalized powers of the base surface normal.
+    vec3 weights = pow(abs(normal), vec3(triplanarParams.w));
+    weights /= dot(weights, vec3(1.0));
+    return mix(vec3(0.0, 1.0, 0.0), weights, fade);
+  }
+  #endif
+
+  vec4 projectedAlbedo(int layer, vec3 position, vec3 dx, vec3 dy, vec3 weights) {
+    float scale = materialParams[layer].x;
+    vec4 value = textureGrad(albedoHeightMap, vec3(position.xz * scale, float(layer)), dx.xz * scale, dy.xz * scale);
+    value.rgb = SRGBToLinear(value.rgb);
+    value *= weights.y;
+    #if LANDSCAPE_TRIPLANAR
+    if (weights.x > 0.0) {
+      vec4 side = textureGrad(albedoHeightMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale);
+      side.rgb = SRGBToLinear(side.rgb);
+      value += side * weights.x;
+    }
+    if (weights.z > 0.0) {
+      vec4 side = textureGrad(albedoHeightMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale);
+      side.rgb = SRGBToLinear(side.rgb);
+      value += side * weights.z;
+    }
+    #endif
+    return value;
+  }
+
+  void projectedNormal(int layer, vec3 position, vec3 dx, vec3 dy, vec3 weights, vec3 normal, vec3 tangent, vec3 bitangent, out vec3 detailNormal, out vec2 roughnessAO) {
+    float scale = materialParams[layer].x;
+    vec4 value = textureGrad(normalRoughnessAOMap, vec3(position.xz * scale, float(layer)), dx.xz * scale, dy.xz * scale);
+    vec3 detail = decodeNormal(value.rg);
+    // Preserve the existing XZ tangent frame exactly in the border band and when disabled.
+    detailNormal = (tangent * detail.x + bitangent * detail.y + normal * detail.z) * weights.y;
+    roughnessAO = value.ba * weights.y;
+    #if LANDSCAPE_TRIPLANAR
+    // Projection coordinates use -Z to preserve the existing top texture orientation.
+    // Reorient each side's tangent normal around the base normal before blending,
+    // following Unity's Triplanar Normal mode. A neutral map reproduces the base normal.
+    vec3 n = normal * vec3(1.0, 1.0, -1.0);
+    if (weights.x > 0.0) {
+      value = textureGrad(normalRoughnessAOMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale);
+      detail = decodeNormal(value.rg);
+      vec3 side = vec3(n.x * detail.z, n.y + detail.y, n.z + detail.x);
+      detailNormal += side * vec3(1.0, 1.0, -1.0) * weights.x;
+      roughnessAO += value.ba * weights.x;
+    }
+    if (weights.z > 0.0) {
+      value = textureGrad(normalRoughnessAOMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale);
+      detail = decodeNormal(value.rg);
+      vec3 side = vec3(n.x + detail.x, n.y + detail.y, n.z * detail.z);
+      detailNormal += side * vec3(1.0, 1.0, -1.0) * weights.z;
+      roughnessAO += value.ba * weights.z;
+    }
+    detailNormal = normalize(detailNormal);
+    #endif
+  }
+
   void composeMaterial(MaterialBlend blend, vec3 shadingNormal, vec3 tangent, vec3 bitangent, vec3 modulation, inout ComposedSurface surface) {
-    vec2 uv = vec2(v_localXZ.x, -v_localXZ.y);
-    vec2 dx = dFdx(uv);
-    vec2 dy = dFdy(uv);
+    vec3 position = vec3(v_localXZ.x, 0.0, -v_localXZ.y);
+    #if LANDSCAPE_TRIPLANAR
+      position.y = sampleTerrainHeight();
+      // Stable weights are independent of streamed shading-normal precision.
+      vec3 projections = projectionWeights(sourceNormal(v_localXZ, v_projection));
+    #else
+      vec3 projections = vec3(0.0, 1.0, 0.0);
+    #endif
+    // Derivatives must precede material/axis branches for stable mip selection.
+    vec3 dx = dFdx(position);
+    vec3 dy = dFdy(position);
     vec3 weights = vec3(0.0);
     vec4 albedoHeights[3];
-    // Fetch each contributing material's color/height once. Pure endpoints
+    // Blend projections before material height blending. Pure endpoints
     // cannot acquire a previously absent layer during height blending.
     for (int i = 0; i < 3; ++i) {
       albedoHeights[i] = vec4(0.0);
       if (blend.weights[i] > 0.0) {
-        float scale = materialParams[blend.layers[i]].x;
-        vec3 coord = vec3(uv * scale, float(blend.layers[i]));
-        albedoHeights[i] = textureGrad(albedoHeightMap, coord, dx * scale, dy * scale);
+        albedoHeights[i] = projectedAlbedo(blend.layers[i], position, dx, dy, projections);
       }
     }
     // Apply height blending to each original pair BEFORE spatial interpolation.
@@ -330,17 +449,15 @@ CCProgram vt-compose-fs %{
     }
     for (int i = 0; i < 3; ++i) {
       if (weights[i] > 0.0) {
-        float scale = materialParams[blend.layers[i]].x;
-        vec3 coord = vec3(uv * scale, float(blend.layers[i]));
         vec4 ah = albedoHeights[i];
-        vec4 nra = textureGrad(normalRoughnessAOMap, coord, dx * scale, dy * scale);
-        vec3 albedo = applyBiomeColor(SRGBToLinear(ah.rgb), modulation, materialParams[blend.layers[i]].y);
+        vec3 localNormal;
+        vec2 roughnessAO;
+        projectedNormal(blend.layers[i], position, dx, dy, projections, shadingNormal, tangent, bitangent, localNormal, roughnessAO);
+        vec3 albedo = applyBiomeColor(ah.rgb, modulation, materialParams[blend.layers[i]].y);
         surface.albedo += albedo * weights[i];
-        vec3 detail = decodeNormal(nra.rg);
-        vec3 localNormal = tangent * detail.x + bitangent * detail.y + shadingNormal * detail.z;
         surface.normal += localNormal * weights[i];
-        surface.roughness += nra.b * weights[i];
-        surface.ao += nra.a * weights[i];
+        surface.roughness += roughnessAO.x * weights[i];
+        surface.ao += roughnessAO.y * weights[i];
       }
     }
   }

@@ -82,6 +82,9 @@ bool VTPageComposer::setGlobalColorStrength(float) {
 bool VTPageComposer::setHeightBlendEnabled(bool) {
     std::abort();
 }
+bool VTPageComposer::setTriplanarEnabled(bool) {
+    std::abort();
+}
 VTPageMipGenerator::VTPageMipGenerator() {
     std::abort();
 }

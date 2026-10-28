@@ -25,6 +25,7 @@
 #include "landscape/Asset.h"
 
 #include <cstring>
+#include <algorithm>
 #include <utility>
 
 #include "base/Log.h"
@@ -387,7 +388,9 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
         // Forward compaction is safe because each destination precedes the next
         // unread RGB pixel. No extra allocation or per-frame conversion needed.
         const size_t count = static_cast<size_t>(config::SOURCE_NORMAL_RESOLUTION) * config::SOURCE_NORMAL_RESOLUTION;
+        tile.minimumNormalY = 1.0F;
         for (size_t i = 0; i < count; ++i) {
+            tile.minimumNormalY = std::min(tile.minimumNormalY, std::max(0.0F, tile.normal[i * 3U + 1U] / 127.5F - 1.0F));
             tile.normal[i * 2U] = tile.normal[i * 3U];
             tile.normal[i * 2U + 1U] = tile.normal[i * 3U + 2U];
         }

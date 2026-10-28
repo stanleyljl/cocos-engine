@@ -120,6 +120,7 @@ public:
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
     void setHeightBlendEnabled(bool enabled);
+    void setTriplanarEnabled(bool enabled);
     void setRefineFarDetail(bool enabled);
     TextureBase *atlas() const;
     gfx::Texture *albedo() const;

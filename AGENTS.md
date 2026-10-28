@@ -27,6 +27,8 @@
 
 # C++ engineering and architecture
 
+- This is an open-source engine used by thousands of independent game projects. Do not hardcode project-specific Landscape dimensions, height ranges, resource layouts or tuning assumptions in engine code or shaders. Derive values from their owning assets/runtime configuration, and expose configuration when projects need to choose the behavior. Algorithm constants may remain internal when an additional public setting is not needed; keep them named and owned by the responsible module.
+
 - Before implementation, identify module responsibilities, data owners, dependency direction and behavior that must remain unchanged. Check callers, build registration, generated bindings, resources and comments before moving public declarations.
 - Keep each module focused on one coherent responsibility. Dependencies flow from coordination to functional modules to foundational data; foundational data must not depend on renderers, scenes or schedulers. Avoid circular dependencies.
 - Place types by meaning and ownership: shared plain data in the appropriate foundational header, internal state inside its owning module, and GPU layouts/resources in the rendering layer. Do not turn a common data header into a catch-all.

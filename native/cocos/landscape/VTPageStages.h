@@ -41,11 +41,12 @@ class LandscapeAsset;
 class MaterialLibrary;
 class LandscapeResidency;
 
-// Direct vertex-buffer layout: a_vtPage, a_vtRegion and a_vtSource (RGBA32F).
+// Direct vertex-buffer layout: page, region, splat source and fixed projection source (RGBA32F).
 struct VTPageInstance {
-    Vec4 pageInfo; // X: physical VT slot; Y: overlapping decal count (including gutters); ZW: unused, zero.
+    Vec4 pageInfo; // X: physical VT slot; Y: decal count; Z: triplanar variant; W: unused.
     Vec4 region;
     Vec4 splatSource;
+    Vec4 projectionSource; // Resident sector root, independent of the page/source LOD.
     uint32_t physicalSlot() const { return static_cast<uint32_t>(pageInfo.x); }
 };
 
@@ -70,6 +71,7 @@ public:
     // Return whether cached page pixels need recomposition.
     bool setGlobalColorStrength(float strength);
     bool setHeightBlendEnabled(bool enabled);
+    bool setTriplanarEnabled(bool enabled);
 
 private:
     bool initTarget(gfx::Device *device, bool compressed);
@@ -85,7 +87,7 @@ private:
     IntrusivePtr<RenderingSubMesh> _pageMesh;
     IntrusivePtr<gfx::Buffer> _instanceBuffer;
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
-    IntrusivePtr<gfx::PipelineState> _composePipeline;
+    std::array<IntrusivePtr<gfx::PipelineState>, 2> _composePipelines; // XZ and triplanar, compiled at init.
     IntrusivePtr<gfx::RenderPass> _initialPass;
     IntrusivePtr<Material> _composeMaterial;
     IntrusivePtr<gfx::Texture> _normalSourceTable;
@@ -100,6 +102,7 @@ private:
     float _effectiveGlobalColorStrength{0.0F};
     float _inverseWidth{0.0F};
     float _inverseDepth{0.0F};
+    uint32_t _rootLevel{0}; // Immutable source layout; roots remain reserved by Schedule.
 };
 
 // Builds mips from completed page pixels; it never re-evaluates materials.

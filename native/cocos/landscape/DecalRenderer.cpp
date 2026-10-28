@@ -244,7 +244,9 @@ bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrar
     }
     const auto bind = [&](const char *name, gfx::Texture *texture) {
         material->setPropertyGFXTexture(name, texture);
-        pass->bindSampler(scene::Pass::getBindingFromHandle(pass->getHandle(name)), materials.clampSampler());
+        for (const auto &composePass : *material->getPasses()) {
+            composePass->bindSampler(scene::Pass::getBindingFromHandle(composePass->getHandle(name)), materials.clampSampler());
+        }
     };
     bind("decalAlbedoMap", materials.decalAlbedo());
     bind("decalNormalMap", materials.decalNormal());

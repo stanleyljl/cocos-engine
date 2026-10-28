@@ -77,6 +77,7 @@ public:
         ccstd::vector<uint8_t> height; // requested RG8 high/low bytes or R16UI host-order values
         ccstd::vector<uint8_t> splat;
         ccstd::vector<uint8_t> normal; // padded linear RG8 terrain-local XZ; shader reconstructs +Y
+        float minimumNormalY{1.0F}; // Immutable slope summary, including the padded footprint.
     };
 
     LandscapeAsset();

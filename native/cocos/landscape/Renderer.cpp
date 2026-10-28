@@ -211,6 +211,7 @@ void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
         _decals->setEnabled(data.decal3DEnabled);
     }
     _vtRenderer->setHeightBlendEnabled(data.heightBlendEnabled);
+    _vtRenderer->setTriplanarEnabled(data.triplanarEnabled);
     _vtRenderer->setRefineFarDetail(data.refineFarDetail);
     if (previous.wireframe != data.wireframe) {
         refreshTerrainMaterials();

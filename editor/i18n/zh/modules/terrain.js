@@ -61,6 +61,9 @@ module.exports = {
                     decal3DEnabled: {
                         tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。',
                     },
+                    triplanarEnabled: {
+                        tooltip: '悬崖 Sector 使用独立三平面 shader，其余使用 XZ 投影。投影采用固定根源图，Sector 边缘退回 XZ，避免投影随 LOD 改变。切换后重新生成 VT。',
+                    },
                     physicsWireframe: {
                         tooltip: '显示已加载的地形碰撞网格，由项目物理调试视图读取此开关并绘制线框。',
                     },

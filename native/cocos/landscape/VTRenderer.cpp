@@ -249,10 +249,22 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
         }
         _compressor->end(*_commands);
     } else {
-        const auto count = static_cast<uint32_t>(_batch.size());
-        _composer->record(*_commands, _batch.data(), count, _needsClear);
-        _mipGenerator->record(*_commands, *_composer, count, _needsClear);
-        _needsClear = false;
+        // Group whole pages by shader. Each group keeps the instance buffer alive
+        // through its mip draws before the next group overwrites it.
+        const auto split = std::partition(_batch.begin(), _batch.end(), [](const VTPageInstance &instance) {
+            return instance.pageInfo.z == 0.0F;
+        });
+        const auto planarCount = static_cast<uint32_t>(split - _batch.begin());
+        const std::array<uint32_t, 3> offsets{0U, planarCount, static_cast<uint32_t>(_batch.size())};
+        for (size_t i = 0; i < 2; ++i) {
+            const uint32_t count = offsets[i + 1] - offsets[i];
+            if (count == 0) {
+                continue;
+            }
+            _composer->record(*_commands, _batch.data() + offsets[i], count, _needsClear);
+            _mipGenerator->record(*_commands, *_composer, count, _needsClear);
+            _needsClear = false;
+        }
     }
     _commands->end();
 
@@ -428,6 +440,12 @@ void VTRenderer::setRefineFarDetail(bool enabled) {
         if (page.address.level >= config::VT_NORMAL_DETAIL_MIN_LEVEL && page.state == PageState::READY) {
             page.state = PageState::OUTDATED;
         }
+    }
+}
+
+void VTRenderer::setTriplanarEnabled(bool enabled) {
+    if (_composer->setTriplanarEnabled(enabled)) {
+        invalidate();
     }
 }
 

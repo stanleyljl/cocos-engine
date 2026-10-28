@@ -33,6 +33,9 @@
     #define CC_LANDSCAPE_DEBUG 1
 #endif
 
+// Slope threshold in degrees from horizontal, evaluated on the fixed sector source.
+#define CC_LANDSCAPE_CLIFF_ANGLE 60.0F
+
 namespace cc {
 namespace landscape {
 namespace config {
@@ -60,7 +63,7 @@ constexpr uint32_t MATERIAL_LIBRARY_MAX = 32;
 constexpr uint32_t DECAL_LIBRARY_MAX = 32;
 constexpr uint32_t DECAL_INSTANCE_MAX = 512;
 // The compose block has one vec4 per material/instance/layer plus six parameters.
-static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 4) * 16 <= 16384,
+static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 6) * 16 <= 16384,
               "VT compose constants must fit a 16 KB uniform block");
 static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 texels");
 

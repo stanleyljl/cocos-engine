@@ -126,6 +126,7 @@ struct LandscapeDebugData {
     bool heightBlendEnabled{true};
     bool refineFarDetail{true};
     bool decal3DEnabled{true};
+    bool triplanarEnabled{true};
     bool physicsWireframe{false};
 };
 

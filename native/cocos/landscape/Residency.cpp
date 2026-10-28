@@ -166,7 +166,7 @@ void LandscapeResidency::update(uint32_t budget) {
     LandscapeAsset::TileData tile;
     for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
         _inFlight.erase(tile.key);
-        uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
+        uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data(), tile.minimumNormalY);
     }
 }
 
@@ -188,6 +188,12 @@ Vec4 LandscapeResidency::shaderParams(const Tile &tile) const {
 
 bool LandscapeResidency::ready() const {
     return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
+}
+
+float LandscapeResidency::minimumNormalY(NodeAddress source) const {
+    const auto &slot = _slots.at(source.key());
+    CC_ASSERT(slot.ready);
+    return slot.minimumNormalY;
 }
 
 bool LandscapeResidency::initSlots(const LandscapeData &data, uint32_t layerCount) {
@@ -253,7 +259,7 @@ void LandscapeResidency::initSamplers() {
     _splatSampler = _device->getSampler(si);
 }
 
-void LandscapeResidency::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal) {
+void LandscapeResidency::uploadTile(uint64_t key, const uint8_t *height, const uint8_t *splat, const uint8_t *normal, float minimumNormalY) {
     const auto it = _slots.find(key);
     if (it == _slots.end() || it->second.ready) {
         return;
@@ -262,6 +268,7 @@ void LandscapeResidency::uploadTile(uint64_t key, const uint8_t *height, const u
     uploadLayer(_heightArray, slot.layer, height);
     uploadLayer(_splatArray, slot.layer, splat);
     uploadLayer(_normalArray, slot.layer, normal);
+    slot.minimumNormalY = minimumNormalY;
     publish(key);
 }
 
