@@ -67,7 +67,7 @@ static_assert((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 6
               "VT compose constants must fit a 16 KB uniform block");
 static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 texels");
 
-// 256 usable texels per logical unit at the finest page. Keep 16 x 16 physical slots.
+// 256 usable texels per logical unit at the finest page. Up to 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 4; // 2x2 interiors; padded sources also cover filtering gutters.
 constexpr uint32_t VT_NORMAL_DETAIL_MIN_LEVEL = 6;
@@ -78,11 +78,13 @@ constexpr uint32_t VT_MAX_ANISOTROPY = 4;
 // when constraining a fragment's footprint to its physical atlas slot.
 constexpr uint32_t VT_FILTER_MARGIN = 1U << (VT_MIP_LEVELS - 1U);
 constexpr uint32_t VT_PAGE_RES = VT_PAGE_INTERIOR + 2 * VT_PAGE_BORDER;
+// Maximum atlas dimensions; Renderer selects the actual capacity for the device.
 constexpr uint32_t VT_ATLAS_SIZE = VT_PAGE_RES * 16;
 // Shared by all resource transactions and camera passes in one frame.
 constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
+static_assert(VT_PAGE_COUNT <= 256, "RG8 mappings store an 8-bit physical slot");
 static_assert(SOURCE_NORMAL_BORDER * VT_PAGE_INTERIOR >= 2 * (SOURCE_TILE_RESOLUTION - 1) * VT_PAGE_BORDER,
               "Padded normals must cover VT gutters at half-page source precision");
 static_assert(MAX_SECTOR_COUNT <= VT_PAGE_COUNT, "VT must hold every sector root");

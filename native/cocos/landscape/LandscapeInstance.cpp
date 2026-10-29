@@ -22,7 +22,7 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "landscape/Landscape.h"
+#include "landscape/LandscapeInstance.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,23 +54,24 @@
 
 namespace cc {
 namespace landscape {
-Landscape::Landscape() = default;
+LandscapeInstance::LandscapeInstance() = default;
 
-Landscape::~Landscape() {
+LandscapeInstance::~LandscapeInstance() {
     onDisable();
 }
 
-void Landscape::onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity) {
+bool LandscapeInstance::onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity) {
     if (node == nullptr || _renderer != nullptr || lodQualityScale <= 0.0F ||
         queryCacheCapacity == 0 || queryCacheCapacity > 4096) {
-        return;
+        return false;
     }
     _lodQualityScale = lodQualityScale;
     _node = node;
     initializeRenderer(queryCacheCapacity);
+    return isInitialized();
 }
 
-void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
+void LandscapeInstance::initializeRenderer(uint32_t queryCacheCapacity) {
     if (_node == nullptr || _renderer != nullptr) {
         return;
     }
@@ -101,7 +102,7 @@ void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
     // Create the empty CPU cache with the other runtime objects. Tile I/O
     // starts when addSource() registers the first reference to a tile.
     auto query = std::make_unique<LandscapeQuery>(asset->data(),
-        [this](uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
+        [this](uint32_t x, uint32_t z, LandscapeQueryCompletion completion) {
             _asset->requestQueryTile(x, z, std::move(completion));
         }, queryCacheCapacity);
 
@@ -112,7 +113,7 @@ void Landscape::initializeRenderer(uint32_t queryCacheCapacity) {
     _scene->addLandscape(this);
 }
 
-void Landscape::applyRendererSettings(LandscapeRenderer &renderer) const {
+void LandscapeInstance::applyRendererSettings(LandscapeRenderer &renderer) const {
     renderer.setDebugData(_debugData);
     renderer.setHoleMode(_holeMode);
     renderer.setGlobalColorMap(_globalColorMap);
@@ -121,7 +122,7 @@ void Landscape::applyRendererSettings(LandscapeRenderer &renderer) const {
     renderer.setReceiveShadow(_receiveShadow);
 }
 
-void Landscape::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const {
+void LandscapeInstance::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const {
 #if CC_LANDSCAPE_DEBUG
     const auto &data = asset.data();
     CC_LOG_INFO("[Landscape] LOD ranges:");
@@ -136,21 +137,21 @@ void Landscape::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtr
 #endif
 }
 
-void Landscape::setGlobalColorMap(Texture2D *texture) {
+void LandscapeInstance::setGlobalColorMap(Texture2D *texture) {
     _globalColorMap = texture;
     if (_renderer) {
         _renderer->setGlobalColorMap(texture);
     }
 }
 
-void Landscape::setGlobalColorStrength(float strength) {
+void LandscapeInstance::setGlobalColorStrength(float strength) {
     _globalColorStrength = std::clamp(strength, 0.0F, 1.0F);
     if (_renderer) {
         _renderer->setGlobalColorStrength(_globalColorStrength);
     }
 }
 
-void Landscape::onDisable() {
+void LandscapeInstance::onDisable() {
     if (_scene) {
         _scene->removeLandscape(this);
     }
@@ -164,7 +165,7 @@ void Landscape::onDisable() {
     _node = nullptr;
 }
 
-uint32_t Landscape::addDecal(float x, float z, float size, uint32_t layer) {
+uint32_t LandscapeInstance::addDecal(float x, float z, float size, uint32_t layer) {
     if (!_renderer || _nextDecalId == 0 || !_renderer->addDecal(_nextDecalId, x, z, size, layer)) {
         CC_LOG_WARNING("[Landscape] Cannot add decal: initialize terrain, use a valid preloaded layer and region, and keep at most %u instances.",
                        config::DECAL_INSTANCE_MAX);
@@ -173,11 +174,11 @@ uint32_t Landscape::addDecal(float x, float z, float size, uint32_t layer) {
     return _nextDecalId++;
 }
 
-bool Landscape::removeDecal(uint32_t id) {
+bool LandscapeInstance::removeDecal(uint32_t id) {
     return _renderer && _renderer->removeDecal(id);
 }
 
-void Landscape::update() {
+void LandscapeInstance::update() {
     if (!_renderer) {
         return;
     }
@@ -191,7 +192,7 @@ void Landscape::update() {
     _renderer->setViewPos(_lodViewPosition);
 }
 
-void Landscape::addPass(const geometry::Frustum &frustum, bool shadow) {
+void LandscapeInstance::addPass(const geometry::Frustum &frustum, bool shadow) {
     if (_passCount == _passes.size()) {
         _passes.emplace_back();
     }
@@ -202,7 +203,7 @@ void Landscape::addPass(const geometry::Frustum &frustum, bool shadow) {
     _quadtree->addPass(frustum, !shadow);
 }
 
-bool Landscape::queryTransformValid() const {
+bool LandscapeInstance::queryTransformValid() const {
     if (!_node) {
         return false;
     }
@@ -216,7 +217,7 @@ bool Landscape::queryTransformValid() const {
     return true;
 }
 
-uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
+uint32_t LandscapeInstance::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
     if (!_query || !_node) {
         return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
     }
@@ -228,17 +229,17 @@ uint32_t Landscape::setQuerySource(uint32_t id, float worldX, float worldZ, floa
     return static_cast<uint32_t>(_query->addSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
 }
 
-void Landscape::removeQuerySource(uint32_t id) {
+void LandscapeInstance::removeQuerySource(uint32_t id) {
     if (_query) {
         _query->removeSource(id);
     }
 }
 
-uint32_t Landscape::getQuerySourceStatus(uint32_t id) const {
+uint32_t LandscapeInstance::getQuerySourceStatus(uint32_t id) const {
     return static_cast<uint32_t>(_query ? _query->getSourceStatus(id) : LandscapeQueryStatus::NOT_READY);
 }
 
-uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array output) {
+uint32_t LandscapeInstance::sampleSurface(float worldX, float worldZ, Float32Array output) {
     if (output.length() < 8) {
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
     }
@@ -266,7 +267,7 @@ uint32_t Landscape::sampleSurface(float worldX, float worldZ, Float32Array outpu
     return static_cast<uint32_t>(result.status);
 }
 
-void Landscape::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
+void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
     _passCount = 0;
     if (!_renderer) {
         return;
@@ -283,7 +284,7 @@ void Landscape::preparePasses(const scene::Camera &camera, const pipeline::Pipel
     preparePassModels(cascadesToDeduplicate);
 }
 
-uint32_t Landscape::collectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
+uint32_t LandscapeInstance::collectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
     uint32_t cascadesToDeduplicate = 0;
     const auto *shadows = sceneData.getShadows();
     if (_castShadow && shadows && shadows->isEnabled() && shadows->getType() == scene::ShadowType::SHADOW_MAP) {
@@ -315,7 +316,7 @@ uint32_t Landscape::collectShadowPasses(const pipeline::PipelineSceneData &scene
     return cascadesToDeduplicate;
 }
 
-void Landscape::preparePassModels(uint32_t cascadesToDeduplicate) {
+void LandscapeInstance::preparePassModels(uint32_t cascadesToDeduplicate) {
     // Only selected renderable nodes draw; incomplete replacements retain their parents.
     _renderer->preparePasses();
     for (size_t i = 0; i < _passCount; ++i) {
@@ -325,7 +326,7 @@ void Landscape::preparePassModels(uint32_t cascadesToDeduplicate) {
     removeCSMDuplicates(cascadesToDeduplicate);
 }
 
-void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
+void LandscapeInstance::removeCSMDuplicates(uint32_t cascadeCount) {
     if (cascadeCount < 2U) {
         return;
     }
@@ -350,7 +351,7 @@ void Landscape::removeCSMDuplicates(uint32_t cascadeCount) {
     }
 }
 
-const ccstd::vector<const scene::Model *> &Landscape::getPassModels(const geometry::Frustum &frustum, bool shadow) const {
+const ccstd::vector<const scene::Model *> &LandscapeInstance::getPassModels(const geometry::Frustum &frustum, bool shadow) const {
     for (size_t i = 0; i < _passCount; ++i) {
         const auto &pass = _passes[i];
         if (pass.frustum == &frustum && pass.shadow == shadow) {
@@ -361,49 +362,49 @@ const ccstd::vector<const scene::Model *> &Landscape::getPassModels(const geomet
     return empty;
 }
 
-void Landscape::onGlobalPipelineStateChanged() {
+void LandscapeInstance::onGlobalPipelineStateChanged() {
     if (_renderer) {
         _renderer->onGlobalPipelineStateChanged();
     }
 }
 
-bool Landscape::isReady() const {
+bool LandscapeInstance::isReady() const {
     return _renderer != nullptr && _renderer->isReady();
 }
 
-void Landscape::setHoleMode(uint32_t mode) {
+void LandscapeInstance::setHoleMode(uint32_t mode) {
     _holeMode = mode == 0U ? 0U : 1U;
     if (_renderer) {
         _renderer->setHoleMode(_holeMode);
     }
 }
 
-void Landscape::setDebugData(const LandscapeDebugData &data) {
+void LandscapeInstance::setDebugData(const LandscapeDebugData &data) {
     _debugData = data;
     if (_renderer) {
         _renderer->setDebugData(data);
     }
 }
 
-void Landscape::setCastShadow(bool enabled) {
+void LandscapeInstance::setCastShadow(bool enabled) {
     _castShadow = enabled;
     if (_renderer) {
         _renderer->setCastShadow(enabled);
     }
 }
 
-void Landscape::setReceiveShadow(bool enabled) {
+void LandscapeInstance::setReceiveShadow(bool enabled) {
     _receiveShadow = enabled;
     if (_renderer) {
         _renderer->setReceiveShadow(enabled);
     }
 }
 
-void Landscape::setAssetPath(const ccstd::string &manifestPath) {
+void LandscapeInstance::setAssetPath(const ccstd::string &manifestPath) {
     _assetPath = manifestPath;
 }
 
-scene::Camera *Landscape::pickMainCamera() const {
+scene::Camera *LandscapeInstance::pickMainCamera() const {
     if (_scene == nullptr) {
         return nullptr;
     }
@@ -415,7 +416,7 @@ scene::Camera *Landscape::pickMainCamera() const {
     return nullptr;
 }
 
-void Landscape::drawDebugBounds() {
+void LandscapeInstance::drawDebugBounds() {
 #if CC_USE_GEOMETRY_RENDERER
     if (_scene == nullptr || _node == nullptr || !_quadtree) {
         return;
@@ -475,7 +476,7 @@ void Landscape::drawDebugBounds() {
 #endif
 }
 
-TextureBase *Landscape::getVTAtlas() const {
+TextureBase *LandscapeInstance::getVTAtlas() const {
     return _renderer ? _renderer->getVTAtlas() : nullptr;
 }
 

@@ -14,7 +14,7 @@ namespace landscape {
 LandscapeQuery::LandscapeQuery(const LandscapeData &data, Loader loader, uint32_t capacity)
 : _data(data)
 , _loader(std::move(loader))
-, _capacity(std::max(1U, capacity))
+, _capacity(capacity)
 , _tileSize(data.nodeSize(data.minTileLevel)) {
 }
 

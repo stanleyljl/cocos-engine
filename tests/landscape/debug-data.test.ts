@@ -5,12 +5,27 @@ import { Texture2D } from '../../cocos/asset/assets';
 import { Component } from '../../cocos/scene-graph/component';
 
 describe('Landscape debug data', () => {
+    test.each([undefined, true, false])('diagnostics honor the startup override %s without changing visual controls', (enabled) => {
+        const previous = globalThis.CC_LANDSCAPE_DEBUG;
+        try {
+            globalThis.CC_LANDSCAPE_DEBUG = enabled;
+            jest.isolateModules(() => {
+                const config = require('../../cocos/landscape/Config');
+                expect(config.LANDSCAPE_DEBUG).toBe(enabled ?? true);
+            });
+            expect(new LandscapeDebugData().triplanarEnabled).toBe(true);
+            expect(new LandscapeDebugData().heightBlendEnabled).toBe(true);
+        } finally {
+            globalThis.CC_LANDSCAPE_DEBUG = previous;
+        }
+    });
+
     test.each(['en', 'zh'])('all visible Landscape properties have matching Inspector tooltips in %s', (language) => {
         const catalog = { ENGINE: require(`../../editor/i18n/${language}/localization.js`) };
         const inherited = new Set((Component as unknown as { __props__: string[] }).__props__);
         const groups = [
             { type: Landscape, name: 'Landscape', count: 9 },
-            { type: LandscapeDebugData, name: 'LandscapeDebugData', count: 11 },
+            { type: LandscapeDebugData, name: 'LandscapeDebugData', count: 9 },
         ];
         for (const { type, name, count } of groups) {
             const attributes = CCClass.Attr.getClassAttrs(type);
@@ -39,7 +54,7 @@ describe('Landscape debug data', () => {
         const terrain = new Landscape();
         expect(terrain.holeMode).toBe(LandscapeHoleMode.Fast);
         const native = { setHoleMode: jest.fn() };
-        (terrain as any)._native = native;
+        (terrain as any)._runtime = native;
         terrain.holeMode = LandscapeHoleMode.HighQuality;
         expect(native.setHoleMode).toHaveBeenLastCalledWith(1);
         const loaded = deserialize({ __type__: 'cc.Landscape', _holeMode: 1 }) as Landscape;
@@ -66,8 +81,8 @@ describe('Landscape debug data', () => {
         const second = new Landscape();
         expect(first.debugData.wireframe).toBe(false);
         expect(first.debugData.heightBlendEnabled).toBe(false);
-        first.debugData.cliffEnabled = false;
-        expect(second.debugData.cliffEnabled).toBe(true);
+        first.debugData.triplanarEnabled = false;
+        expect(second.debugData.triplanarEnabled).toBe(true);
         expect(second.debugData.heightBlendEnabled).toBe(true);
     });
 
@@ -77,7 +92,8 @@ describe('Landscape debug data', () => {
         for (const key of Object.keys(new LandscapeDebugData())) {
             expect(properties).not.toContain(key);
             expect(Object.getOwnPropertyDescriptor(Landscape.prototype, key)).toBeUndefined();
-            expect(CCClass.Attr.getClassAttrs(LandscapeDebugData)[`${key}$_$visible`]).not.toBe(false);
+            const hidden = key === 'showVTAtlas' || key === 'physicsWireframe';
+            expect(CCClass.Attr.getClassAttrs(LandscapeDebugData)[`${key}$_$visible`] === false).toBe(hidden);
         }
     });
 
@@ -89,12 +105,12 @@ describe('Landscape debug data', () => {
             setDebugData: jest.fn(data => submitted.push({ ...data })),
             setAssetPath: jest.fn(), setGlobalColorStrength: jest.fn(), setGlobalColorMap: jest.fn(),
             setCastShadow: jest.fn(), setReceiveShadow: jest.fn(), setHoleMode: jest.fn(),
-            onEnable: jest.fn(), onDisable: jest.fn(),
+            onEnable: jest.fn(() => Promise.resolve(true)), onDisable: jest.fn(),
             isInitialized: jest.fn(() => true), update: jest.fn(),
             drawDebugBounds: jest.fn(),
         };
-        const internal = terrain as unknown as { _native: typeof native; _beforeDraw(): void };
-        internal._native = native;
+        const internal = terrain as unknown as { _runtime: typeof native; _beforeDraw(): void };
+        internal._runtime = native;
         terrain.debugData.unlit = true;
         terrain.debugData.heightBlendEnabled = false;
         terrain.onEnable();
@@ -109,12 +125,12 @@ describe('Landscape debug data', () => {
 
         native.isInitialized.mockReturnValue(false);
         native.update.mockClear();
-        terrain.debugData.bakeNormalEnabled = false;
+        terrain.debugData.refineFarDetail = false;
         terrain.debugData.showBox = true;
         terrain.debugData.showRanges = true;
         terrain.update();
         expect(submitted).toHaveLength(2);
-        expect(submitted[1].bakeNormalEnabled).toBe(false);
+        expect(submitted[1].refineFarDetail).toBe(false);
         expect(submitted[1].showRanges).toBe(true);
         expect(native.update).not.toHaveBeenCalled();
 
@@ -140,8 +156,8 @@ describe('Landscape debug data', () => {
     test('every debug switch detects both transitions and equal replacements do not resubmit', () => {
         const terrain = new Landscape();
         const native = { setDebugData: jest.fn(), isInitialized: jest.fn(() => false) };
-        const internal = terrain as unknown as { _native: typeof native; _beforeDraw(): void };
-        internal._native = native;
+        const internal = terrain as unknown as { _runtime: typeof native; _beforeDraw(): void };
+        internal._runtime = native;
         terrain.update();
         for (const key of Object.keys(terrain.debugData) as (keyof LandscapeDebugData)[]) {
             for (let transition = 0; transition < 2; ++transition) {
@@ -167,7 +183,7 @@ describe('Landscape debug data', () => {
     test('optional global color map can be assigned and cleared; strength stays bounded', () => {
         const terrain = new Landscape();
         const native = { setGlobalColorMap: jest.fn(), setGlobalColorStrength: jest.fn() };
-        (terrain as unknown as { _native: typeof native })._native = native;
+        (terrain as unknown as { _runtime: typeof native })._runtime = native;
         expect(terrain.globalColorMap).toBeNull();
         const texture = new Texture2D();
         terrain.globalColorMap = texture;

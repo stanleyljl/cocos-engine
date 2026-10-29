@@ -99,7 +99,6 @@ void VTPageTable::release(uint32_t slot) {
 }
 
 bool VTPageTable::update(uint32_t slot, const VTGridMapping &mapping, const VTRenderer &pages) {
-    static_assert(config::VT_PAGE_COUNT <= 256, "RG8 mappings store an 8-bit physical slot");
     CC_ASSERT(slot < _count);
     std::array<uint8_t, VTGridMapping::CELL_COUNT> physicalSlots{};
     CC_ASSERT(mapping.pages.size() <= physicalSlots.size());
@@ -174,21 +173,23 @@ VTRenderer::~VTRenderer() {
     destroy();
 }
 
-bool VTRenderer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals) {
+bool VTRenderer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize) {
     if (!residency.valid() || !materials.valid()) {
         return false;
     }
     const bool compressed = VTPageCompressor::supported();
-    if (!initResources(asset, residency, materials, decals, compressed)) {
+    if (!initResources(asset, residency, materials, decals, atlasSize, compressed)) {
         destroy();
-        if (!compressed || !initResources(asset, residency, materials, decals, false)) {
+        if (!compressed || !initResources(asset, residency, materials, decals, atlasSize, false)) {
             destroy();
             return false;
         }
         CC_LOG_WARNING("[Landscape] ASTC 4x4 initialization failed; using RGBA8 VT atlas");
     }
-    CC_LOG_INFO("[Landscape] VT atlas: %s", _compressor ? "ASTC 4x4" : "RGBA8");
-    _batch.reserve(config::VT_PAGE_COUNT);
+#if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] VT atlas: %ux%u %s pages=%zu", atlasSize, atlasSize, _compressor ? "ASTC 4x4" : "RGBA8", _pages.size());
+#endif
+    _batch.reserve(_pages.size());
     return true;
 }
 
@@ -273,15 +274,6 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
     gfx::CommandBuffer *command = _commands.get();
     device->flushCommands(&command, 1);
     device->getQueue()->submit(&command, 1);
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    const auto recomposed = std::count_if(_batch.begin(), _batch.end(), [this](const VTPageInstance &instance) {
-        return page(instance.physicalSlot()).state == PageState::OUTDATED;
-    });
-    if (recomposed > 0) {
-        CC_LOG_INFO("[Landscape] VT recomposed: %zu stale pages submitted (%s)",
-                    static_cast<size_t>(recomposed), _compressor ? "ASTC 4x4" : "RGBA8");
-    }
-#endif
     for (const auto &instance : _batch) {
         publish(instance.physicalSlot());
     }
@@ -481,16 +473,17 @@ void VTRenderer::publish(uint32_t slot) {
     page.state = PageState::READY;
 }
 
-bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed) {
     _composer = std::make_unique<VTPageComposer>();
     _mipGenerator = std::make_unique<VTPageMipGenerator>();
-    if (!initPages(asset.data()) || !_pageTable.ensureCapacity(1) ||
-        !_composer->init(asset, residency, materials, decals, compressed) || !_mipGenerator->init(*_composer, compressed)) {
+    const uint32_t side = atlasSize / config::VT_PAGE_RES;
+    if (!initPages(asset.data(), side * side) || !_pageTable.ensureCapacity(1) ||
+        !_composer->init(asset, residency, materials, decals, atlasSize, compressed) || !_mipGenerator->init(*_composer, compressed)) {
         return false;
     }
     if (compressed) {
         _compressor = std::make_unique<VTPageCompressor>();
-        if (!_compressor->init(Root::getInstance()->getDevice(), *_composer->target())) {
+        if (!_compressor->init(Root::getInstance()->getDevice(), *_composer->target(), atlasSize)) {
             return false;
         }
     }

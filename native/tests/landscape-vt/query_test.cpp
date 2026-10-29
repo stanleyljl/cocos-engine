@@ -61,12 +61,12 @@ struct Loading {
     struct Job {
         uint32_t x;
         uint32_t z;
-        LandscapeQuery::Completion complete;
+        LandscapeQueryCompletion complete;
     };
     std::deque<Job> jobs;
     size_t requests{0};
     LandscapeQuery::Loader loader() {
-        return [this](uint32_t x, uint32_t z, LandscapeQuery::Completion done) {
+        return [this](uint32_t x, uint32_t z, LandscapeQueryCompletion done) {
             ++requests;
             jobs.push_back({x, z, std::move(done)});
         };
@@ -438,7 +438,7 @@ void directLifecycle() {
     require(q.sample({5, 1}).status == Status::NOT_READY, "late completion cannot resurrect removed tile");
 
     size_t inlineRequests = 0;
-    LandscapeQuery synchronous(data(), [&inlineRequests](uint32_t x, uint32_t z, LandscapeQuery::Completion done) {
+    LandscapeQuery synchronous(data(), [&inlineRequests](uint32_t x, uint32_t z, LandscapeQueryCompletion done) {
         ++inlineRequests;
         done(tile(x, z), true);
     }, 1);

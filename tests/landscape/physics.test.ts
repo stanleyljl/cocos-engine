@@ -339,7 +339,8 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         await settle(manager);
         let release: jest.SpyInstance | undefined;
         manager.forEachCollider(collider => {
-            const field = (collider.shape as any)._ownedHeightField;
+            // Streamed shapes delegate ownership and teardown to their resource object.
+            const field = (collider.shape as any)._resource._heightfield;
             expect(field).toBeTruthy();
             release = jest.spyOn(field, 'release');
         });

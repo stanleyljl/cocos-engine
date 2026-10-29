@@ -27,6 +27,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 
 #include "base/std/container/vector.h"
@@ -56,6 +57,17 @@ struct HeightRange {
     float minY{0.0F};
     float maxY{0.0F};
 };
+
+// CPU data only. Normals retain padded source RGB8 XYZ, unlike the GPU's RG8 XZ.
+struct LandscapeQueryTile {
+    ccstd::vector<uint8_t> height;
+    ccstd::vector<uint8_t> normal;
+    ccstd::vector<uint8_t> splat;
+};
+
+// Completion is a loader contract shared by Asset and Query. Native workers
+// pass success separately; the tile owns its decoded bytes until publication.
+using LandscapeQueryCompletion = std::function<void(LandscapeQueryTile, bool)>;
 
 // Integer node indices across all sectors at a geometry/source LOD.
 struct NodeAddress {

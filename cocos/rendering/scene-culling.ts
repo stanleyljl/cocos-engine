@@ -112,6 +112,11 @@ export function shadowCulling (camera: Camera, sceneData: PipelineSceneData, lay
     const dirLightFrustum = layer.validFrustum;
     const dirShadowObjects = layer.shadowObjects;
     dirShadowObjects.length = 0;
+    for (const landscape of scene.landscapes) {
+        for (const model of landscape.getPassModels(dirLightFrustum, true)) {
+            dirShadowObjects.push(getRenderObject(model, camera));
+        }
+    }
     const visibility = camera.visibility;
 
     for (let i = csmLayerObjects.length - 1; i >= 0; i--) {
@@ -209,5 +214,11 @@ export function sceneCulling (sceneData: PipelineSceneData, pipelineUBO: Pipelin
 
     for (let i = 0; i < models.length; i++) {
         enqueueRenderObject(models[i]);
+    }
+    for (const landscape of scene.landscapes) {
+        landscape.preparePasses(camera, sceneData);
+        for (const model of landscape.getPassModels(camera.frustum, false)) {
+            renderObjects.push(getRenderObject(model, camera));
+        }
     }
 }

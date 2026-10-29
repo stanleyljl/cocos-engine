@@ -31,7 +31,7 @@
 #include "base/Log.h"
 #include "core/Root.h"
 #include "core/scene-graph/Node.h"
-#include "landscape/Landscape.h"
+#include "landscape/LandscapeInstance.h"
 #include "profiler/Profiler.h"
 #include "renderer/pipeline/PipelineSceneData.h"
 #include "renderer/pipeline/custom/RenderInterfaceTypes.h"
@@ -398,13 +398,13 @@ void RenderScene::updateOctree(Model *model) {
     }
 }
 
-void RenderScene::addLandscape(landscape::Landscape *terrain) {
+void RenderScene::addLandscape(landscape::LandscapeInstance *terrain) {
     if (std::find(_landscapes.begin(), _landscapes.end(), terrain) == _landscapes.end()) {
         _landscapes.push_back(terrain);
     }
 }
 
-void RenderScene::removeLandscape(landscape::Landscape *terrain) {
+void RenderScene::removeLandscape(landscape::LandscapeInstance *terrain) {
     const auto it = std::find(_landscapes.begin(), _landscapes.end(), terrain);
     if (it != _landscapes.end()) _landscapes.erase(it);
 }

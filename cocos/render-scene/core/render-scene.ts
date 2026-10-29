@@ -33,6 +33,7 @@ import { RangedDirectionalLight } from '../scene/ranged-directional-light';
 import { TransformBit } from '../../scene-graph/node-enum';
 import { DrawBatch2D } from '../../2d/renderer/draw-batch';
 import { LODGroup } from '../scene/lod-group';
+import type { LandscapeInstance } from '../../landscape/LandscapeInstance';
 
 export interface IRenderSceneInfo {
     name: string;
@@ -137,6 +138,11 @@ export class RenderScene {
         return this._models;
     }
 
+    /** @engineInternal Landscapes collect terrain models for each render pass. */
+    get landscapes (): readonly LandscapeInstance[] {
+        return this._landscapes;
+    }
+
     /**
      * @en All active 2d draw batches of the render scene.
      * @zh 渲染场景管理的所有 2D 渲染批次对象。
@@ -156,6 +162,7 @@ export class RenderScene {
     private _name = '';
     private _cameras: Camera[] = [];
     private _models: Model[] = [];
+    private readonly _landscapes: LandscapeInstance[] = [];
     private _lodGroups: LODGroup[] = []; // LOD Group gathered
     private _batches: DrawBatch2D[] = [];
     private _directionalLights: DirectionalLight[] = [];
@@ -243,6 +250,9 @@ export class RenderScene {
      * @zh 销毁渲染场景，请不要手动销毁，会造成未知行为。
      */
     public destroy (): void {
+        for (const landscape of this._landscapes.slice()) {
+            landscape.onDisable();
+        }
         this.removeCameras();
         this.removeSphereLights();
         this.removeSpotLights();
@@ -493,6 +503,21 @@ export class RenderScene {
         this._rangedDirLights.length = 0;
     }
 
+    /** @engineInternal Register an initialized LandscapeInstance runtime. */
+    public addLandscape (landscape: LandscapeInstance): void {
+        if (!this._landscapes.includes(landscape)) {
+            this._landscapes.push(landscape);
+        }
+    }
+
+    /** @engineInternal Detach a LandscapeInstance before releasing its runtime. */
+    public removeLandscape (landscape: LandscapeInstance): void {
+        const index = this._landscapes.indexOf(landscape);
+        if (index !== -1) {
+            this._landscapes.splice(index, 1);
+        }
+    }
+
     /**
      * @en Add a model, all models attached to the render scene will be submitted for rendering.
      * @zh 增加一个模型，渲染场景上挂载的所有模型都会被提交渲染。
@@ -616,6 +641,9 @@ export class RenderScene {
      * @zh 通知所有模型全局管线状态已更新，需要更新自身状态。
      */
     public onGlobalPipelineStateChanged (): void {
+        for (const landscape of this._landscapes) {
+            landscape.onGlobalPipelineStateChanged();
+        }
         this._models.forEach((m) => {
             m.onGlobalPipelineStateChanged();
         });

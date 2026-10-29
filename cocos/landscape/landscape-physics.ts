@@ -466,11 +466,11 @@ export class LandscapePhysics {
             }
         }
         // Prepare the center (typically the actor) before distant prefetch edges.
-        const centers = [...this._regions.values()].filter(region => region.keys.length).map(region => ({
+        const centers = Array.from(this._regions.values()).filter(region => region.keys.length).map(region => ({
             x: (region.bounds.minX + region.bounds.maxX) / 2,
             z: (region.bounds.minZ + region.bounds.maxZ) / 2,
         }));
-        const pending = [...desired].filter(key => !this._tiles.has(key)).map(key => {
+        const pending = Array.from(desired).filter(key => !this._tiles.has(key)).map(key => {
             const tile = grid.tileAtKey(key);
             const local = grid.tileLocalOrigin(tile.x, tile.z);
             const x = origin.x + local.x + layout.tileSize / 2;

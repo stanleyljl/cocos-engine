@@ -37,7 +37,6 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/Data.h"
-#include "landscape/Query.h"
 
 namespace cc {
 namespace gfx {
@@ -71,7 +70,6 @@ public:
         float size{1};
         uint32_t layer{0};
     };
-
     struct TileData {
         uint64_t key{0};
         ccstd::vector<uint8_t> height; // requested RG8 high/low bytes or R16UI host-order values
@@ -98,7 +96,7 @@ public:
     bool loadingFailed() const { return _async && _async->loadFailed.load(); }
     // Call on the main thread; file access and CPU query decode run on a worker.
     // Completion receives source RGB normals and never uploads to GPU.
-    void requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion);
+    void requestQueryTile(uint32_t x, uint32_t z, LandscapeQueryCompletion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const;
     // Decodes 129x129 uint16 height/splat as RG8/R16UI, or padded 145x145 normals as RGB8.
     static bool loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data);

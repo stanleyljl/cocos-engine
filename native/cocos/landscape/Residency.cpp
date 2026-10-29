@@ -49,7 +49,7 @@ LandscapeResidency::~LandscapeResidency() {
 
 bool LandscapeResidency::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
-    if (device == nullptr || asset == nullptr || layerCount == 0) {
+    if (device == nullptr || asset == nullptr || layerCount == 0 || layerCount > device->getCapabilities().maxArrayTextureLayers) {
         return false;
     }
     if (!initSlots(asset->data(), layerCount)) {

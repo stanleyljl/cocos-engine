@@ -1649,8 +1649,8 @@ cocos_source_files(
                  cocos/landscape/Schedule.cpp
                  cocos/landscape/Renderer.h
                  cocos/landscape/Renderer.cpp
-                 cocos/landscape/Landscape.h
-                 cocos/landscape/Landscape.cpp
+                 cocos/landscape/LandscapeInstance.h
+                 cocos/landscape/LandscapeInstance.cpp
                  cocos/landscape/Asset.h
                  cocos/landscape/Asset.cpp
 )

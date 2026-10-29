@@ -37,7 +37,7 @@
 #include "scene/Shadow.h"
 #include "scene/SpotLight.h"
 #include "shadow/CSMLayers.h"
-#include "landscape/Landscape.h"
+#include "landscape/LandscapeInstance.h"
 #include "scene/RenderScene.h"
 
 namespace cc {

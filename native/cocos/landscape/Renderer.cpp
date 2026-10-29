@@ -28,6 +28,7 @@
 #include <cstdint>
 
 #include "base/Log.h"
+#include "base/std/container/unordered_set.h"
 #include "base/Macros.h"
 #include "core/Root.h"
 #include "core/TypedArray.h"
@@ -114,6 +115,17 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
         return false;
     }
 
+    const auto &data = asset->data();
+    const auto &capabilities = device->getCapabilities();
+    const uint32_t side = std::min(config::VT_PAGES_PER_SIDE, capabilities.maxTextureSize / config::VT_PAGE_RES);
+    const uint32_t layers = std::min(config::PAGE_POOL_LAYERS, capabilities.maxArrayTextureLayers);
+    const uint32_t roots = data.sectorsX * data.sectorsZ;
+    if (side * side < roots || layers < roots) {
+        CC_LOG_ERROR("[Landscape] Device capacity cannot hold sector roots");
+        return false;
+    }
+    const uint32_t atlasSize = side * config::VT_PAGE_RES;
+
     _node = node;
     _scene = scene;
     _mesh = GridMesh::create(device, 16);
@@ -140,7 +152,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     _asset = asset;
     _data = asset->data();
     _residency = std::make_unique<LandscapeResidency>();
-    if (!_residency->init(device, asset, config::PAGE_POOL_LAYERS, _heightUnorm)) {
+    if (!_residency->init(device, asset, layers, _heightUnorm)) {
         _residency.reset();
         return false;
     }
@@ -148,14 +160,36 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     if (!_materialLibrary->init(device, *asset)) {
         return false;
     }
-    if (!_decals->setAsset(asset, device)) {
+    if (!_decals->setAsset(asset, device, side * side)) {
         return false;
     }
     _vtRenderer = std::make_unique<VTRenderer>();
-    if (!_vtRenderer->init(*asset, *_residency, *_materialLibrary, *_decals)) {
+    if (!_vtRenderer->init(*asset, *_residency, *_materialLibrary, *_decals, atlasSize)) {
         CC_LOG_ERROR("[Landscape] VT initialization failed; terrain requires VT material shading");
         _vtRenderer.reset();
         return false;
+    }
+    // Match Web: root coverage and each root's worst-case composition footprint
+    // must fit before publishing a renderer, including on smaller devices.
+    ccstd::unordered_set<uint64_t> rootKeys;
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            rootKeys.insert(NodeAddress{data.maxLevel, x, z}.key());
+        }
+    }
+    const VTPageLayout layout(data.sectorSize);
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            ccstd::vector<NodeAddress> inputs;
+            _vtRenderer->selectSources({layout.rootLevel(), x, z}, true).appendTo(inputs);
+            const auto additional = std::count_if(inputs.begin(), inputs.end(), [&](NodeAddress source) {
+                return rootKeys.count(source.key()) == 0;
+            });
+            if (rootKeys.size() + additional > layers) {
+                CC_LOG_ERROR("[Landscape] Device capacity cannot compose sector roots");
+                return false;
+            }
+        }
     }
     _schedule = std::make_unique<LandscapeSchedule>(*asset, *_residency, *_vtRenderer, _quadtree);
     _decals->setEnabled(_debugData.decal3DEnabled);
@@ -164,6 +198,9 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     _decals->setReceiveShadow(_receiveShadow);
     bindRuntimeTextures();
     updateMaterialProperties();
+#if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] Resources: sourceLayers=%u heightFormat=%s", layers, _heightUnorm ? "R16_UNORM" : "RG8");
+#endif
     return true;
 }
 
@@ -256,7 +293,7 @@ void LandscapeRenderer::updateMaterialProperties() {
         material->setPropertyVec4("terrainParams", terrainParams);
         material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, layout.pageSize(0), 0, 0});
         material->setPropertyVec4Array("lodMorph", lodMorph);
-        material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(config::VT_ATLAS_SIZE),
+        material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(_vtRenderer->albedo()->getWidth()),
                                                    static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
                                                    static_cast<float>(config::VT_FILTER_MARGIN)});
     }
@@ -578,7 +615,7 @@ void LandscapeRenderer::setUnlit(bool enabled) {
         _debugData.unlit = enabled;
     } else {
         compile(_debugData.unlit);
-        CC_LOG_ERROR("[Landscape] failed to switch unlit shader variant");
+        CC_LOG_ERROR("[Landscape] Failed to switch unlit shader variant");
     }
     // Refresh cached submodel shaders and instance attributes, including pooled
     // models, so reused models retain the correct instance layout.

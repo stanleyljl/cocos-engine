@@ -100,6 +100,13 @@ export class RenderShadowMapBatchedQueue {
                 const spotLight = light as SpotLight;
                 if (spotLight.shadowEnabled) {
                     const visibility = spotLight.visibility;
+                    for (const landscape of camera.scene!.landscapes) {
+                        for (const model of landscape.getPassModels(spotLight.frustum, true)) {
+                            if ((visibility & model.node.layer) === model.node.layer) {
+                                this.add(model, level);
+                            }
+                        }
+                    }
                     const castShadowObjects = sceneData.csmLayers.castShadowObjects;
                     for (let i = 0; i < castShadowObjects.length; i++) {
                         const ro = castShadowObjects[i];

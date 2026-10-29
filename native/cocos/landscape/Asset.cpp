@@ -370,6 +370,9 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _decalFarDistance = manifest.decalFarDistance;
     _nodeIndexLayout = manifest.nodeIndexLayout;
     _heightRanges = std::move(manifest.ranges);
+#if CC_LANDSCAPE_DEBUG
+    CC_LOG_INFO("[Landscape] Asset: sectors=%ux%u levels=%u minTileLevel=%u materials=%zu decals=%zu", _data.sectorsX, _data.sectorsZ, _data.maxLevel + 1U, _data.minTileLevel, _materialLayers.size(), _decals.size());
+#endif
     return true;
 }
 
@@ -454,7 +457,7 @@ bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Fo
     return true;
 }
 
-void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQuery::Completion completion) {
+void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQueryCompletion completion) {
     const uint32_t side = _data.nodesPerSectorSide(_data.minTileLevel);
     if (x >= _data.sectorsX * side || z >= _data.sectorsZ * side) {
         completion({}, false);

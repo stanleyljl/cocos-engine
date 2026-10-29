@@ -14,6 +14,7 @@ add_executable(landscape_vt_paging_test paging_test.cpp ../../cocos/landscape/Da
     ../../cocos/landscape/Residency.cpp ../../cocos/base/RefCounted.cpp
     ../../cocos/math/Vec3.cpp ../../cocos/math/Vec4.cpp ../../cocos/math/MathUtil.cpp)
 target_compile_features(landscape_vt_paging_test PRIVATE cxx_std_17)
+target_compile_definitions(landscape_vt_paging_test PRIVATE LANDSCAPE_PARITY_TESTS="${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/landscape")
 target_compile_definitions(landscape_vt_paging_test PRIVATE BOOST_ALL_NO_LIB BOOST_CONTAINER_NO_LIB CC_DEBUG=0 CC_STATIC _USE_MATH_DEFINES)
 if(WIN32)
     target_compile_definitions(landscape_vt_paging_test PRIVATE CC_PLATFORM=2 CC_PLATFORM_WINDOWS=2 CC_PLATFORM_ANDROID=3)
@@ -47,3 +48,17 @@ if(MSVC)
 endif()
 target_include_directories(landscape_query_test PRIVATE ../../cocos ../../external/sources)
 add_test(NAME landscape_query COMMAND landscape_query_test)
+
+# Link the real scheduler/tree/layout with deterministic IO and GPU boundary doubles.
+add_executable(landscape_schedule_test schedule_test.cpp
+    ../../cocos/landscape/Schedule.cpp ../../cocos/landscape/Quadtree.cpp ../../cocos/landscape/Data.cpp
+    ../../cocos/core/geometry/Frustum.cpp ../../cocos/core/geometry/Plane.cpp ../../cocos/core/geometry/AABB.cpp
+    ../../cocos/math/Quaternion.cpp ../../cocos/math/Mat3.cpp ../../cocos/math/Math.cpp ../../cocos/math/Mat4.cpp
+    ../../cocos/math/Vec3.cpp ../../cocos/math/Vec4.cpp ../../cocos/math/MathUtil.cpp ../../cocos/base/RefCounted.cpp)
+target_compile_features(landscape_schedule_test PRIVATE cxx_std_17)
+target_compile_definitions(landscape_schedule_test PRIVATE $<TARGET_PROPERTY:landscape_vt_paging_test,COMPILE_DEFINITIONS>)
+target_include_directories(landscape_schedule_test PRIVATE $<TARGET_PROPERTY:landscape_vt_paging_test,INCLUDE_DIRECTORIES>)
+if(MSVC)
+    target_compile_options(landscape_schedule_test PRIVATE /utf-8)
+endif()
+add_test(NAME landscape_schedule COMMAND landscape_schedule_test)

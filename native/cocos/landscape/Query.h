@@ -28,21 +28,14 @@ struct LandscapeSurfaceResult {
     float surfaceWeight{0.0F};
 };
 
-// CPU data only. Normals retain padded source RGB8 XYZ, unlike the GPU's RG8 XZ.
-struct LandscapeQueryTile {
-    ccstd::vector<uint8_t> height;
-    ccstd::vector<uint8_t> normal;
-    ccstd::vector<uint8_t> splat;
-};
-
 // Sources reference rectangular regions of CPU tiles, independently of rendering.
 // Public methods run on the main thread. Workers only fill their own tile;
 // update() publishes completed data, and removeSource() deletes unreferenced tiles.
 class LandscapeQuery final {
 public:
-    using Completion = std::function<void(LandscapeQueryTile, bool)>;
     // Invoke the completion exactly once, on any thread, including inline.
-    using Loader = std::function<void(uint32_t, uint32_t, Completion)>;
+    using Loader = std::function<void(uint32_t, uint32_t, LandscapeQueryCompletion)>;
+    // Landscape validates capacity in [1, 4096] before constructing the query.
     LandscapeQuery(const LandscapeData &data, Loader loader, uint32_t capacity = 64);
     ~LandscapeQuery();
     // Inputs and returned positions are landscape-local; Landscape converts world space.

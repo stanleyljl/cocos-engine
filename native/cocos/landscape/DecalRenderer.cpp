@@ -123,7 +123,7 @@ std::array<Material *, 2> DecalRenderer::materials() const {
     return {_solid.get(), _wire.get()};
 }
 
-bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
+bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_t pageCount) {
     _asset = asset;
     for (auto &entry : _nodes) {
         for (auto &draw : entry.second.draws) {
@@ -144,9 +144,9 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device) {
     info.format = gfx::Format::RGBA8;
     // RG and BA each store a 16-bit instance index, low byte first.
     info.width = config::DECAL_INSTANCE_MAX / 2;
-    info.height = config::VT_PAGE_COUNT;
+    info.height = pageCount;
     _pageIndexTexture = device->createTexture(info);
-    _pageIndexData.resize(config::VT_PAGE_COUNT * config::DECAL_INSTANCE_MAX * 2, 0);
+    _pageIndexData.resize(pageCount * config::DECAL_INSTANCE_MAX * 2, 0);
     return _pageIndexTexture != nullptr;
 }
 
@@ -297,7 +297,7 @@ uint32_t DecalRenderer::collectPageDecals(uint32_t slot, const Vec4 &region) {
 
 void DecalRenderer::uploadPageDecals() {
     gfx::BufferTextureCopy copy;
-    copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, config::VT_PAGE_COUNT, 1};
+    copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, _pageIndexTexture->getHeight(), 1};
     const uint8_t *bytes[]{_pageIndexData.data()};
     Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndexTexture, &copy, 1);
 }

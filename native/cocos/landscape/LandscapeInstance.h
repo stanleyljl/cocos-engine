@@ -59,13 +59,14 @@ class LandscapeRenderer;
 class LandscapeQuery;
 class Quadtree;
 
-class Landscape : public RefCounted {
+class LandscapeInstance : public RefCounted {
 public:
-    Landscape();
-    ~Landscape() override;
+    LandscapeInstance();
+    ~LandscapeInstance() override;
 
-    // LOD quality is fixed for the lifetime of the loaded terrain.
-    void onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
+    // LOD quality is fixed for the lifetime of the loaded terrain. True means
+    // initialization succeeded and the complete runtime was added to its scene.
+    bool onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
     void onDisable();
     // Once per tick, after camera controllers: advance queries and snapshot the LOD view.
     void update();
@@ -136,7 +137,7 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
-    uint32_t _nextDecalId{1}; // Never reset when reloading this Landscape object.
+    uint32_t _nextDecalId{1}; // Never reset when reloading this LandscapeInstance object.
 };
 
 } // namespace landscape

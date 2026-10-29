@@ -48,7 +48,7 @@
 #include "scene/Skybox.h"
 #include "scene/SpotLight.h"
 #include "shadow/CSMLayers.h"
-#include "landscape/Landscape.h"
+#include "landscape/LandscapeInstance.h"
 
 namespace cc {
 namespace pipeline {

@@ -129,7 +129,7 @@ export class ShadowFlow extends RenderFlow {
             m++;
         }
 
-        if (castShadowObjects.length === 0) {
+        if (castShadowObjects.length === 0 && camera.scene!.landscapes.length === 0) {
             this.clearShadowMap(_validLights, camera);
             return;
         }

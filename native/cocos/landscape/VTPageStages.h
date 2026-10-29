@@ -58,7 +58,7 @@ public:
     ~VTPageComposer();
     VTPageComposer(const VTPageComposer &) = delete;
     VTPageComposer &operator=(const VTPageComposer &) = delete;
-    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
     RenderTexture *target() const { return _compositionTarget.get(); }
     uint32_t size() const;
     gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }
@@ -74,11 +74,11 @@ public:
     bool setTriplanarEnabled(bool enabled);
 
 private:
-    bool initTarget(gfx::Device *device, bool compressed);
+    bool initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed);
     bool initDrawResources(gfx::Device *device);
     bool initRenderPass(gfx::Device *device, bool compressed);
     bool initMaterial(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
-    bool initSourceTable(LandscapeResidency &residency, gfx::Device *device);
+    bool initSourceTable(LandscapeResidency &residency, gfx::Device *device, uint32_t pageCount);
     void bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
     void applyGlobalColorMap();
 
@@ -138,7 +138,7 @@ public:
     VTPageCompressor(const VTPageCompressor &) = delete;
     VTPageCompressor &operator=(const VTPageCompressor &) = delete;
     static bool supported();
-    bool init(gfx::Device *device, RenderTexture &composition);
+    bool init(gfx::Device *device, RenderTexture &composition, uint32_t atlasSize);
     Texture2D *atlas() const;
     gfx::Texture *albedo() const;
     gfx::Texture *normalRoughnessAO() const;

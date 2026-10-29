@@ -79,7 +79,7 @@ public:
     DecalRenderer &operator=(const DecalRenderer &) = delete;
 
     bool init(Node *node, scene::RenderScene *scene, bool heightUnorm);
-    bool setAsset(LandscapeAsset *asset, gfx::Device *device);
+    bool setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_t pageCount);
     bool addDecal(uint32_t id, const LandscapeAsset::Decal &decal);
     bool removeDecal(uint32_t id, LandscapeRegion &region);
     // Only shared terrain shader uniforms/textures/variants are set by the caller.

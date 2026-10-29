@@ -171,6 +171,10 @@ void buildDecalColorMip(const ccstd::vector<uint8_t> &source, uint32_t size, ccs
 }
 
 IntrusivePtr<gfx::Texture> createTextureArray(gfx::Device *device, uint32_t resolution, uint32_t layerCount) {
+    if (resolution > device->getCapabilities().maxTextureSize || layerCount > device->getCapabilities().maxArrayTextureLayers) {
+        CC_LOG_ERROR("[Landscape] Material array exceeds device capacity");
+        return nullptr;
+    }
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.layerCount = layerCount;

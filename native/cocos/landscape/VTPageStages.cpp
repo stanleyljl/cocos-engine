@@ -100,13 +100,14 @@ VTPageComposer::~VTPageComposer() {
     }
 }
 
-bool VTPageComposer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed) {
+bool VTPageComposer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed) {
     CC_ASSERT(_composeMaterial == nullptr);
     _decals = &decals;
     _rootLevel = asset.data().maxLevel;
     auto *device = Root::getInstance()->getDevice();
-    if (!initTarget(device, compressed) || !initMaterial(asset, residency, materials, device, compressed, size()) ||
-        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(residency, device)) {
+    const uint32_t side = atlasSize / config::VT_PAGE_RES;
+    if (!initTarget(device, atlasSize, compressed) || !initMaterial(asset, residency, materials, device, compressed, size()) ||
+        !_decals->bindComposeMaterial(_composeMaterial, materials) || !initSourceTable(residency, device, side * side)) {
         return false;
     }
     for (const auto &pass : *_composeMaterial->getPasses()) {
@@ -149,7 +150,7 @@ void VTPageComposer::uploadInputs() {
     _decals->updateComposeMaterial(_composeMaterial);
     _decals->uploadPageDecals();
     gfx::BufferTextureCopy indexCopy;
-    indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, config::VT_PAGE_COUNT, 1};
+    indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, static_cast<uint32_t>(_normalSourceRows.size()), 1};
     const uint8_t *normalBytes[]{reinterpret_cast<const uint8_t *>(_normalSourceRows.data())};
     Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSourceTable, &indexCopy, 1);
 
@@ -220,18 +221,18 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, LandscapeResidenc
     return true;
 }
 
-bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device *device) {
+bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device *device, uint32_t pageCount) {
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = gfx::Format::RGBA32F;
     info.width = config::VT_NORMAL_SOURCE_COUNT;
-    info.height = config::VT_PAGE_COUNT;
+    info.height = pageCount;
     _normalSourceTable = device->createTexture(info);
     if (!_normalSourceTable) {
         return false;
     }
-    _normalSourceRows.resize(config::VT_PAGE_COUNT);
+    _normalSourceRows.resize(pageCount);
     bindTexture("normalSourceMap", _normalSourceTable, residency.splatSampler());
     return true;
 }
@@ -299,9 +300,9 @@ void VTPageComposer::record(gfx::CommandBuffer &commands, const VTPageInstance *
     recordPagePass(commands, _inputAssembler, renderPass(initialize), (*_composeMaterial->getPasses())[variant], _composePipelines[variant], _compositionTarget->getWindow()->getFramebuffer(), size(), instanceCount);
 }
 
-bool VTPageComposer::initTarget(gfx::Device *device, bool compressed) {
+bool VTPageComposer::initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed) {
     if (device->getCapabilities().maxColorRenderTargets < 2 ||
-        device->getCapabilities().maxTextureSize < config::VT_ATLAS_SIZE) {
+        device->getCapabilities().maxTextureSize < atlasSize) {
         return false;
     }
     gfx::RenderPassInfo passInfo;
@@ -321,8 +322,8 @@ bool VTPageComposer::initTarget(gfx::Device *device, bool compressed) {
     // No depth attachment: page rectangles never overlap.
     IRenderTextureCreateInfo info;
     info.name = "landscape-vt-atlas";
-    info.width = (compressed ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE);
-    info.height = (compressed ? config::VT_PAGE_RES : config::VT_ATLAS_SIZE);
+    info.width = (compressed ? config::VT_PAGE_RES : atlasSize);
+    info.height = (compressed ? config::VT_PAGE_RES : atlasSize);
     info.passInfo = passInfo;
     info.colorMipLevels = config::VT_MIP_LEVELS;
     _compositionTarget = ccnew RenderTexture();
@@ -347,7 +348,7 @@ gfx::RenderPass *VTPageComposer::renderPass(bool initialize) const {
 bool VTPageComposer::initDrawResources(gfx::Device *device) {
     constexpr uint32_t STRIDE = sizeof(VTPageInstance);
     _instanceBuffer = device->createBuffer({gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
-                                       gfx::MemoryUsageBit::DEVICE, config::VT_PAGE_COUNT * STRIDE, STRIDE});
+                                       gfx::MemoryUsageBit::DEVICE, static_cast<uint32_t>(_normalSourceRows.size()) * STRIDE, STRIDE});
     gfx::InputAssemblerInfo iaInfo;
     iaInfo.attributes = _pageMesh->getAttributes();
     iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtPage", gfx::Format::RGBA32F, false, 1, true, 1});
@@ -483,10 +484,10 @@ bool VTPageCompressor::supported() {
 #endif
 }
 
-bool VTPageCompressor::init(gfx::Device *device, RenderTexture &composition) {
+bool VTPageCompressor::init(gfx::Device *device, RenderTexture &composition, uint32_t atlasSize) {
     for (auto &texture : _atlas) {
         texture = ccnew Texture2D();
-        texture->reset({config::VT_ATLAS_SIZE, config::VT_ATLAS_SIZE, static_cast<PixelFormat>(COMPRESSED_FORMAT),
+        texture->reset({atlasSize, atlasSize, static_cast<PixelFormat>(COMPRESSED_FORMAT),
                         config::VT_MIP_LEVELS, 0, config::VT_MIP_LEVELS - 1});
         if (!texture->getGFXTexture()) {
             return false;
@@ -583,6 +584,7 @@ void VTPageCompressor::transition(gfx::CommandBuffer &commands, gfx::AccessFlags
 void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
     auto *device = Root::getInstance()->getDevice();
     for (uint32_t level = 0; level < config::VT_MIP_LEVELS; ++level) {
+        const uint32_t side = albedo()->getWidth() / config::VT_PAGE_RES;
         const uint32_t size = config::VT_PAGE_RES >> level;
         const uint32_t blocks = size / ASTC_BLOCK_SIDE;
         auto *barrier = device->getGeneralBarrier({gfx::AccessFlagBit::TRANSFER_READ, gfx::AccessFlagBit::COMPUTE_SHADER_WRITE});
@@ -598,8 +600,8 @@ void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
         commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
         gfx::BufferTextureCopy copy;
         copy.texExtent = {size, size, 1};
-        copy.texOffset = {static_cast<int32_t>((slot % config::VT_PAGES_PER_SIDE) * size),
-                          static_cast<int32_t>((slot / config::VT_PAGES_PER_SIDE) * size), 0};
+        copy.texOffset = {static_cast<int32_t>((slot % side) * size),
+                          static_cast<int32_t>((slot / side) * size), 0};
         copy.texSubres.mipLevel = level;
         commands.copyBufferToTexture(_blocks, albedo()->getViewInfo().texture, &copy, 1);
         copy.buffOffset = blocks * blocks * ASTC_BLOCK_BYTES;

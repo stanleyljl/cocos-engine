@@ -23,14 +23,17 @@
 */
 
 import { ccclass, help, menu, executeInEditMode, disallowMultiple, serializable, editable, type, displayOrder, rangeMin, range, slide, tooltip, group, visible, disallowAnimation, displayName } from 'cc.decorator';
-import { JSB } from 'internal:constants';
+import { EDITOR_NOT_IN_PREVIEW, JSB } from 'internal:constants';
 import { Component } from '../scene-graph/component';
-import { Asset, Texture2D } from '../asset/assets';
+import { Asset, RenderTexture, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
 import { Enum, isValid, System, SystemPriority, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
 import { LandscapePhysics } from './landscape-physics';
+import { LandscapeInstance, LandscapeInstanceInterface } from './LandscapeInstance';
+import { API } from '../gfx';
+import { warn } from '../core/platform/debug';
 
 /** Terrain holes share streamed splat data in both modes. */
 export enum LandscapeHoleMode {
@@ -81,7 +84,10 @@ const ShadowCastingMode = Enum({ OFF: 0, ON: 1 });
 const ShadowReceivingMode = Enum({ OFF: 0, ON: 1 });
 
 // The native binding only exists on JSB platforms; guard native access with JSB.
-declare const jsb: any;
+declare const jsb: {
+    LandscapeInstance?: new () => LandscapeInstanceInterface;
+    fileUtils: { fullPathForFilename(path: string): string };
+};
 
 /**
  * @en Landscape terrain asset.
@@ -95,11 +101,10 @@ export class LandscapeAsset extends Asset {
     }
 }
 
-// Resolve the native dependency without eagerly reading terrain tiles. Native
-// FileUtils reads the manifest and streams raw pages from the same package.
+// Resolve the dependency without eagerly reading terrain tiles. Each runtime
+// reads the manifest and streams raw pages from the same imported package.
 downloader.register('.lsmanifest', (url, options, onComplete) => {
-    // Editor/browser previews may resolve an HTTP library URL, but do not run
-    // the native renderer. Native runtime supports packaged local assets only.
+    // WebGL2 streams from the resolved library/package URL; JSB uses local files.
     if (JSB && /^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
         onComplete(new Error('Landscape assets require a local native package'));
         return;
@@ -107,7 +112,7 @@ downloader.register('.lsmanifest', (url, options, onComplete) => {
     const path = url.replace(/[?#].*$/, '');
     // Resolve the package once so physics can derive absolute raw-tile paths
     // without searching the filesystem on every asynchronous read request.
-    const resolved = JSB ? jsb.fileUtils.fullPathForFilename(path) : path;
+    const resolved = JSB ? jsb.fileUtils.fullPathForFilename(path) : url;
     if (!resolved) {
         onComplete(new Error(`Landscape manifest not found: ${path}`));
         return;
@@ -115,7 +120,7 @@ downloader.register('.lsmanifest', (url, options, onComplete) => {
     onComplete(null, resolved);
 });
 
-/** Debug settings shared by Inspector, keyboard/touch controls and native rendering. */
+/** Debug settings shared by Inspector, keyboard/touch controls and terrain rendering. */
 @ccclass('cc.LandscapeDebugData')
 export class LandscapeDebugData {
     @serializable
@@ -151,44 +156,43 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(5)
-    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showVTAtlas.tooltip')
-    public showVTAtlas = false;
-
-    @serializable
-    @editable
-    @displayOrder(6)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.heightBlendEnabled.tooltip')
     public heightBlendEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(7)
+    @displayOrder(6)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.refineFarDetail.tooltip')
     public refineFarDetail = true;
 
     @serializable
     @editable
-    @displayOrder(8)
+    @displayOrder(7)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.decal3DEnabled.tooltip')
     public decal3DEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(9)
+    @displayOrder(8)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.triplanarEnabled.tooltip')
     public triplanarEnabled = true;
 
+    // These switches are consumed by the project's runtime debug views.
     @serializable
-    @editable
-    @displayOrder(10)
+    @visible(false)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.physicsWireframe.tooltip')
     public physicsWireframe = false;
+
+    @serializable
+    @visible(false)
+    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.showVTAtlas.tooltip')
+    public showVTAtlas = false;
 
 }
 
 /**
- * @en Terrain component backed by a native `cc::landscape::Landscape` object.
- * @zh 由原生 `cc::landscape::Landscape` 对象支撑的地形组件。
+ * @en Terrain component backed by the native or WebGL2 Landscape runtime.
+ * @zh 使用原生或 WebGL2 Landscape 运行时的地形组件。
  */
 @ccclass('cc.Landscape')
 @help('i18n:cc.Landscape')
@@ -205,7 +209,7 @@ export class Landscape extends Component {
     get holeMode (): LandscapeHoleMode { return this._holeMode; }
     set holeMode (value: LandscapeHoleMode) {
         this._holeMode = value;
-        this._native?.setHoleMode(this._holeMode);
+        this._runtime?.setHoleMode(this._holeMode);
     }
 
     public static ShadowCastingMode = ShadowCastingMode;
@@ -225,8 +229,8 @@ export class Landscape extends Component {
     }
     set shadowCastingMode (value: number) {
         this._shadowCastingMode = value;
-        if (this._native) {
-            this._native.setCastShadow(value === ShadowCastingMode.ON);
+        if (this._runtime) {
+            this._runtime.setCastShadow(value === ShadowCastingMode.ON);
         }
     }
 
@@ -249,8 +253,8 @@ export class Landscape extends Component {
     }
     set receiveShadow (value: number) {
         this._shadowReceivingMode = value;
-        if (this._native) {
-            this._native.setReceiveShadow(value === ShadowReceivingMode.ON);
+        if (this._runtime) {
+            this._runtime.setReceiveShadow(value === ShadowReceivingMode.ON);
         }
     }
 
@@ -265,15 +269,16 @@ export class Landscape extends Component {
         this.receiveShadow = value ? ShadowReceivingMode.ON : ShadowReceivingMode.OFF;
     }
 
-    /** native cc::landscape::Landscape 句柄（仅 JSB 环境有效） */
-    private _native: any = null;
+    /** Native binding on JSB; parallel TypeScript runtime on WebGL2. */
+    private _runtime: LandscapeInstanceInterface | null = null;
+    private _enableGeneration = 0;
     private _physics: LandscapePhysics | null = null;
 
     /** Explicit world-space collision regions, independent of rendering LOD. */
     public get physics (): LandscapePhysics {
         if (!this._physics) {
             this._physics = new LandscapePhysics(this);
-            this._physics._setEnabled(this.enabledInHierarchy);
+            this._physics._setEnabled(this.enabledInHierarchy && !!this._runtime?.isInitialized());
         }
         return this._physics;
     }
@@ -297,7 +302,7 @@ export class Landscape extends Component {
         if (!Number.isInteger(value) || value < 1 || value > 4096) {
             throw new RangeError('Invalid query cache capacity');
         }
-        if (this._native?.isInitialized()) {
+        if (this._runtime?.isInitialized()) {
             throw new Error('Set queryCacheCapacity before enabling Landscape');
         }
         this._queryCacheCapacity = value;
@@ -307,7 +312,7 @@ export class Landscape extends Component {
      * Follows the node automatically. Inactive nodes stop pinning; destroyed
      * nodes are removed automatically. Multiple sources share overlapping tiles.
      * Over-budget regions report OutOfCapacity instead of evicting another source.
-     * Native platforms only; independent of camera LOD and VT readiness.
+     * Available on native and WebGL2; independent of camera LOD and VT readiness.
      */
     public addQuerySource (node: Node, preloadRadius = 64): number {
         if (!isValid(node, true)) {
@@ -332,7 +337,7 @@ export class Landscape extends Component {
 
     public removeQuerySource (id: number): void {
         this._querySources.delete(id);
-        this._native?.removeQuerySource(id);
+        this._runtime?.removeQuerySource(id);
     }
 
     /** Hit means the entire requested region is ready; Error means invalid
@@ -356,10 +361,10 @@ export class Landscape extends Component {
      * Like terrain selection, supports translation-only landscape placement.
      */
     public sampleSurface (worldPosition: Readonly<Vec3>, output: LandscapeSurfaceResult): LandscapeQueryStatus {
-        if (!this._native || !this.enabledInHierarchy) {
+        if (!this._runtime || !this.enabledInHierarchy) {
             return LandscapeQueryStatus.NotReady;
         }
-        const status = this._native.sampleSurface(worldPosition.x, worldPosition.z, this._queryOutput) as LandscapeQueryStatus;
+        const status = this._runtime.sampleSurface(worldPosition.x, worldPosition.z, this._queryOutput) as LandscapeQueryStatus;
         if (status === LandscapeQueryStatus.Hit) {
             const data = this._queryOutput;
             output.position.set(data[0], data[1], data[2]);
@@ -381,22 +386,22 @@ export class Landscape extends Component {
             this.removeQuerySource(id);
             return LandscapeQueryStatus.Miss;
         }
-        if (!this._native || !this.enabledInHierarchy || !source.node.activeInHierarchy) {
-            this._native?.removeQuerySource(id);
+        if (!this._runtime || !this.enabledInHierarchy || !source.node.activeInHierarchy) {
+            this._runtime?.removeQuerySource(id);
             source.status = LandscapeQueryStatus.NotReady;
         } else {
             const position = source.node.worldPosition;
-            source.status = this._native.setQuerySource(id, position.x, position.z, source.radius);
+            source.status = this._runtime.setQuerySource(id, position.x, position.z, source.radius);
         }
         return source.status;
     }
 
     /** Initial capacity-admitted view resources have finished loading and composition; stays true during later streaming. */
     public get isReady (): boolean {
-        return this._native ? this._native.isReady() : false;
+        return this._runtime ? this._runtime.isReady() : false;
     }
 
-    /** Add a runtime decal after native terrain initialization (native platforms only).
+    /** Add a runtime decal after terrain initialization.
      * Returns a nonzero ID local to this Landscape, or 0 if unavailable, out of bounds,
      * the layer is not loaded, or capacity is full. Malformed parameters throw RangeError.
      * Authored and runtime decals share a limit of 512 instances. New decals compose
@@ -410,20 +415,20 @@ export class Landscape extends Component {
             || !Number.isInteger(decal.layer) || decal.layer < 0 || decal.layer > 0xFFFFFFFF) {
             throw new RangeError('Invalid Landscape decal region or layer');
         }
-        if (!this.enabledInHierarchy || !this._native) {
+        if (!this.enabledInHierarchy || !this._runtime) {
             return 0;
         }
-        return this._native.addDecal(decal.x, decal.z, decal.size, decal.layer);
+        return this._runtime.addDecal(decal.x, decal.z, decal.size, decal.layer);
     }
 
     /** Remove an instance returned by addDecal. Returns false for stale/unknown IDs.
      * Authored asset instances are unaffected. VT pixels refresh over subsequent frames.
      */
     public removeDecal (id: number): boolean {
-        if (!Number.isInteger(id) || id <= 0 || id > 0xFFFFFFFF || !this._native) {
+        if (!Number.isInteger(id) || id <= 0 || id > 0xFFFFFFFF || !this._runtime) {
             return false;
         }
-        return this._native.removeDecal(id);
+        return this._runtime.removeDecal(id);
     }
 
     @serializable
@@ -444,7 +449,7 @@ export class Landscape extends Component {
     @type(LandscapeDebugData)
     private _debugData = new LandscapeDebugData();
 
-    // One bit per debug switch; -1 forces the initial native submission.
+    // One bit per debug switch; -1 forces the initial runtime submission.
     private _appliedDebugFlags = -1;
 
     /** Settings are synchronized during tick; nested Inspector edits work too. */
@@ -494,7 +499,7 @@ export class Landscape extends Component {
         return this._lodQualityScale;
     }
     set lodQualityScale (value: number) {
-        if (this._native?.isInitialized()) {
+        if (this._runtime?.isInitialized()) {
             return;
         }
         if (value < 1.0) {
@@ -516,8 +521,8 @@ export class Landscape extends Component {
             return;
         }
         this._globalColorMap = value;
-        if (this._native) {
-            this._native.setGlobalColorMap(value);
+        if (this._runtime) {
+            this._runtime.setGlobalColorMap(value);
         }
     }
 
@@ -536,13 +541,13 @@ export class Landscape extends Component {
             return;
         }
         this._globalColorStrength = strength;
-        if (this._native) {
-            this._native.setGlobalColorStrength(strength);
+        if (this._runtime) {
+            this._runtime.setGlobalColorStrength(strength);
         }
     }
 
     private _syncDebugData (): void {
-        if (!this._native) {
+        if (!this._runtime) {
             return;
         }
         const data = this._debugData;
@@ -560,40 +565,67 @@ export class Landscape extends Component {
         if (flags === this._appliedDebugFlags) {
             return;
         }
-        this._native.setDebugData(data);
+        this._runtime.setDebugData(data);
         this._appliedDebugFlags = flags;
     }
 
     public onLoad (): void {
-        if (JSB && typeof jsb !== 'undefined' && jsb.Landscape) {
-            this._native = new jsb.Landscape();
+        if (JSB && typeof jsb !== 'undefined' && jsb.LandscapeInstance) {
+            this._runtime = new jsb.LandscapeInstance();
+        } else if (!JSB) {
+            if (director.root!.device.gfxAPI !== API.WEBGL2) {
+                warn('[Landscape] Requires WebGL2; rendering, queries and physics were not started');
+                return;
+            }
+            this._runtime = new LandscapeInstance();
         }
     }
 
     public onEnable (): void {
-        this._physics?._setEnabled(true);
-        if (this._native) {
-            this._native.setAssetPath(this._landscapeAsset?.manifestPath || '');
-            this._native.setHoleMode(this._holeMode);
-            this._appliedDebugFlags = -1;
-            this._syncDebugData();
-            this._native.setGlobalColorMap(this._globalColorMap);
-            this._native.setGlobalColorStrength(this._globalColorStrength);
-            this._native.setCastShadow(this._shadowCastingMode === ShadowCastingMode.ON);
-            this._native.setReceiveShadow(this._shadowReceivingMode === ShadowReceivingMode.ON);
-            this._native.onEnable(this.node, this._lodQualityScale, this._queryCacheCapacity);
-            LandscapeSystem.getInstance().add(this);
-            // Debug geometry is submitted for every draw, including while paused.
-            director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
+        const generation = ++this._enableGeneration;
+        if (!this._runtime) {
+            return;
+        }
+        this._runtime.setAssetPath(this._landscapeAsset?.manifestPath || '');
+        this._runtime.setHoleMode(this._holeMode);
+        this._appliedDebugFlags = -1;
+        this._syncDebugData();
+        this._runtime.setGlobalColorMap(this._globalColorMap);
+        this._runtime.setGlobalColorStrength(this._globalColorStrength);
+        this._runtime.setCastShadow(this._shadowCastingMode === ShadowCastingMode.ON);
+        this._runtime.setReceiveShadow(this._shadowReceivingMode === ShadowReceivingMode.ON);
+        const result = this._runtime.onEnable(this.node, this._lodQualityScale, this._queryCacheCapacity);
+        if (typeof result === 'boolean') {
+            if (result) {
+                this._startUpdates();
+            }
+        } else {
+            void result.then((initialized) => {
+                if (initialized && generation === this._enableGeneration && this.enabledInHierarchy) {
+                    this._startUpdates();
+                    // Async initialization can finish after the Scene view stops ticking.
+                    if (EDITOR_NOT_IN_PREVIEW) {
+                        globalThis.cce.Engine.repaintInEditMode();
+                    }
+                }
+            });
         }
     }
 
+    private _startUpdates (): void {
+        this._physics?._setEnabled(true);
+        LandscapeSystem.getInstance().add(this);
+        // Debug geometry is submitted for every draw, including while paused.
+        director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
+    }
+
     public onDisable (): void {
+        ++this._enableGeneration;
         this._physics?._setEnabled(false);
-        LandscapeSystem.getInstance().remove(this);
+        LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
-        if (this._native) {
-            this._native.onDisable();
+        if (this._runtime) {
+            this._runtime.onDisable();
         }
     }
 
@@ -604,46 +636,47 @@ export class Landscape extends Component {
 
     /** Updates query streaming and the LOD view after physics and camera controllers. */
     public update (): void {
-        if (!this._native) {
+        if (!this._runtime) {
             return;
         }
         this._syncDebugData();
         for (const [id, source] of this._querySources) {
             this._syncQuerySource(id, source);
         }
-        if (!this._native.isInitialized()) {
+        if (!this._runtime.isInitialized()) {
             return;
         }
-        // Snapshot the main-camera LOD position. Native pass collection traverses
+        // Snapshot the main-camera LOD position. Pass collection traverses
         // each current frustum independently.
-        this._native.update();
+        this._runtime.update();
     }
 
     private _beforeDraw (): void {
         // Immediate-mode debug boxes must be re-submitted every frame.
         if (this._debugData.showBox) {
-            this._native?.drawDebugBounds();
+            this._runtime?.drawDebugBounds();
         }
     }
 
     public onDestroy (): void {
-        LandscapeSystem.getInstance().remove(this);
+        ++this._enableGeneration;
+        LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         this._physics?._destroy();
-        if (this._native) {
-            this._native.onDisable();
+        if (this._runtime) {
+            this._runtime.onDisable();
         }
-        this._native = null;
+        this._runtime = null;
         this._querySources.clear();
     }
 
     /**
-     * @en Returns the VT physical-atlas RenderTexture (debug), or null. Assign it
+     * @en Returns the VT physical-atlas texture (debug), or null. Assign it
      * to a 2D Sprite to inspect the composed pages.
-     * @zh 返回 VT 物理图集 RenderTexture（调试用），无则 null。可赋给 2D Sprite 查看合成结果。
+     * @zh 返回 VT 物理图集纹理（调试用），无则 null。可赋给 2D Sprite 查看合成结果。
      */
-    public getVTAtlas (): any {
-        return this._native ? this._native.getVTAtlas() : null;
+    public getVTAtlas (): Texture2D | RenderTexture | null {
+        return this._runtime ? this._runtime.getVTAtlas() : null;
     }
 }
 
@@ -667,8 +700,9 @@ class LandscapeSystem extends System {
         this._landscapes.add(landscape);
     }
 
-    public remove (landscape: Landscape): void {
-        this._landscapes.delete(landscape);
+    public static remove (landscape: Landscape): void {
+        // An unsupported device or failed initialization never starts this system.
+        LandscapeSystem._instance?._landscapes.delete(landscape);
     }
 
     public postUpdate (_dt: number): void {

@@ -78,7 +78,7 @@ public:
     ~VTRenderer();
     VTRenderer(const VTRenderer &) = delete;
     VTRenderer &operator=(const VTRenderer &) = delete;
-    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals);
+    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize);
     void destroy();
     uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
 
@@ -134,7 +134,7 @@ protected:
     void publish(uint32_t slot);
 
 private:
-    bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, bool compressed);
+    bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
     uint32_t sourceLevel(float size) const;
     int allocate(VTPageAddress address);
     LandscapeData _data;

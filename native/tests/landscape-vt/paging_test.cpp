@@ -61,7 +61,7 @@ LandscapeAsset::~LandscapeAsset() = default;
 VTPageComposer::VTPageComposer() {
     std::abort();
 }
-bool VTPageComposer::init(const LandscapeAsset &, LandscapeResidency &, const MaterialLibrary &, DecalRenderer &, bool) {
+bool VTPageComposer::init(const LandscapeAsset &, LandscapeResidency &, const MaterialLibrary &, DecalRenderer &, uint32_t, bool) {
     std::abort();
 }
 bool VTPageComposer::prepareInputs(uint32_t, LandscapeRegion, const VTPageSources &, const LandscapeResidency &, VTPageInstance &) {
@@ -100,7 +100,7 @@ VTPageCompressor::VTPageCompressor() {
 bool VTPageCompressor::supported() {
     std::abort();
 }
-bool VTPageCompressor::init(gfx::Device *, RenderTexture &) {
+bool VTPageCompressor::init(gfx::Device *, RenderTexture &, uint32_t) {
     std::abort();
 }
 Texture2D *VTPageCompressor::atlas() const {
@@ -127,10 +127,12 @@ VTPageCompressor::~VTPageCompressor() = default;
 } // namespace cc::landscape
 
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <random>
 #include <set>
+#include <sstream>
 
 using namespace cc::landscape;
 
@@ -319,7 +321,9 @@ void selectAndCheckChanges(Quadtree &tree) {
     });
 }
 
-void completeTarget(Quadtree &tree) {
+void checkCut(const Quadtree &selection, const LandscapeData &data, bool target);
+
+void completeTarget(Quadtree &tree, const LandscapeData &data) {
     for (uint32_t step = 0; step < 4096; ++step) {
         bool loaded = false;
         for (const auto &request : tree.requests()) {
@@ -330,7 +334,9 @@ void completeTarget(Quadtree &tree) {
         }
         selectAndCheckChanges(tree);
         if (!loaded) {
-            require(renderableKeys(tree) == targetKeys(tree), "Ready selection must converge to its balanced target");
+            // The distance target need not be balanced. Verify the finest legal
+            // ready cut independently, including coverage and every shared edge.
+            checkCut(tree, data, false);
             return;
         }
     }
@@ -959,7 +965,7 @@ void testReadySelection() {
     }
     require(tree.find({0, 7, 0})->ready && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
     require(targetKeys(tree) == target, "Resource readiness rewrote the distance target");
-    completeTarget(tree);
+    completeTarget(tree, data);
     checkCut(tree, data);
     checkStitchedEdges(tree, data);
     require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
@@ -973,7 +979,7 @@ void testReadySelection() {
     selectAndCheckChanges(tree);
     require(!tree.find(pending) && !tree.publish(pending, testMapping(pending)), "Retired request resurrected an obsolete node");
     applyView(tree, near);
-    completeTarget(tree);
+    completeTarget(tree, data);
     require(renderableKeys(tree) == target, "Returning camera did not converge to the same target");
     checkCut(tree, data, true);
     std::cout << "PASS: ready ancestors, partial siblings, balanced selection and moving targets\n";
@@ -1056,7 +1062,7 @@ void testCommittedVisibility() {
     applyView(selection, view);
     require(visible(0.25, 0.25, 0.75, 0.75) == coarse,
             "Unready target changed pass visibility");
-    completeTarget(selection);
+    completeTarget(selection, d);
     require(renderableAt(selection, 0, 0).level == 0 && visible(0.25, 0.25, 0.75, 0.75).empty(),
             "Culling must follow the committed geometry's height bounds");
     // Independent shadow/camera frusta must still find a distant coarse sector.
@@ -1137,7 +1143,7 @@ void testMaterialPublication() {
     require(tree.viewChanged(), "New view must invalidate scheduling");
     applyView(tree, near);
     require(!tree.viewChanged(), "Identical view must preserve settled scheduling");
-    completeTarget(tree);
+    completeTarget(tree, data);
     const auto before = renderableKeys(tree);
     const auto address = NodeAddress::fromKey(*before.begin());
     auto *node = tree.find(address);
@@ -1154,7 +1160,14 @@ void testMaterialPublication() {
             require(refresh.insert(request.key()).second, "Duplicate material refresh request");
         }
     }
-    require(refresh == before, "Every displayed node must support material refresh");
+    auto expectedRefresh = before;
+    tree.forEachNode([&](const Quadtree::Node &entry) {
+        if (!entry.children) {
+            expectedRefresh.insert(entry.geometry.address().key());
+        }
+        return true;
+    });
+    require(refresh == expectedRefresh, "Material refresh must include displayed nodes and ready target leaves");
     applyView(tree, testView({{0, 7, 7, 0, 1}}));
     require(tree.viewChanged(), "Changed pass must invalidate scheduling");
     selectAndCheckChanges(tree);
@@ -1292,7 +1305,7 @@ void testCameraRotation() {
             }
             selectAndCheckChanges(tree);
         } else if (phase == 2) {
-            completeTarget(tree);
+            completeTarget(tree, data);
         }
         const auto target = targetKeys(tree);
         const auto draws = renderableKeys(tree);
@@ -1622,7 +1635,224 @@ void testVTDistanceThresholds() {
     }
 }
 
-int main() {
+// Both implementations consume the same commands and compare canonical traces.
+// Keep addresses textual: native packed keys and JS string keys have different representations.
+std::string parityAddress(NodeAddress address) {
+    return std::to_string(address.level) + ":" + std::to_string(address.x) + ":" + std::to_string(address.z);
+}
+
+std::string parityList(std::vector<std::string> entries) {
+    std::sort(entries.begin(), entries.end());
+    std::string result;
+    for (const auto &entry : entries) {
+        result += entry + ",";
+    }
+    return result;
+}
+
+// Read the same literal cases/baseline used by Jest; no second copy can drift.
+std::string readParityBlock(const char *name) {
+    std::ifstream source(std::string(LANDSCAPE_PARITY_TESTS) + "/paging.test.ts");
+    require(source.good(), "Missing TypeScript parity test");
+    const std::string begin = std::string("const ") + name + " = String.raw`";
+    std::string line;
+    std::string result;
+    bool reading = false;
+    while (std::getline(source, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (!reading) {
+            reading = line == begin;
+        } else if (line == "`;") {
+            return result;
+        } else {
+            result += line + '\n';
+        }
+    }
+    require(false, "Missing or unterminated TypeScript parity block");
+    return {};
+}
+
+std::string pagingParityTrace() {
+    std::istringstream input(readParityBlock("PARITY_CASES"));
+    std::ostringstream trace;
+    LandscapeData data;
+    TreeFixture tree;
+    VTResidencyFixture pages;
+    uint32_t capacity = 0;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::istringstream row(line);
+        std::string command;
+        row >> command;
+        trace << line << '\n';
+        if (command == "tree" || command == "pages") {
+            uint32_t level;
+            uint32_t sectorsX;
+            uint32_t sectorsZ;
+            row >> level >> sectorsX >> sectorsZ;
+            data = cacheData(level, sectorsX, sectorsZ);
+            if (command == "tree") {
+                tree.init(data);
+            } else {
+                row >> capacity;
+                require(pages.initPages(data, capacity), "Parity page initialization");
+            }
+        } else if (command == "view") {
+            cc::Vec3 camera;
+            uint32_t frames;
+            uint32_t budget;
+            row >> camera.x >> camera.y >> camera.z >> frames >> budget;
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                const auto previous = tree.requests();
+                tree.clearChangedNodes();
+                tree.beginUpdate(camera, cc::Vec3::ZERO);
+                tree.updateTarget();
+                uint32_t cancelled = 0;
+                for (const auto address : previous) {
+                    if (!tree.find(address)) {
+                        require(!tree.publish(address, testMapping(address)), "Retired completion resurrected a node");
+                        ++cancelled;
+                    }
+                }
+                uint32_t completed = 0;
+                for (const auto address : tree.requests()) {
+                    if (completed < budget && !tree.find(address)->ready) {
+                        require(tree.publish(address, testMapping(address)), "Parity publication failed");
+                        ++completed;
+                    }
+                }
+                require(tree.selectRenderables(), "Parity selection lost sector coverage");
+                checkCut(tree, data, false);
+                checkStitchedEdges(tree, data);
+                std::vector<std::string> target;
+                std::vector<std::string> draw;
+                std::vector<std::string> changed;
+                tree.forEachNode([&](const Quadtree::Node &node) {
+                    if (!node.children) {
+                        target.push_back(parityAddress(node.geometry.address()));
+                    }
+                    return true;
+                });
+                tree.forEachRenderable([&](const Quadtree::Node &node) {
+                    draw.push_back(parityAddress(node.geometry.address()) + ":" + std::to_string(node.edgeMask));
+                });
+                for (const auto key : tree.changedNodes()) {
+                    changed.push_back(parityAddress(NodeAddress::fromKey(key)));
+                }
+                trace << "frame " << cancelled << ' ' << completed << ' ' << tree.renderSelectionChanged();
+                trace << " target=" << parityList(target) << " draw=" << parityList(draw) << " changed=" << parityList(changed) << " requests=";
+                for (const auto address : tree.requests()) {
+                    trace << parityAddress(address) << ':' << tree.find(address)->ready << ',';
+                }
+                trace << '\n';
+            }
+        } else if (command == "replace") {
+            std::optional<NodeAddress> first;
+            tree.forEachRenderable([&](const Quadtree::Node &node) {
+                if (!first) {
+                    first = node.geometry.address();
+                }
+            });
+            require(first.has_value(), "Material replacement needs a committed draw");
+            const auto before = renderableKeys(tree);
+            tree.clearChangedNodes();
+            const auto mapping = testMapping(first->ancestor(data.maxLevel));
+            require(tree.publish(*first, mapping) && tree.selectRenderables(), "Material replacement failed");
+            require(renderableKeys(tree) == before && !tree.renderSelectionChanged(), "Material replacement changed geometry");
+            require(tree.changedNodes().size() == 1 && tree.changedNodes().count(first->key()), "Replacement did not update its draw binding");
+            trace << "material " << parityAddress(*first) << ' ' << parityAddress(first->ancestor(data.maxLevel)) << '\n';
+        } else if (command == "reserve" || command == "compose" || command == "invalidate") {
+            if (command == "reserve") {
+                uint32_t count;
+                row >> count;
+                ccstd::vector<VTPageAddress> addresses(count);
+                for (auto &address : addresses) {
+                    row >> address.level >> address.x >> address.z;
+                }
+                trace << "accepted " << pages.reserve(addresses) << '\n';
+            } else if (command == "compose") {
+                uint32_t budget;
+                row >> budget;
+                ccstd::vector<uint32_t> updates;
+                collectUpdates(pages, updates, budget);
+                publishPages(pages, updates);
+            } else {
+                LandscapeRegion region;
+                if (row >> region.x >> region.z >> region.size) {
+                    pages.invalidate(region);
+                } else {
+                    pages.invalidate();
+                }
+            }
+            trace << "ready " << pages.ready() << " reserved=";
+            for (const auto slot : pages.reservedSlots()) {
+                trace << slot << ',';
+            }
+            trace << " slots=";
+            for (uint32_t slot = 0; slot < capacity; ++slot) {
+                const auto &page = pages.page(slot);
+                trace << parityAddress({page.address.level, page.address.x, page.address.z}) << ':' << static_cast<int>(page.state) << ':' << pages.resolve(page.address) << ',';
+            }
+            trace << '\n';
+        } else if (command == "cover") {
+            float sectorSize;
+            uint32_t desired;
+            LandscapePoint minimum;
+            LandscapePoint maximum;
+            row >> sectorSize >> desired >> minimum.x >> minimum.z >> maximum.x >> maximum.z;
+            const auto page = VTPageLayout(sectorSize).coveringPage(desired, minimum, maximum);
+            trace << "page " << parityAddress({page.level, page.x, page.z}) << '\n';
+        } else if (command == "morph") {
+            float sectorSize;
+            uint32_t maxLod;
+            row >> sectorSize >> maxLod;
+            const VTPageLayout layout(sectorSize);
+            uint32_t checked = 0;
+            // The shader moves odd grid vertices toward their even parent. Test
+            // both extremes and the midpoint against the actual selected VT page.
+            for (uint32_t lod = 0; lod <= maxLod; ++lod) {
+                const float cell = sectorSize / 4096.0F * static_cast<float>(1U << lod);
+                for (uint32_t z = 0; z < 16; ++z) {
+                    for (uint32_t x = 0; x < 16; ++x) {
+                        for (uint32_t desired = 0; desired <= layout.rootLevel(); ++desired) {
+                            const auto page = layout.coveringPage(desired, {(x - (x & 1U)) * cell, (z - (z & 1U)) * cell}, {(x + 1) * cell, (z + 1) * cell});
+                            const float size = layout.pageSize(page.level);
+                            for (uint32_t vz = z; vz <= z + 1; ++vz) {
+                                for (uint32_t vx = x; vx <= x + 1; ++vx) {
+                                    for (const float amount : {0.0F, 0.5F, 1.0F}) {
+                                        const float px = (vx - (vx & 1U) * amount) * cell;
+                                        const float pz = (vz - (vz & 1U) * amount) * cell;
+                                        require(px >= page.x * size && px <= (page.x + 1) * size && pz >= page.z * size && pz <= (page.z + 1) * size, "Morph vertex escaped its selected page");
+                                        ++checked;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            trace << "vertices " << checked << '\n';
+        } else {
+            require(false, "Unknown shared parity command");
+        }
+    }
+    return trace.str();
+}
+
+int main(int argc, char **argv) {
+    const auto trace = pagingParityTrace();
+    // Explicit baseline export is useful when reviewing intentional behavior changes.
+    if (argc == 2 && std::string(argv[1]) == "--dump-parity") {
+        std::cout << trace;
+        return 0;
+    }
+    const auto baseline = readParityBlock("PARITY_EXPECTED");
+    require(trace == baseline, "Native paging trace differs from the shared TS/C++ baseline; inspect --dump-parity");
     testVTDistanceThresholds();
     testPageTableUpdatesAndReuse();
     testCompositionSources();

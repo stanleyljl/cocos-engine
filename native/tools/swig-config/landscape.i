@@ -8,7 +8,7 @@
 #pragma once
 #include "bindings/jswrapper/SeApi.h"
 #include "bindings/manual/jsb_conversions.h"
-#include "landscape/Landscape.h"
+#include "landscape/LandscapeInstance.h"
 #include "landscape/Asset.h"
 #include "landscape/PhysicsResources.h"
 %}
@@ -28,6 +28,8 @@ using namespace cc;
 %ignore cc::landscape::LandscapePoint;
 %ignore cc::landscape::LandscapeRegion;
 %ignore cc::landscape::HeightRange;
+%ignore cc::landscape::LandscapeQueryTile;
+%ignore cc::landscape::LandscapeQueryCompletion;
 %ignore cc::landscape::NodeAddress;
 %ignore cc::landscape::makeNodeKey;
 %ignore cc::landscape::QuadNode;
@@ -37,9 +39,9 @@ using namespace cc;
 %ignore cc::landscape::VTPageLayout;
 %ignore cc::landscape::LandscapeData;
 %ignore cc::landscape::NodeIndexLayout;
-%ignore cc::landscape::Landscape::preparePasses;
-%ignore cc::landscape::Landscape::getPassModels;
-%ignore cc::landscape::Landscape::onGlobalPipelineStateChanged;
+%ignore cc::landscape::LandscapeInstance::preparePasses;
+%ignore cc::landscape::LandscapeInstance::getPassModels;
+%ignore cc::landscape::LandscapeInstance::onGlobalPipelineStateChanged;
 %ignore cc::landscape::LandscapeAsset::TileData;
 %ignore cc::landscape::LandscapeAsset::DecalLayer;
 %ignore cc::landscape::LandscapeAsset::Decal;
@@ -64,6 +66,6 @@ using namespace cc;
 
 // Generate bindings for classes in these headers.
 %include "landscape/Data.h"
-%include "landscape/Landscape.h"
+%include "landscape/LandscapeInstance.h"
 %include "landscape/Asset.h"
 %include "landscape/PhysicsResources.h"

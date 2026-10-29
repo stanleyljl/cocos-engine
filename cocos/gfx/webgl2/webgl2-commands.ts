@@ -323,43 +323,43 @@ export function GFXFormatToWebGLFormat (format: Format, gl: WebGL2RenderingConte
     case Format.R8:
     case Format.R8SN: return WebGLConstants.RED;
     case Format.R8UI:
-    case Format.R8I: return WebGLConstants.RED;
+    case Format.R8I: return WebGLConstants.RED_INTEGER;
     case Format.RG8:
-    case Format.RG8SN:
+    case Format.RG8SN: return WebGLConstants.RG;
     case Format.RG8UI:
-    case Format.RG8I: return WebGLConstants.RG;
+    case Format.RG8I: return WebGLConstants.RG_INTEGER;
     case Format.RGB8:
-    case Format.RGB8SN:
+    case Format.RGB8SN: return WebGLConstants.RGB;
     case Format.RGB8UI:
-    case Format.RGB8I: return WebGLConstants.RGB;
+    case Format.RGB8I: return WebGLConstants.RGB_INTEGER;
     case Format.BGRA8:
     case Format.RGBA8:
-    case Format.RGBA8SN:
+    case Format.RGBA8SN: return WebGLConstants.RGBA;
     case Format.RGBA8UI:
-    case Format.RGBA8I: return WebGLConstants.RGBA;
+    case Format.RGBA8I: return WebGLConstants.RGBA_INTEGER;
     case Format.R16UI:
-    case Format.R16I:
+    case Format.R16I: return WebGLConstants.RED_INTEGER;
     case Format.R16F: return WebGLConstants.RED;
     case Format.RG16UI:
-    case Format.RG16I:
+    case Format.RG16I: return WebGLConstants.RG_INTEGER;
     case Format.RG16F: return WebGLConstants.RG;
     case Format.RGB16UI:
-    case Format.RGB16I:
+    case Format.RGB16I: return WebGLConstants.RGB_INTEGER;
     case Format.RGB16F: return WebGLConstants.RGB;
     case Format.RGBA16UI:
-    case Format.RGBA16I:
+    case Format.RGBA16I: return WebGLConstants.RGBA_INTEGER;
     case Format.RGBA16F: return WebGLConstants.RGBA;
     case Format.R32UI:
-    case Format.R32I:
+    case Format.R32I: return WebGLConstants.RED_INTEGER;
     case Format.R32F: return WebGLConstants.RED;
     case Format.RG32UI:
-    case Format.RG32I:
+    case Format.RG32I: return WebGLConstants.RG_INTEGER;
     case Format.RG32F: return WebGLConstants.RG;
     case Format.RGB32UI:
-    case Format.RGB32I:
+    case Format.RGB32I: return WebGLConstants.RGB_INTEGER;
     case Format.RGB32F: return WebGLConstants.RGB;
     case Format.RGBA32UI:
-    case Format.RGBA32I:
+    case Format.RGBA32I: return WebGLConstants.RGBA_INTEGER;
     case Format.RGBA32F: return WebGLConstants.RGBA;
     case Format.RGB10A2: return WebGLConstants.RGBA;
     case Format.R11G11B10F: return WebGLConstants.RGB;
