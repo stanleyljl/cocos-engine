@@ -29,6 +29,7 @@
 #include <cstdio>
 
 #include "base/Log.h"
+#include "base/StringUtil.h"
 #include "base/std/container/unordered_set.h"
 #include "core/Root.h"
 #include "core/assets/Texture2D.h"
@@ -125,12 +126,12 @@ void LandscapeInstance::applyRendererSettings(LandscapeRenderer &renderer) const
 void LandscapeInstance::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const {
 #if CC_LANDSCAPE_DEBUG
     const auto &data = asset.data();
-    CC_LOG_INFO("[Landscape] LOD ranges:");
+    ccstd::string message = "[Landscape] LOD ranges:";
     for (uint32_t level = 0; level <= data.maxLevel; ++level) {
         const auto &range = quadtree.lodMorphRanges()[level];
-        CC_LOG_INFO("[Landscape]   LOD%u: morphStart=%.3f morphEnd=%.3f",
-                    level, range.start, range.end);
+        message += StringUtil::format(" [LOD%u: %.1f,%.1f]", level, range.start, range.end);
     }
+    CC_LOG_INFO("%s", message.c_str());
 #else
     CC_UNUSED_PARAM(asset);
     CC_UNUSED_PARAM(quadtree);

@@ -127,7 +127,9 @@ export class MaterialLibrary {
                 }
                 this.uploadMipChain(device, this._albedoHeight, size, layer.id, color, 'albedo');
                 this.uploadMipChain(device, this._normalRoughnessAO, size, layer.id, normal, 'normal');
-                this._materialParams[layer.id].set(layer.pixelsPerMeter / size, layer.globalColorInfluence, 0, 0);
+                // Repeats per logical unit are independent of source and VT page resolution.
+                const uvScale = 1 / layer.tileSize;
+                this._materialParams[layer.id].set(uvScale, layer.globalColorInfluence, 0, 0);
             }
             const decals = asset.decalLayers();
             const decalSize = decals.length ? asset.decalResolution() : 1;

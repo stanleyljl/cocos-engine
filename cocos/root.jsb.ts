@@ -212,6 +212,10 @@ rootProto._onDirectorAfterRender = function () {
     cclegacy.director.emit(cclegacy.Director.EVENT_AFTER_RENDER);
 };
 
+rootProto._onDirectorBeforePresent = function () {
+    cclegacy.director.emit(cclegacy.Director.EVENT_BEFORE_PRESENT);
+};
+
 rootProto._onDirectorPipelineChanged = function () {
     const scene = cclegacy.director.getScene();
     if (scene) {

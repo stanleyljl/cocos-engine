@@ -12,7 +12,8 @@ export interface MaterialLayer {
     name: string;
     albedoHeight: string;
     normalRoughnessAO: string;
-    pixelsPerMeter: number;
+    /** Landscape-local length covered by one texture repeat, independent of resolution. */
+    tileSize: number;
     globalColorInfluence: number;
 }
 
@@ -211,12 +212,12 @@ class Manifest {
             && Array.isArray(library.layers) && library.layers.length > 0 && library.layers.length <= config.MATERIAL_LIBRARY_MAX, 'Invalid material library');
         this.materialLayers = library.layers.map((layer: any, id: number) => {
             requireValue(layer && typeof layer.name === 'string' && typeof layer.albedoHeight === 'string'
-                && typeof layer.normalRoughnessAO === 'string' && number(layer.pixelsPerMeter) && layer.pixelsPerMeter > 0
+                && typeof layer.normalRoughnessAO === 'string' && number(layer.tileSize) && layer.tileSize > 0
                 && number(layer.globalColorInfluence) && layer.globalColorInfluence >= 0 && layer.globalColorInfluence <= 1, 'Invalid material layer');
             return {
                 id,
                 name: layer.name,
-                pixelsPerMeter: layer.pixelsPerMeter,
+                tileSize: layer.tileSize,
                 globalColorInfluence: layer.globalColorInfluence,
                 albedoHeight: this.resolve(`${library.dir}/${layer.albedoHeight}`),
                 normalRoughnessAO: this.resolve(`${library.dir}/${layer.normalRoughnessAO}`),

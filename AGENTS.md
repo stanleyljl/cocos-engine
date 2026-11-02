@@ -27,7 +27,7 @@
 
 # C++ engineering and architecture
 
-- Keep the Landscape TypeScript and C++ implementations as consistent as practical to reduce maintenance costs. When fixing or refactoring either implementation, review the corresponding code on the other side and synchronize applicable changes. Align class/file organization, naming, algorithms, control flow and behavior; keep necessary platform/API differences local and document their reasons.
+- Whenever changing code with corresponding TypeScript and C++ implementations, review and update both sides in the same change. Keep their interfaces and implementations as consistent as practical, including class/file organization, naming, algorithms, control flow and behavior. Allow differences only where required by language features; keep those differences local and document their reasons. Do not leave either side out of sync.
 
 - This is an open-source engine used by thousands of independent game projects. Do not hardcode project-specific Landscape dimensions, height ranges, resource layouts or tuning assumptions in engine code or shaders. Derive values from their owning assets/runtime configuration, and expose configuration when projects need to choose the behavior. Algorithm constants may remain internal when an additional public setting is not needed; keep them named and owned by the responsible module.
 

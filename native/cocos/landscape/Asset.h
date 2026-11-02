@@ -51,10 +51,9 @@ public:
         ccstd::string name;
         ccstd::string albedoHeight;
         ccstd::string normalRoughnessAO;
-        float pixelsPerMeter{128.0F}; // source texture pixels per logical unit
+        float tileSize{8.0F}; // landscape-local length per texture repeat, independent of resolution
         float globalColorInfluence{1.0F}; // biome modulation strength for this material
     };
-
     struct DecalLayer {
         ccstd::string albedoAlpha; // RGB: sRGB albedo; A: linear coverage
         ccstd::string normalRoughnessAO;

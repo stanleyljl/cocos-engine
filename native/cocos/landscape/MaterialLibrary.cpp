@@ -257,8 +257,8 @@ bool MaterialLibrary::initMaterialLayers(gfx::Device *device, const LandscapeAss
             !decodeRGBA8(layer.normalRoughnessAO, resolution, normalRoughnessAOPixels)) {
             return false;
         }
-        // Repeats per logical unit depend on the source texture, not the VT page resolution.
-        const float uvScale = layer.pixelsPerMeter / static_cast<float>(resolution);
+        // Repeats per logical unit are independent of source and VT page resolution.
+        const float uvScale = 1.0F / layer.tileSize;
         uploadMipChain(device, _albedoHeight, resolution, layer.id, std::move(albedoHeightPixels), buildAlbedoHeightMip);
         _materialParams[layer.id] = Vec4{uvScale, layer.globalColorInfluence, 0.0F, 0.0F};
         uploadMipChain(device, _normalRoughnessAO, resolution, layer.id, std::move(normalRoughnessAOPixels), buildNormalRoughnessAOMip);

@@ -143,11 +143,12 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
 
     private logLodRanges (asset: LandscapeAsset, quadtree: Quadtree): void {
         if (config.LANDSCAPE_DEBUG) {
-            log('[Landscape] LOD ranges:');
+            let message = '[Landscape] LOD ranges:';
             for (let level = 0; level <= asset.data().maxLevel; ++level) {
                 const range = quadtree.lodMorphRanges()[level];
-                log(`[Landscape]   LOD${level}: morphStart=${range.start.toFixed(3)} morphEnd=${range.end.toFixed(3)}`);
+                message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
             }
+            log(message);
         }
     }
 

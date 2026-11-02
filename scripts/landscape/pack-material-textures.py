@@ -23,7 +23,7 @@ from PIL import Image
 import png
 
 
-DEFAULT_PIXELS_PER_METER = 128
+DEFAULT_TILE_SIZE = 8
 
 
 def decode(data, suffix, scratch):
@@ -117,8 +117,8 @@ def main():
     previous_by_id = dict(enumerate(previous_layers))
     previous_ids = {layer["name"]: index for index, layer in previous_by_id.items()}
     for layer in previous_layers:
-        if not isinstance(layer["pixelsPerMeter"], (int, float)) or layer["pixelsPerMeter"] <= 0:
-            raise ValueError("Material pixelsPerMeter must be positive")
+        if not isinstance(layer["tileSize"], (int, float)) or layer["tileSize"] <= 0:
+            raise ValueError("Material tileSize must be positive")
     if args.append_archive and args.resolution != original["materialLibrary"]["resolution"]:
         raise ValueError("Appending must retain the material array resolution")
     if not args.append_archive and len(archives) < len(previous_by_id):
@@ -215,7 +215,7 @@ def main():
             old = previous.get(name, {})
             packed_layers[index] = {"name": name, "albedoHeight": ah_name,
                                       "normalRoughnessAO": nra_name,
-                                      "pixelsPerMeter": old.get("pixelsPerMeter", DEFAULT_PIXELS_PER_METER),
+                                      "tileSize": old.get("tileSize", DEFAULT_TILE_SIZE),
                                       "globalColorInfluence": old.get("globalColorInfluence", 1.0)}
             report.append({"id": index, "name": name, "sourceArchive": archive.name,
                            "sources": source_names, "statistics": stats, "sha256": hashes})

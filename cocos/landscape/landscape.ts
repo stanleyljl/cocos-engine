@@ -28,6 +28,7 @@ import { Component } from '../scene-graph/component';
 import { Asset, RenderTexture, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
+import { LandscapeStartup } from './Startup';
 import { Enum, isValid, System, SystemPriority, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
 import { LandscapePhysics } from './landscape-physics';
@@ -272,6 +273,7 @@ export class Landscape extends Component {
     /** Native binding on JSB; parallel TypeScript runtime on WebGL2. */
     private _runtime: LandscapeInstanceInterface | null = null;
     private _enableGeneration = 0;
+    private _cancelInitialPresentation: (() => void) | null = null;
     private _physics: LandscapePhysics | null = null;
 
     /** Explicit world-space collision regions, independent of rendering LOD. */
@@ -396,7 +398,7 @@ export class Landscape extends Component {
         return source.status;
     }
 
-    /** Initial capacity-admitted view resources have finished loading and composition; stays true during later streaming. */
+    /** Initial view resources admitted by normal LOD/capacity limits have finished loading and composition; stays true during later streaming. */
     public get isReady (): boolean {
         return this._runtime ? this._runtime.isReady() : false;
     }
@@ -583,6 +585,10 @@ export class Landscape extends Component {
 
     public onEnable (): void {
         const generation = ++this._enableGeneration;
+        if (!EDITOR_NOT_IN_PREVIEW && this._landscapeAsset) {
+            // Register before async initialization can yield, including failure paths.
+            this._cancelInitialPresentation = LandscapeStartup.forScene(this.node.scene!).deferUntilReady(() => this._isReadyToPresent());
+        }
         if (!this._runtime) {
             return;
         }
@@ -619,8 +625,19 @@ export class Landscape extends Component {
         director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
     }
 
+    private _isReadyToPresent (): boolean {
+        const layer = this.node.layer;
+        const cameras = this.node.scene!.renderScene!.cameras;
+        // An intentionally hidden Landscape is not part of the initial visible frame.
+        // With no enabled camera yet, keep waiting for the initial view to be known.
+        const visible = cameras.some((camera) => camera.enabled && (camera.visibility & layer) === layer);
+        return this.isReady || (!visible && cameras.some((camera) => camera.enabled));
+    }
+
     public onDisable (): void {
         ++this._enableGeneration;
+        this._cancelInitialPresentation?.();
+        this._cancelInitialPresentation = null;
         this._physics?._setEnabled(false);
         LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
@@ -660,6 +677,8 @@ export class Landscape extends Component {
 
     public onDestroy (): void {
         ++this._enableGeneration;
+        this._cancelInitialPresentation?.();
+        this._cancelInitialPresentation = null;
         LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         this._physics?._destroy();

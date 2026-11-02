@@ -15,7 +15,7 @@ function manifest () {
         materialLibrary: {
             resolution: 4,
             dir: 'materials',
-            layers: [{ name: 'soil', albedoHeight: 'color.png', normalRoughnessAO: 'normal.png', pixelsPerMeter: 16, globalColorInfluence: 0.5 }],
+            layers: [{ name: 'soil', albedoHeight: 'color.png', normalRoughnessAO: 'normal.png', tileSize: 0.25, globalColorInfluence: 0.5 }],
         },
         decalLibrary: {
             resolution: 4,
@@ -36,7 +36,7 @@ test('all manifest sections commit together with imported paths, query suffixes 
     expect(asset.data().width()).toBe(4);
     expect(asset.heightRanges()).toEqual([{ minY: -5, maxY: 15 }]);
     expect(asset.materialResolution()).toBe(4);
-    expect(asset.materialLayers()[0]).toMatchObject({ id: 0, pixelsPerMeter: 16, globalColorInfluence: 0.5, albedoHeight: 'https://example.test/data/terrain.lsraw0?v=3' });
+    expect(asset.materialLayers()[0]).toMatchObject({ id: 0, tileSize: 0.25, globalColorInfluence: 0.5, albedoHeight: 'https://example.test/data/terrain.lsraw0?v=3' });
     expect(asset.decalLayers()[0]).toMatchObject({ detailMaterial0: 0, detailMaterial1: 0, modulateColor: false, height: 'https://example.test/data/terrain.lsraw4?v=3' });
     expect(asset.decals()).toEqual([{ x: 1, z: 2, size: 1, layer: 0 }]);
     expect([asset.decalResolution(), asset.decalNearDistance(), asset.decalFarDistance()]).toEqual([4, 2, 8]);
