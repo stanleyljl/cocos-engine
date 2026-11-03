@@ -62,7 +62,7 @@ module.exports = {
                         tooltip: '显示近景立体贴花网格；关闭后保留平面 RVT 贴花。',
                     },
                     triplanarEnabled: {
-                        tooltip: '悬崖 Sector 使用独立三平面 shader，其余使用 XZ 投影。投影采用固定根源图，Sector 边缘退回 XZ，避免投影随 LOD 改变。切换后重新生成 VT。',
+                        tooltip: '根据预计算坡度筛选悬崖 VT 页面，缓坡使用 XZ 投影，侧面投影在 55° 至 60° 间渐入。页面边框采样相邻高度图。关闭后使用 XZ 投影，切换后重新生成 VT。',
                     },
                     physicsWireframe: {
                         tooltip: '显示已加载的地形碰撞网格，由项目物理调试视图读取此开关并绘制线框。',

@@ -11,7 +11,6 @@ export const LANDSCAPE_DEBUG = globalThis.CC_LANDSCAPE_DEBUG ?? true;
 export const VERTS_PER_NODE_SIDE = 17;
 export const LOD_DISTANCE_RATIO = 2;
 export const MORPH_START_RATIO = 0.70;
-export const CLIFF_ANGLE = 60;
 export const SOURCE_TILE_RESOLUTION = 129;
 export const SOURCE_NORMAL_BORDER = 8;
 export const SOURCE_NORMAL_RESOLUTION = SOURCE_TILE_RESOLUTION + 2 * SOURCE_NORMAL_BORDER;
@@ -25,6 +24,11 @@ export const DECAL_LIBRARY_MAX = 32;
 export const DECAL_INSTANCE_MAX = 512;
 export const VT_PAGE_INTERIOR = 256;
 export const VT_NORMAL_SOURCE_COUNT = 4;
+export const VT_PROJECTION_SOURCE_COUNT = 9;
+export const VT_SOURCE_COUNT = VT_NORMAL_SOURCE_COUNT + VT_PROJECTION_SOURCE_COUNT;
+// Fade side projections in only on cliffs; CPU culling uses the same start angle.
+export const TRIPLANAR_START_NORMAL_Y = Math.cos(55 * Math.PI / 180);
+export const TRIPLANAR_FULL_NORMAL_Y = Math.cos(60 * Math.PI / 180);
 export const VT_NORMAL_DETAIL_MIN_LEVEL = 6;
 export const VT_PAGE_BORDER = 8;
 export const VT_MIP_LEVELS = 3;
@@ -39,8 +43,7 @@ export const VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 
 // Match native static assertions once when loading the module. These constrain
 // layouts shared with Effects, independent of the selected device capacity.
-if (CLIFF_ANGLE < 0 || CLIFF_ANGLE > 90
-    || (MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 6) * 16 > 16384
+if ((MATERIAL_LIBRARY_MAX + DECAL_INSTANCE_MAX + DECAL_LIBRARY_MAX + 6) * 16 > 16384
     || DECAL_INSTANCE_MAX % 2 !== 0
     || SOURCE_NORMAL_BORDER * VT_PAGE_INTERIOR < 2 * (SOURCE_TILE_RESOLUTION - 1) * VT_PAGE_BORDER
     || MAX_SECTOR_COUNT > VT_PAGE_COUNT || MAX_SECTOR_COUNT * 5 > PAGE_POOL_LAYERS

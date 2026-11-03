@@ -316,10 +316,10 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
         retained.insert(source.key());
     }
     // Reserve room for each page's worst-case composition footprint, including
-    // far detail. Composition inputs can then be streamed in bounded batches.
+    // far detail and triplanar projection. Composition inputs can then be streamed in bounded batches.
     for (const auto page : resources.pages) {
         ccstd::vector<NodeAddress> inputs;
-        _vtRenderer.selectSources(page, true).appendTo(inputs);
+        _vtRenderer.selectSources(page, true, true).appendTo(inputs);
         if (!sourcesFit(retained, inputs, _residency.layerCount())) {
             return false;
         }
@@ -338,7 +338,7 @@ ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
             continue;
         }
         ccstd::vector<NodeAddress> inputs;
-        _vtRenderer.selectSources(page, _vtRenderer.getRefineFarDetail()).appendTo(inputs);
+        _vtRenderer.selectSources(page, _vtRenderer.getRefineFarDetail(), _vtRenderer.getTriplanarEnabled()).appendTo(inputs);
         if (!sourcesFit(sourceKeys, inputs, _residency.layerCount())) {
             continue;
         }

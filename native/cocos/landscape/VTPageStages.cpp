@@ -63,8 +63,6 @@ constexpr uint32_t ASTC_BLOCK_SIDE = 4;
 constexpr uint32_t ASTC_BLOCK_BYTES = 16;
 // Internal projection policy; asset dimensions and VT filter support are supplied separately.
 constexpr float TRIPLANAR_BLEND_SHARPNESS = 4.0F;
-constexpr float TRIPLANAR_FADE_RATIO = 1.0F / 16.0F;
-const float CLIFF_NORMAL_Y = std::cos(CC_DEGREES_TO_RADIANS(config::CLIFF_ANGLE));
 constexpr uint32_t COMPRESSION_GROUP_SIDE = 8;
 
 void recordPagePass(gfx::CommandBuffer &commands, gfx::InputAssembler *inputAssembler, gfx::RenderPass *renderPass, scene::Pass *pass, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount) {
@@ -103,7 +101,6 @@ VTPageComposer::~VTPageComposer() {
 bool VTPageComposer::init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed) {
     CC_ASSERT(_composeMaterial == nullptr);
     _decals = &decals;
-    _rootLevel = asset.data().maxLevel;
     auto *device = Root::getInstance()->getDevice();
     const uint32_t side = atlasSize / config::VT_PAGE_RES;
     if (!initTarget(device, atlasSize, compressed) || !initMaterial(asset, residency, materials, device, compressed, size()) ||
@@ -122,27 +119,26 @@ bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const 
     if (splat.layer < 0) {
         return false;
     }
-    const auto projection = residency.resolve(sources.splat.ancestor(_rootLevel));
-    if (projection.layer < 0) {
-        return false;
-    }
-    NormalSourceRow normals;
+    SourceRow inputs{};
     for (size_t i = 0; i < sources.normals.size(); ++i) {
         const auto tile = residency.resolve(sources.normals[i]);
         if (tile.layer < 0) {
             return false;
         }
-        normals[i] = residency.shaderParams(tile);
+        inputs[i] = residency.shaderParams(tile);
     }
-    // All inputs are resident. Write their GPU representation only now.
+    for (size_t i = 0; i < sources.projections.size(); ++i) {
+        const auto tile = residency.resolve(sources.projections[i]);
+        if (tile.layer < 0) {
+            return false;
+        }
+        inputs[config::VT_NORMAL_SOURCE_COUNT + i] = residency.shaderParams(tile);
+    }
     instance.region = {region.x, region.z, region.size, 0};
     instance.splatSource = residency.shaderParams(splat);
-    instance.projectionSource = residency.shaderParams(projection);
-    auto *pass = _composeMaterial->getPasses()->front().get();
-    const bool triplanarEnabled = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("triplanarParams"))).x > 0.0F;
-    const bool cliff = triplanarEnabled && residency.minimumNormalY(projection.address) < CLIFF_NORMAL_Y;
-    instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), cliff ? 1.0F : 0.0F, 0};
-    _normalSourceRows[slot] = normals;
+    const bool triplanarEnabled = !sources.projections.empty();
+    instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), triplanarEnabled ? 1.0F : 0.0F, 0};
+    _sourceRows[slot] = inputs;
     return true;
 }
 
@@ -150,9 +146,9 @@ void VTPageComposer::uploadInputs() {
     _decals->updateComposeMaterial(_composeMaterial);
     _decals->uploadPageDecals();
     gfx::BufferTextureCopy indexCopy;
-    indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, static_cast<uint32_t>(_normalSourceRows.size()), 1};
-    const uint8_t *normalBytes[]{reinterpret_cast<const uint8_t *>(_normalSourceRows.data())};
-    Root::getInstance()->getDevice()->copyBuffersToTexture(normalBytes, _normalSourceTable, &indexCopy, 1);
+    indexCopy.texExtent = {config::VT_SOURCE_COUNT, static_cast<uint32_t>(_sourceRows.size()), 1};
+    const uint8_t *sourceBytes[]{reinterpret_cast<const uint8_t *>(_sourceRows.data())};
+    Root::getInstance()->getDevice()->copyBuffersToTexture(sourceBytes, _sourceTable, &indexCopy, 1);
 
     for (const auto &pass : *_composeMaterial->getPasses()) {
         pass->update();
@@ -186,7 +182,7 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, LandscapeResidenc
         "globalColorParams",
         "heightBlendParams",
         "terrainNormalMap",
-        "normalSourceMap",
+        "sourceMap",
         "terrainHeightMap",
         "terrainHeightParams",
         "triplanarParams",
@@ -212,9 +208,8 @@ bool VTPageComposer::initMaterial(const LandscapeAsset &asset, LandscapeResidenc
     _inverseDepth = 1.0F / data.depth();
     applyGlobalColorMap();
     _composeMaterial->setPropertyVec4Array("materialParams", materials.materialParams());
-    _composeMaterial->setPropertyVec4("terrainHeightParams", Vec4{data.heightScale, data.heightBias, data.sectorSize, 0});
-    // A fixed sector-boundary band covers the largest page gutters and derivative support.
-    _composeMaterial->setPropertyVec4("triplanarParams", Vec4{1.0F, static_cast<float>(config::VT_PAGE_BORDER + 2U) / config::VT_PAGE_INTERIOR, TRIPLANAR_FADE_RATIO, TRIPLANAR_BLEND_SHARPNESS});
+    _composeMaterial->setPropertyVec4("terrainHeightParams", Vec4{data.heightScale, data.heightBias, 0, 0});
+    _composeMaterial->setPropertyVec4("triplanarParams", Vec4{config::TRIPLANAR_START_NORMAL_Y, config::TRIPLANAR_FULL_NORMAL_Y, 0, TRIPLANAR_BLEND_SHARPNESS});
     _composeMaterial->setPropertyVec4("vtLayout", Vec4{static_cast<float>(targetSize),
                                                 static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
                                                 device->getCapabilities().screenSpaceSignY * device->getCapabilities().clipSpaceSignY});
@@ -226,14 +221,14 @@ bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device 
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = gfx::Format::RGBA32F;
-    info.width = config::VT_NORMAL_SOURCE_COUNT;
+    info.width = config::VT_SOURCE_COUNT;
     info.height = pageCount;
-    _normalSourceTable = device->createTexture(info);
-    if (!_normalSourceTable) {
+    _sourceTable = device->createTexture(info);
+    if (!_sourceTable) {
         return false;
     }
-    _normalSourceRows.resize(pageCount);
-    bindTexture("normalSourceMap", _normalSourceTable, residency.splatSampler());
+    _sourceRows.resize(pageCount);
+    bindTexture("sourceMap", _sourceTable, residency.splatSampler());
     return true;
 }
 
@@ -261,18 +256,6 @@ bool VTPageComposer::setHeightBlendEnabled(bool enabled) {
     params.x = strength;
     _composeMaterial->setPropertyVec4("heightBlendParams", params);
     // Recomposition reserves its source tiles through the normal scheduling path.
-    return true;
-}
-
-bool VTPageComposer::setTriplanarEnabled(bool enabled) {
-    auto *pass = _composeMaterial->getPasses()->front().get();
-    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("triplanarParams")));
-    const float strength = enabled ? 1.0F : 0.0F;
-    if (params.x == strength) {
-        return false;
-    }
-    params.x = strength;
-    _composeMaterial->setPropertyVec4("triplanarParams", params);
     return true;
 }
 
@@ -348,13 +331,12 @@ gfx::RenderPass *VTPageComposer::renderPass(bool initialize) const {
 bool VTPageComposer::initDrawResources(gfx::Device *device) {
     constexpr uint32_t STRIDE = sizeof(VTPageInstance);
     _instanceBuffer = device->createBuffer({gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
-                                       gfx::MemoryUsageBit::DEVICE, static_cast<uint32_t>(_normalSourceRows.size()) * STRIDE, STRIDE});
+                                       gfx::MemoryUsageBit::DEVICE, static_cast<uint32_t>(_sourceRows.size()) * STRIDE, STRIDE});
     gfx::InputAssemblerInfo iaInfo;
     iaInfo.attributes = _pageMesh->getAttributes();
     iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtPage", gfx::Format::RGBA32F, false, 1, true, 1});
     iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtRegion", gfx::Format::RGBA32F, false, 1, true, 2});
     iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtSource", gfx::Format::RGBA32F, false, 1, true, 3});
-    iaInfo.attributes.emplace_back(gfx::Attribute{"a_vtProjection", gfx::Format::RGBA32F, false, 1, true, 4});
     iaInfo.vertexBuffers = _pageMesh->getVertexBuffers();
     iaInfo.vertexBuffers.push_back(_instanceBuffer.get());
     iaInfo.indexBuffer = _pageMesh->getIndexBuffer();

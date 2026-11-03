@@ -8,7 +8,7 @@ import { VTRenderer } from '../../cocos/landscape/VTRenderer';
 
 // Same deterministic IO/GPU boundaries as native schedule_test.cpp. The actual
 // scheduler, quadtree and mapping layout execute; paging.test covers allocation.
-test('native/Web scheduling agrees with delayed sources, cancellation, refresh and duplicate frames', () => {
+test.each([false, true])('scheduling preserves delayed sources, cancellation, refresh and duplicate frames (triplanar=%s)', (triplanar) => {
     const lines = PARITY_CASES.trimStart().split(/\r?\n/).filter((line) => line && !line.startsWith('#'));
     const [capacityCommand, sourceLimit, pageLimit] = lines.shift()!.split(' ');
     expect(capacityCommand).toBe('capacity');
@@ -58,6 +58,7 @@ test('native/Web scheduling agrees with delayed sources, cancellation, refresh a
         },
         ready: (): boolean => reserved.length > 0 && [...composed.values()].every(Boolean),
         needsComposition: (address: VTPageAddress): boolean => !composed.get(address.key()),
+        getTriplanarEnabled: (): boolean => triplanar,
         getRefineFarDetail: (): boolean => true,
         selectSources: (): VTPageSources => {
             const result = new VTPageSources();
@@ -124,6 +125,7 @@ test('native/Web scheduling agrees with delayed sources, cancellation, refresh a
         trace.push(`state ${Number(coverage)} ${Number(schedule.isSettled())} nodes=${nodes.sort().map((node) => `${node},`).join('')} sources=${sources} pages=${mappings}`);
     }
     expect(hadCoverage && schedule.isSettled()).toBe(true);
+    // Triplanar changes composition inputs, not the distance-based page allocation.
     const expected = PARITY_EXPECTED.trimStart();
     expect(`${trace.join('\n')}\n`).toBe(expected);
 });

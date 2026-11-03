@@ -24,6 +24,8 @@ function mapping (address: NodeAddress): VTGridMapping {
 function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; slots: () => number[]; pages: () => VTPage[] } {
     const state = {
         _data: data,
+        _nodeIndexLayout: new NodeIndexLayout(data),
+        _minimumNormalY: new Array(new NodeIndexLayout(data).nodeCount()).fill(0),
         _layout: new VTPageLayout(data.sectorSize),
         _pages: Array.from({ length: capacity }, () => new VTPage()),
         _reservedSlots: [] as number[],
@@ -34,6 +36,61 @@ function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRend
     const cpu = renderer as unknown as typeof state;
     return { renderer, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
 }
+
+test('triplanar height sources cover page interiors and gutters across sectors', () => {
+    // Same boundary samples as native testCompositionSources; no GPU resources.
+    const data = Object.assign(cacheData(7, 2, 2), { sectorSize: 2048 });
+    const { renderer } = pageFixture(data, 256);
+    const layout = new VTPageLayout(data.sectorSize);
+    expect(renderer.selectSources(new VTPageAddress(8, 2, 2), true, false).projections).toHaveLength(0);
+    const samples = [-8 / 256, 0, 0.25, 0.5, 0.75, 1, 1 + 8 / 256];
+    for (let level = 0; level <= layout.rootLevel(); ++level) {
+        const size = layout.pageSize(level);
+        const last = data.width() / size - 1;
+        for (const x of [0, Math.floor(last / 2), last]) {
+            for (const z of [0, Math.floor(last / 2), last]) {
+                for (const detailed of [false, true]) {
+                    const inputs = renderer.selectSources(new VTPageAddress(level, x, z), detailed, true);
+                    requireCondition(inputs.projections.length === 9 && inputs.projections[4].key() === inputs.splat.key(), 'Projection height precision differs from the page source');
+                    for (const u of samples) {
+                        for (const v of samples) {
+                            const col = u < 0 ? 0 : (u < 1 ? 1 : 2);
+                            const row = v < 0 ? 0 : (v < 1 ? 1 : 2);
+                            const region = data.nodeRegion(inputs.projections[row * 3 + col]);
+                            const worldX = Math.max(0, Math.min(data.width(), (x + u) * size));
+                            const worldZ = Math.max(0, Math.min(data.depth(), (z + v) * size));
+                            requireCondition(worldX >= region.x && worldX <= region.x + region.size && worldZ >= region.z && worldZ <= region.z + region.size,
+                                'Height projection clamped an interior/sector-edge sample to the wrong tile');
+                        }
+                    }
+                    const sources: NodeAddress[] = [];
+                    inputs.appendTo(sources);
+                    expect(new Set(sources.map((source) => source.key())).size).toBe(sources.length);
+                }
+            }
+        }
+    }
+});
+
+test('CPU cliff culling separates gentle pages and retains cliffs in gutters and coarse pages', () => {
+    const data = Object.assign(cacheData(3, 2, 1), { sectorSize: 128 });
+    const { renderer } = pageFixture(data, 256);
+    const slopes = (renderer as unknown as { _minimumNormalY: number[] })._minimumNormalY;
+    slopes.fill(1);
+    const index = new NodeIndexLayout(data);
+    // A narrow cliff in the second sector must survive every parent.
+    for (let level = 0; level <= data.maxLevel; ++level) {
+        slopes[index.globalNodeIndex(level, 8 >> level, 2 >> level)] = 0.4;
+    }
+    const ordinary = new VTPageAddress(3, 0, 0);
+    expect(renderer.selectSources(ordinary, true, true).projections).toHaveLength(0);
+    expect(renderer.selectSources(ordinary, true, true)).toEqual(renderer.selectSources(ordinary, true, false));
+    expect(renderer.selectSources(new VTPageAddress(0, 128, 32), true, true).projections).toHaveLength(9);
+    // Its gutter reaches a cliff across the sector boundary.
+    expect(renderer.selectSources(new VTPageAddress(4, 7, 2), true, true).projections).toHaveLength(9);
+    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, true).projections).toHaveLength(9);
+    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, false).projections).toHaveLength(0);
+});
 
 // Independent cell rasterization checks coverage and every neighboring LOD pair.
 // Expected topology and edge masks additionally come from the common native trace.

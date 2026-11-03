@@ -41,12 +41,11 @@ class LandscapeAsset;
 class MaterialLibrary;
 class LandscapeResidency;
 
-// Direct vertex-buffer layout: page, region, splat source and fixed projection source (RGBA32F).
+// Direct vertex-buffer layout: page, region and splat source (RGBA32F).
 struct VTPageInstance {
     Vec4 pageInfo; // X: physical VT slot; Y: decal count; Z: triplanar variant; W: unused.
     Vec4 region;
     Vec4 splatSource;
-    Vec4 projectionSource; // Resident sector root, independent of the page/source LOD.
     uint32_t physicalSlot() const { return static_cast<uint32_t>(pageInfo.x); }
 };
 
@@ -71,7 +70,6 @@ public:
     // Return whether cached page pixels need recomposition.
     bool setGlobalColorStrength(float strength);
     bool setHeightBlendEnabled(bool enabled);
-    bool setTriplanarEnabled(bool enabled);
 
 private:
     bool initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed);
@@ -90,10 +88,10 @@ private:
     std::array<IntrusivePtr<gfx::PipelineState>, 2> _composePipelines; // XZ and triplanar, compiled at init.
     IntrusivePtr<gfx::RenderPass> _initialPass;
     IntrusivePtr<Material> _composeMaterial;
-    IntrusivePtr<gfx::Texture> _normalSourceTable;
-    using NormalSourceRow = std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT>;
-    static_assert(sizeof(NormalSourceRow) == config::VT_NORMAL_SOURCE_COUNT * 4 * sizeof(float), "Normal-source rows must match RGBA32F texels");
-    ccstd::vector<NormalSourceRow> _normalSourceRows;
+    IntrusivePtr<gfx::Texture> _sourceTable;
+    using SourceRow = std::array<Vec4, config::VT_SOURCE_COUNT>;
+    static_assert(sizeof(SourceRow) == config::VT_SOURCE_COUNT * 4 * sizeof(float), "Source rows must match RGBA32F texels");
+    ccstd::vector<SourceRow> _sourceRows;
     DecalRenderer *_decals{nullptr}; // borrowed; owner destroys VT first
     IntrusivePtr<Texture2D> _globalColorMap;
     IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
@@ -102,7 +100,6 @@ private:
     float _effectiveGlobalColorStrength{0.0F};
     float _inverseWidth{0.0F};
     float _inverseDepth{0.0F};
-    uint32_t _rootLevel{0}; // Immutable source layout; roots remain reserved by Schedule.
 };
 
 // Builds mips from completed page pixels; it never re-evaluates materials.

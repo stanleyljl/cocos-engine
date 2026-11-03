@@ -123,7 +123,7 @@ export class LandscapeRenderer {
         for (let z = 0; z < this._data.sectorsZ; ++z) {
             for (let x = 0; x < this._data.sectorsX; ++x) {
                 const inputs: NodeAddress[] = [];
-                this._vt.selectSources(new VTPageAddress(layout.rootLevel(), x, z), true).appendTo(inputs);
+                this._vt.selectSources(new VTPageAddress(layout.rootLevel(), x, z), true, true).appendTo(inputs);
                 if (rootKeys.size + inputs.filter((source) => !rootKeys.has(source.key())).length > layers) {
                     error('[Landscape] Device capacity cannot compose sector roots');
                     return false;

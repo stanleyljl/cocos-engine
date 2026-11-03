@@ -121,9 +121,11 @@ export class VTGridMapping {
 export class VTPageSources {
     public splat = new NodeAddress();
     public normals: NodeAddress[] = Array.from({ length: config.VT_NORMAL_SOURCE_COUNT }, () => new NodeAddress());
+    // Empty for XZ projection; otherwise a 3x3 lookup covering the page and its gutters.
+    public projections: NodeAddress[] = [];
 
     public appendTo (output: NodeAddress[]): void {
-        for (const source of [this.splat, ...this.normals]) {
+        for (const source of [this.splat, ...this.normals, ...this.projections]) {
             if (!output.some((entry) => entry.key() === source.key())) {
                 output.push(source);
             }

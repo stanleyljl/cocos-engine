@@ -62,7 +62,7 @@ module.exports = {
                         tooltip: 'Show nearby 3D decal meshes; disabling keeps flat RVT decals.',
                     },
                     triplanarEnabled: {
-                        tooltip: 'Use a separate triplanar shader for cliff sectors; other sectors use XZ projection. Fixed sector-root projection data and XZ border bands prevent projection changes with LOD. Changes regenerate VT.',
+                        tooltip: 'Use three projections only for cliff VT pages selected from precomputed slope bounds. Gentle slopes use XZ; side projections fade in from 55 to 60 degrees. Gutters sample neighboring height tiles. Disabling uses XZ projection. Changing this setting regenerates VT pages.',
                     },
                     physicsWireframe: {
                         tooltip: 'Show loaded terrain collision meshes. The project physics debug view reads this switch and draws the wireframe.',

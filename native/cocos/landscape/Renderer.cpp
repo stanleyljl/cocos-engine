@@ -181,7 +181,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
             ccstd::vector<NodeAddress> inputs;
-            _vtRenderer->selectSources({layout.rootLevel(), x, z}, true).appendTo(inputs);
+            _vtRenderer->selectSources({layout.rootLevel(), x, z}, true, true).appendTo(inputs);
             const auto additional = std::count_if(inputs.begin(), inputs.end(), [&](NodeAddress source) {
                 return rootKeys.count(source.key()) == 0;
             });

@@ -105,7 +105,7 @@ public:
     const ccstd::vector<uint32_t> &reservedSlots() const { return _reservedSlots; }
     const Page &page(uint32_t slot) const { return _pages[slot]; }
     LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
-    VTPageSources selectSources(VTPageAddress address, bool refineFarDetail) const;
+    VTPageSources selectSources(VTPageAddress address, bool refineFarDetail, bool triplanar) const;
     void invalidate();
     // Invalidate intersecting cached pages, including their filtering gutters.
     void invalidate(LandscapeRegion region);
@@ -116,6 +116,7 @@ public:
 
     VTPageTable &pageTable() { return _pageTable; }
     const VTPageTable &pageTable() const { return _pageTable; }
+    bool getTriplanarEnabled() const { return _triplanarEnabled; }
     bool getRefineFarDetail() const { return _refineFarDetail; }
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
@@ -129,16 +130,19 @@ public:
 
 protected:
     // CPU residency operations; runtime callers use init() and renderPages().
-    bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT);
+    bool initPages(const LandscapeData &data, const ccstd::vector<float> &minimumNormalY, uint32_t capacity = config::VT_PAGE_COUNT);
     // Mark composition complete only after its GPU commands have been submitted.
     void publish(uint32_t slot);
 
 private:
     bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
     uint32_t sourceLevel(float size) const;
+    bool hasCliff(LandscapeRegion region) const;
     int allocate(VTPageAddress address);
     LandscapeData _data;
     VTPageLayout _layout;
+    NodeIndexLayout _nodeIndexLayout;
+    const ccstd::vector<float> *_minimumNormalY{nullptr}; // Borrowed immutable asset metadata.
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _reservedSlots;
@@ -153,5 +157,6 @@ private:
     gfx::Sampler *_sampler{nullptr}; // device-owned
     bool _needsClear{true};
     bool _refineFarDetail{true};
+    bool _triplanarEnabled{true};
 };
 } // namespace cc::landscape

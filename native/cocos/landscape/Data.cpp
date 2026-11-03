@@ -74,6 +74,9 @@ void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
     for (const auto source : normals) {
         append(source);
     }
+    for (const auto source : projections) {
+        append(source);
+    }
 }
 
 bool LandscapeData::valid() const {

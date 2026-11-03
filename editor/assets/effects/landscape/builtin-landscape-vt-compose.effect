@@ -32,7 +32,7 @@ CCEffect %{
         decalAlbedoMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         decalNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
         globalColorMap: { value: white, sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: clamp, addressV: clamp, addressW: clamp } }
-        normalSourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none } }
+        sourceMap: { sampler: { minFilter: point, magFilter: point, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         terrainNormalMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: none, addressU: clamp, addressV: clamp, addressW: clamp } }
         splatmap: { sampler: { minFilter: point, magFilter: point, addressU: clamp, addressV: clamp, addressW: clamp } }
         albedoHeightMap: { sampler: { minFilter: linear, magFilter: linear, mipFilter: linear, addressU: wrap, addressV: wrap, addressW: wrap } }
@@ -62,8 +62,8 @@ CCProgram vt-compose-uniforms %{
     vec4 materialParams[32]; // repeats/m, biome influence, unused, unused
     vec4 globalColorParams; // inverse landscape width/depth, blend strength, unused
     vec4 heightBlendParams; // strength (0 = linear), weight scale, sharpness, unused
-    vec4 terrainHeightParams; // height scale/bias, fixed projection tile size, unused
-    vec4 triplanarParams; // enabled, XZ-only band/source size, fade width/source size, blend sharpness
+    vec4 terrainHeightParams; // height scale/bias, unused ZW
+    vec4 triplanarParams; // start/full cliff normal Y, unused, blend sharpness
     vec4 decalRegions[512]; // config::DECAL_INSTANCE_MAX
     vec4 decalParams; // placed decal count
     vec4 decalLayerParams[32]; // config::DECAL_LIBRARY_MAX; X: modulate terrain color
@@ -77,16 +77,12 @@ CCProgram vt-compose-vs %{
   in vec4 a_vtPage;
   in vec4 a_vtRegion;
   in vec4 a_vtSource;
-  in vec4 a_vtProjection;
 
   out vec2 v_localXZ;
   #if __VERSION__ >= 300
   flat out vec4 v_source;
   flat out vec2 v_decalPage;
   flat out vec4 v_region;
-  #if LANDSCAPE_TRIPLANAR
-    flat out vec4 v_projection;
-  #endif
 
   #else
   out vec4 v_source;
@@ -109,9 +105,6 @@ CCProgram vt-compose-vs %{
     v_decalPage = a_vtPage.xy;
     #if __VERSION__ >= 300
     v_region = a_vtRegion;
-    #if LANDSCAPE_TRIPLANAR
-      v_projection = a_vtProjection;
-    #endif
     #endif
     vec2 clipPos = atlasUv * 2.0 - 1.0;
     // Texture-to-clip conversion: screenSpaceSignY * clipSpaceSignY.
@@ -130,7 +123,7 @@ CCProgram vt-compose-fs %{
   uniform highp usampler2DArray splatmap;
   uniform highp sampler2DArray terrainNormalMap;
   uniform highp sampler2DArray terrainHeightMap;
-  uniform highp sampler2D normalSourceMap;
+  uniform highp sampler2D sourceMap;
   uniform highp sampler2DArray albedoHeightMap;
   uniform highp sampler2DArray normalRoughnessAOMap;
   uniform sampler2D globalColorMap;
@@ -141,9 +134,6 @@ CCProgram vt-compose-fs %{
   flat in vec4 v_source;
   flat in vec2 v_decalPage;
   flat in vec4 v_region;
-  #if LANDSCAPE_TRIPLANAR
-    flat in vec4 v_projection;
-  #endif
 
   layout(location = 0) out vec4 albedoOut;
   layout(location = 1) out vec4 normalOut;
@@ -265,7 +255,7 @@ CCProgram vt-compose-fs %{
   vec3 sampleTerrainNormal() {
     // Gutters retain the nearest interior quadrant and read its padded normal tile.
     ivec2 cell = clamp(ivec2(floor((v_localXZ - v_region.xy) / v_region.z * 2.0)), ivec2(0), ivec2(1));
-    vec4 source = texelFetch(normalSourceMap, ivec2(cell.y * 2 + cell.x, int(v_decalPage.x)), 0);
+    vec4 source = texelFetch(sourceMap, ivec2(cell.y * 2 + cell.x, int(v_decalPage.x)), 0);
     return sourceNormal(v_localXZ, source);
   }
 
@@ -331,15 +321,24 @@ CCProgram vt-compose-fs %{
   }
 
   #if LANDSCAPE_TRIPLANAR
-  float sampleTerrainHeight() {
-    vec2 pixel = clamp((v_localXZ - v_projection.xy) / v_projection.z, vec2(0.0), vec2(1.0)) * float(LANDSCAPE_TILE_RESOLUTION - 1);
+  vec4 projectionSource() {
+    // Height tiles have no padding. The 3x3 lookup holds the interior and
+    // actual neighboring owners for each gutter, including sector boundaries.
+    vec2 local = (v_localXZ - v_region.xy) / v_region.z;
+    ivec2 cell = ivec2(step(vec2(0.0), local) + step(vec2(1.0), local));
+    // The first four entries belong to the shading-normal quadrants.
+    return texelFetch(sourceMap, ivec2(4 + cell.y * 3 + cell.x, int(v_decalPage.x)), 0);
+  }
+
+  float sampleTerrainHeight(vec4 source) {
+    vec2 pixel = clamp((v_localXZ - source.xy) / source.z, vec2(0.0), vec2(1.0)) * float(LANDSCAPE_TILE_RESOLUTION - 1);
     #if LANDSCAPE_HEIGHT_UNORM
-      float height = textureLod(terrainHeightMap, vec3((pixel + 0.5) / float(LANDSCAPE_TILE_RESOLUTION), v_projection.w), 0.0).r;
+      float height = textureLod(terrainHeightMap, vec3((pixel + 0.5) / float(LANDSCAPE_TILE_RESOLUTION), source.w), 0.0).r;
     #else
       // Decode the uint16 bytes before bilinear filtering, as in terrain-height.
       ivec2 p = ivec2(floor(pixel));
       ivec2 q = min(p + ivec2(1), ivec2(LANDSCAPE_TILE_RESOLUTION - 1));
-      int layer = int(v_projection.w);
+      int layer = int(source.w);
       vec2 decode = vec2(256.0, 1.0) / 65535.0;
       float a = dot(floor(texelFetch(terrainHeightMap, ivec3(p, layer), 0).rg * 255.0 + 0.5), decode);
       float b = dot(floor(texelFetch(terrainHeightMap, ivec3(q.x, p.y, layer), 0).rg * 255.0 + 0.5), decode);
@@ -352,14 +351,51 @@ CCProgram vt-compose-fs %{
   }
 
   vec3 projectionWeights(vec3 normal) {
-    // Every LOD uses the same sector grid and fixed projection source. Both sides
-    // of a sector boundary are XZ-only throughout the largest page's gutter.
-    vec2 distanceToEdge = abs(fract(v_localXZ / terrainHeightParams.z + 0.5) - 0.5);
-    float fade = smoothstep(triplanarParams.y, triplanarParams.y + triplanarParams.z, min(distanceToEdge.x, distanceToEdge.y));
     // Unity Shader Graph Triplanar: normalized powers of the base surface normal.
     vec3 weights = pow(abs(normal), vec3(triplanarParams.w));
     weights /= dot(weights, vec3(1.0));
-    return mix(vec3(0.0, 1.0, 0.0), weights, fade);
+    // Match CPU culling: gentle slopes are exactly XZ, even in a cliff page.
+    // This also makes ordinary/cliff page boundaries agree through their gutters.
+    float cliff = 1.0 - smoothstep(triplanarParams.y, triplanarParams.x, abs(normal.y));
+    return mix(vec3(0.0, 1.0, 0.0), weights, cliff);
+  }
+
+  vec4 sampleSideProjection(highp sampler2DArray materialMap, vec3 uv, vec2 dx, vec2 dy, bool color) {
+    // A steep height gradient creates a long, narrow footprint in material space.
+    // Filtering both axes at its longest extent erases detail across the cliff.
+    // Integrate along the major axis and use the minor axis for each sample's mip.
+    // Keep this in the bake: WebGL2 does not apply SamplerInfo.maxAnisotropy.
+    const int MAX_PROJECTION_SAMPLES = 16;
+    vec2 resolution = vec2(textureSize(materialMap, 0).xy);
+    vec2 texelDx = dx * resolution;
+    vec2 texelDy = dy * resolution;
+    float a = dot(texelDx, texelDx);
+    float b = dot(texelDx, texelDy);
+    float c = dot(texelDy, texelDy);
+    float discriminant = length(vec2(a - c, 2.0 * b));
+    float majorSquared = 0.5 * (a + c + discriminant);
+    float minorSquared = max(0.5 * (a + c - discriminant), 0.0);
+    // Choose the longer eigenvector expression to avoid cancellation.
+    vec2 axis = a >= c ? vec2(majorSquared - c, b) : vec2(b, majorSquared - a);
+    axis /= max(length(axis), 1e-8);
+    vec2 majorUV = dx * axis.x + dy * axis.y;
+    float majorLength = sqrt(majorSquared);
+    float filterWidth = max(1.0, max(sqrt(minorSquared), majorLength / float(MAX_PROJECTION_SAMPLES)));
+    int count = int(clamp(ceil(majorLength / filterWidth), 1.0, float(MAX_PROJECTION_SAMPLES)));
+    float mip = log2(filterWidth);
+    vec4 result = vec4(0.0);
+    for (int i = 0; i < MAX_PROJECTION_SAMPLES; ++i) {
+      if (i >= count) {
+        break;
+      }
+      float offset = (float(i) + 0.5) / float(count) - 0.5;
+      vec4 value = textureLod(materialMap, vec3(uv.xy + majorUV * offset, uv.z), mip);
+      if (color) {
+        value.rgb = SRGBToLinear(value.rgb);
+      }
+      result += value;
+    }
+    return result / float(count);
   }
   #endif
 
@@ -370,13 +406,11 @@ CCProgram vt-compose-fs %{
     value *= weights.y;
     #if LANDSCAPE_TRIPLANAR
     if (weights.x > 0.0) {
-      vec4 side = textureGrad(albedoHeightMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale);
-      side.rgb = SRGBToLinear(side.rgb);
+      vec4 side = sampleSideProjection(albedoHeightMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale, true);
       value += side * weights.x;
     }
     if (weights.z > 0.0) {
-      vec4 side = textureGrad(albedoHeightMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale);
-      side.rgb = SRGBToLinear(side.rgb);
+      vec4 side = sampleSideProjection(albedoHeightMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale, true);
       value += side * weights.z;
     }
     #endif
@@ -387,7 +421,7 @@ CCProgram vt-compose-fs %{
     float scale = materialParams[layer].x;
     vec4 value = textureGrad(normalRoughnessAOMap, vec3(position.xz * scale, float(layer)), dx.xz * scale, dy.xz * scale);
     vec3 detail = decodeNormal(value.rg);
-    // Preserve the existing XZ tangent frame exactly in the border band and when disabled.
+    // Preserve the existing XZ tangent frame for the top projection and when disabled.
     detailNormal = (tangent * detail.x + bitangent * detail.y + normal * detail.z) * weights.y;
     roughnessAO = value.ba * weights.y;
     #if LANDSCAPE_TRIPLANAR
@@ -396,14 +430,14 @@ CCProgram vt-compose-fs %{
     // following Unity's Triplanar Normal mode. A neutral map reproduces the base normal.
     vec3 n = normal * vec3(1.0, 1.0, -1.0);
     if (weights.x > 0.0) {
-      value = textureGrad(normalRoughnessAOMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale);
+      value = sampleSideProjection(normalRoughnessAOMap, vec3(position.zy * scale, float(layer)), dx.zy * scale, dy.zy * scale, false);
       detail = decodeNormal(value.rg);
       vec3 side = vec3(n.x * detail.z, n.y + detail.y, n.z + detail.x);
       detailNormal += side * vec3(1.0, 1.0, -1.0) * weights.x;
       roughnessAO += value.ba * weights.x;
     }
     if (weights.z > 0.0) {
-      value = textureGrad(normalRoughnessAOMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale);
+      value = sampleSideProjection(normalRoughnessAOMap, vec3(position.xy * scale, float(layer)), dx.xy * scale, dy.xy * scale, false);
       detail = decodeNormal(value.rg);
       vec3 side = vec3(n.x + detail.x, n.y + detail.y, n.z * detail.z);
       detailNormal += side * vec3(1.0, 1.0, -1.0) * weights.z;
@@ -416,15 +450,19 @@ CCProgram vt-compose-fs %{
   void composeMaterial(MaterialBlend blend, vec3 shadingNormal, vec3 tangent, vec3 bitangent, vec3 modulation, inout ComposedSurface surface) {
     vec3 position = vec3(v_localXZ.x, 0.0, -v_localXZ.y);
     #if LANDSCAPE_TRIPLANAR
-      position.y = sampleTerrainHeight();
-      // Stable weights are independent of streamed shading-normal precision.
-      vec3 projections = projectionWeights(sourceNormal(v_localXZ, v_projection));
+      vec4 source = projectionSource();
+      position.y = sampleTerrainHeight(source);
+    #endif
+    // Evaluate the surface in XZ cache space. Height derivatives compress the
+    // side projections into the VT; mapping it back onto the slope restores scale.
+    // Weights and sampling gradients must describe this same reconstructed surface.
+    vec3 dx = dFdx(position);
+    vec3 dy = dFdy(position);
+    #if LANDSCAPE_TRIPLANAR
+      vec3 projections = projectionWeights(normalize(cross(dx, dy)));
     #else
       vec3 projections = vec3(0.0, 1.0, 0.0);
     #endif
-    // Derivatives must precede material/axis branches for stable mip selection.
-    vec3 dx = dFdx(position);
-    vec3 dy = dFdy(position);
     vec3 weights = vec3(0.0);
     vec4 albedoHeights[3];
     // Blend projections before material height blending. Pure endpoints

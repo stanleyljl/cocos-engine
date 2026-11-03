@@ -74,7 +74,6 @@ public:
         ccstd::vector<uint8_t> height; // requested RG8 high/low bytes or R16UI host-order values
         ccstd::vector<uint8_t> splat;
         ccstd::vector<uint8_t> normal; // padded linear RG8 terrain-local XZ; shader reconstructs +Y
-        float minimumNormalY{1.0F}; // Immutable slope summary, including the padded footprint.
     };
 
     LandscapeAsset();
@@ -109,6 +108,8 @@ public:
     float decalFarDistance() const { return _decalFarDistance; }
     uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
+    // Immutable asset metadata, indexed with NodeIndexLayout; shared by VT source selection.
+    const ccstd::vector<float> &minimumNormalY() const { return _minimumNormalY; }
     const ccstd::vector<HeightRange> &heightRanges() const { return _heightRanges; }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
@@ -138,6 +139,7 @@ private:
     float _decalFarDistance{40.0F};
     NodeIndexLayout _nodeIndexLayout;
     ccstd::vector<HeightRange> _heightRanges;
+    ccstd::vector<float> _minimumNormalY;
     std::shared_ptr<AsyncState> _async;
 };
 

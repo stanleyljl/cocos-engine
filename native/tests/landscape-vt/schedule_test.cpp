@@ -112,6 +112,9 @@ VTPageMipGenerator::~VTPageMipGenerator() = default;
 VTPageCompressor::~VTPageCompressor() = default;
 VTRenderer::VTRenderer() = default;
 VTRenderer::~VTRenderer() = default;
+void VTRenderer::setTriplanarEnabled(bool enabled) {
+    _triplanarEnabled = enabled;
+}
 bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
     return pages.size() <= backend.pageCapacity;
 }
@@ -134,7 +137,7 @@ bool VTRenderer::needsComposition(VTPageAddress page) const {
     const auto found = backend.composed.find(page.key());
     return found == backend.composed.end() || !found->second;
 }
-VTPageSources VTRenderer::selectSources(VTPageAddress, bool) const {
+VTPageSources VTRenderer::selectSources(VTPageAddress, bool, bool) const {
     // A shared synthetic source deliberately exercises temporary input retention.
     VTPageSources result;
     result.splat = {2, 0, 0};
@@ -201,6 +204,8 @@ int main(int argc, char **argv) {
     tree.init(asset);
     LandscapeResidency residency;
     VTRenderer pages;
+    const bool triplanar = argc == 2 && std::string(argv[1]) == "--triplanar";
+    pages.setTriplanarEnabled(triplanar);
     LandscapeSchedule schedule(asset, residency, pages, tree);
     std::ostringstream trace;
     trace << line << '\n';
@@ -265,6 +270,7 @@ int main(int argc, char **argv) {
         std::cout << trace.str();
         return 0;
     }
+    // Triplanar changes composition inputs, not the distance-based page allocation.
     const auto baseline = readParityBlock("PARITY_EXPECTED");
     require(trace.str() == baseline, "Native scheduling differs from the shared TS/C++ baseline; inspect --dump-parity");
     std::cout << "PASS: shared scheduling, delayed resources, cancellation, material refresh and repeated frames\n";

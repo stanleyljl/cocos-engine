@@ -8,7 +8,6 @@ import * as config from './Config';
 interface Slot {
     layer: number;
     ready: boolean;
-    minimumNormalY: number;
 }
 
 export interface Tile {
@@ -124,7 +123,7 @@ export class LandscapeResidency {
                 return false;
             }
             const previous = this._slots.get(key);
-            const slot = previous ? { ...previous } : { layer: this._capacity, ready: false, minimumNormalY: 1 };
+            const slot = previous ? { ...previous } : { layer: this._capacity, ready: false };
             next.set(key, slot);
             if (slot.layer < this._capacity) {
                 used[slot.layer] = 1;
@@ -194,10 +193,6 @@ export class LandscapeResidency {
         return new Vec4(region.x, region.z, region.size, tile.layer);
     }
 
-    public minimumNormalY (source: NodeAddress): number {
-        return this._slots.get(source.key())!.minimumNormalY;
-    }
-
     public ready (): boolean {
         for (const slot of this._slots.values()) {
             if (!slot.ready) {
@@ -215,7 +210,6 @@ export class LandscapeResidency {
         this.uploadLayer(this.heightArray(), slot.layer, tile.height);
         this.uploadLayer(this.splatArray(), slot.layer, tile.splat);
         this.uploadLayer(this.normalArray(), slot.layer, tile.normal);
-        slot.minimumNormalY = tile.minimumNormalY;
         slot.ready = true;
     }
 

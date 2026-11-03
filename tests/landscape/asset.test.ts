@@ -10,7 +10,7 @@ function manifest () {
         sectorSizeMeters: 4,
         heightScale: 20,
         heightBias: -5,
-        levels: [{ heightRange: { min: [0], max: [65535] } }],
+        levels: [{ minimumNormalY: [1], heightRange: { min: [0], max: [65535] } }],
         files: { 'materials/color.png': '.lsraw0', 'materials/normal.png': '.lsraw1', 'decal/color.png': '.lsraw2', 'decal/normal.png': '.lsraw3', 'decal/height.png': '.lsraw4' },
         materialLibrary: {
             resolution: 4,
@@ -29,12 +29,26 @@ function manifest () {
 
 afterEach(() => jest.restoreAllMocks());
 
+test.each([undefined, [], [-0.1], [1.1]])('invalid slope metadata prevents publication (%j)', async (slopes) => {
+    const document = manifest();
+    Object.assign(document.levels[0], { minimumNormalY: slopes });
+    jest.spyOn(downloader, '_downloadJson').mockImplementation((_url, _options, complete) => complete(null, document));
+    const errors = captureErrors();
+    const asset = new LandscapeAsset();
+    expect(await asset.load('https://example.test/data/terrain.lsmanifest')).toBe(false);
+    expect(asset.data().valid()).toBe(false);
+    expect(asset.minimumNormalY()).toEqual([]);
+    errors.stop();
+    asset.destroy();
+});
+
 test('all manifest sections commit together with imported paths, query suffixes and material references', async () => {
     jest.spyOn(downloader, '_downloadJson').mockImplementation((_url, _options, complete) => complete(null, manifest()));
     const asset = new LandscapeAsset();
     expect(await asset.load('https://example.test/data/terrain.lsmanifest?v=3')).toBe(true);
     expect(asset.data().width()).toBe(4);
     expect(asset.heightRanges()).toEqual([{ minY: -5, maxY: 15 }]);
+    expect(asset.minimumNormalY()).toEqual([1]);
     expect(asset.materialResolution()).toBe(4);
     expect(asset.materialLayers()[0]).toMatchObject({ id: 0, tileSize: 0.25, globalColorInfluence: 0.5, albedoHeight: 'https://example.test/data/terrain.lsraw0?v=3' });
     expect(asset.decalLayers()[0]).toMatchObject({ detailMaterial0: 0, detailMaterial1: 0, modulateColor: false, height: 'https://example.test/data/terrain.lsraw4?v=3' });

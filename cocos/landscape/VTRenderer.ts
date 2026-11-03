@@ -10,7 +10,7 @@ import { LandscapeResidency } from './Residency';
 import { MaterialLibrary } from './MaterialLibrary';
 import { DecalRenderer } from './DecalRenderer';
 import { VTPageComposer, VTPageInstance, VTPageMipGenerator } from './VTPageStages';
-import { LandscapeData, LandscapeRegion, NodeAddress, NodeKey, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
+import { LandscapeData, LandscapeRegion, NodeAddress, NodeIndexLayout, NodeKey, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
 import * as config from './Config';
 
 export class VTPageTable {
@@ -153,6 +153,8 @@ export class VTPage {
 export class VTRenderer {
     private _data!: LandscapeData;
     private _layout!: VTPageLayout;
+    private _nodeIndexLayout!: NodeIndexLayout;
+    private _minimumNormalY!: readonly number[]; // Borrowed immutable asset metadata.
     private _pages: VTPage[] = [];
     private _reservedSlots: number[] = [];
     private readonly _lookup = new Map<NodeKey, number>();
@@ -164,6 +166,7 @@ export class VTRenderer {
     private _sampler!: Sampler;
     private _needsClear = true;
     private _refineFarDetail = true;
+    private _triplanarEnabled = true;
 
     private readonly _device: Device;
     private readonly _atlasSize: number;
@@ -183,6 +186,8 @@ export class VTRenderer {
             return false;
         }
         this._data = data;
+        this._nodeIndexLayout = new NodeIndexLayout(data);
+        this._minimumNormalY = asset.minimumNormalY();
         this._layout = new VTPageLayout(data.sectorSize);
         this._pages = Array.from({ length: capacity }, () => new VTPage());
         if (!this._pageTable.ensureCapacity(1) || !this._composer.init(asset, residency, materials, decals) || !this._mipGenerator.init(this._composer)) {
@@ -227,6 +232,9 @@ export class VTRenderer {
     public region (address: VTPageAddress): LandscapeRegion {
         return this._layout.pageRegion(address);
     }
+    public getTriplanarEnabled (): boolean {
+        return this._triplanarEnabled;
+    }
     public getRefineFarDetail (): boolean {
         return this._refineFarDetail;
     }
@@ -254,7 +262,7 @@ export class VTRenderer {
             if (!page.needsComposition()) {
                 continue;
             }
-            const instance = this._composer.prepareInputs(slot, this.region(address), this.selectSources(address, this._refineFarDetail), residency);
+            const instance = this._composer.prepareInputs(slot, this.region(address), this.selectSources(address, this._refineFarDetail, this._triplanarEnabled), residency);
             if (instance) {
                 batch.push(instance);
                 if (batch.length === maxPages) {
@@ -323,7 +331,7 @@ export class VTRenderer {
         return true;
     }
 
-    public selectSources (page: VTPageAddress, refine: boolean): VTPageSources {
+    public selectSources (page: VTPageAddress, refine: boolean, triplanar: boolean): VTPageSources {
         const size = this._layout.pageSize(page.level);
         const result = new VTPageSources();
         result.splat = this._data.nodeAtClamped(this.sourceLevel(size), { x: (page.x + 0.5) * size, z: (page.z + 0.5) * size });
@@ -334,7 +342,38 @@ export class VTRenderer {
                 result.normals[row * 2 + col] = this._data.nodeAtClamped(level, { x: (page.x + 0.25 + col * 0.5) * size, z: (page.z + 0.25 + row * 0.5) * size });
             }
         }
+        if (triplanar && this.hasCliff(this.region(page))) {
+            // A page fits inside one height tile at this level. Unlike normal
+            // tiles, height tiles have no border: reserve actual gutter owners.
+            const border = config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
+            const offsets = [-border, 0.5, 1 + border];
+            for (const row of offsets) {
+                for (const col of offsets) {
+                    result.projections.push(this._data.nodeAtClamped(result.splat.level, { x: (page.x + col) * size, z: (page.z + row) * size }));
+                }
+            }
+        }
         return result;
+    }
+
+    private hasCliff (region: LandscapeRegion): boolean {
+        // Include the entire filtering gutter. Choose a metadata level that
+        // covers this footprint with at most 3x3 cells, including sector edges.
+        const border = region.size * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
+        let level = 0;
+        while (level < this._data.maxLevel && this._data.nodeSize(level) < region.size + 2 * border) {
+            ++level;
+        }
+        const first = this._data.nodeAtClamped(level, { x: region.x - border, z: region.z - border });
+        const last = this._data.nodeAtClamped(level, { x: region.x + region.size + border, z: region.z + region.size + border });
+        for (let z = first.z; z <= last.z; ++z) {
+            for (let x = first.x; x <= last.x; ++x) {
+                if (this._minimumNormalY[this._nodeIndexLayout.globalNodeIndex(level, x, z)] < config.TRIPLANAR_START_NORMAL_Y) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public invalidate (changed?: LandscapeRegion): void {
@@ -392,9 +431,11 @@ export class VTRenderer {
     }
 
     public setTriplanarEnabled (enabled: boolean): void {
-        if (this._composer.setTriplanarEnabled(enabled)) {
-            this.invalidate();
+        if (enabled === this._triplanarEnabled) {
+            return;
         }
+        this._triplanarEnabled = enabled;
+        this.invalidate();
     }
 
     public setRefineFarDetail (enabled: boolean): void {

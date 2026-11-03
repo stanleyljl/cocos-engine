@@ -39,7 +39,6 @@ export interface TileData {
     height: Uint8Array;
     splat: Uint16Array;
     normal: Uint8Array;
-    minimumNormalY: number;
 }
 
 
@@ -130,6 +129,7 @@ class Manifest {
     public readonly parsed = new LandscapeData();
     public nodeIndexLayout = new NodeIndexLayout();
     public ranges: HeightRange[] = [];
+    public minimumNormalY: number[] = [];
     public assetDir = '';
     public files = new Map<string, string>();
     public materialLayers: MaterialLayer[] = [];
@@ -182,6 +182,7 @@ class Manifest {
         requireValue(Array.isArray(manifest.levels) && manifest.levels.length === data.maxLevel + 1, 'Invalid height range levels');
         this.nodeIndexLayout = new NodeIndexLayout(data);
         this.ranges = new Array(this.nodeIndexLayout.nodeCount());
+        this.minimumNormalY = new Array(this.nodeIndexLayout.nodeCount());
         for (let level = 0; level <= data.maxLevel; ++level) {
             this.readHeightRangeLevel(level, manifest.levels[level]);
         }
@@ -272,14 +273,18 @@ class Manifest {
     private readHeightRangeLevel (level: number, levelValue: any): void {
         const data = this.parsed;
         const range = levelValue.heightRange;
+        const slopes = levelValue.minimumNormalY;
         const width = data.nodesX(level);
         const depth = data.nodesZ(level);
         requireValue(range && Array.isArray(range.min) && Array.isArray(range.max)
             && range.min.length === width * depth && range.max.length === width * depth, 'Invalid height range size');
+        requireValue(Array.isArray(slopes) && slopes.length === width * depth, 'Invalid slope statistics size');
         for (let z = 0; z < depth; ++z) {
             for (let x = 0; x < width; ++x) {
                 const index = z * width + x;
                 requireValue(number(range.min[index]) && number(range.max[index]), 'Invalid height range');
+                requireValue(number(slopes[index]) && slopes[index] >= 0 && slopes[index] <= 1, 'Invalid minimum normal Y');
+                this.minimumNormalY[this.nodeIndexLayout.globalNodeIndex(level, x, z)] = slopes[index];
                 this.ranges[this.nodeIndexLayout.globalNodeIndex(level, x, z)] = {
                     minY: data.heightBias + range.min[index] * data.heightScale / 65535,
                     maxY: data.heightBias + range.max[index] * data.heightScale / 65535,
@@ -292,6 +297,7 @@ class Manifest {
 export class LandscapeAsset {
     private _data = new LandscapeData();
     private _heightRanges: HeightRange[] = [];
+    private _minimumNormalY: number[] = [];
     private _nodeIndexLayout = new NodeIndexLayout();
     private _files = new Map<string, string>();
     private _dataDir = '';
@@ -308,6 +314,10 @@ export class LandscapeAsset {
 
     public data (): LandscapeData {
         return this._data;
+    }
+    // Immutable asset metadata, indexed with NodeIndexLayout; shared by VT source selection.
+    public minimumNormalY (): readonly number[] {
+        return this._minimumNormalY;
     }
     public heightRanges (): readonly HeightRange[] {
         return this._heightRanges;
@@ -368,6 +378,7 @@ export class LandscapeAsset {
             this._decalFarDistance = parsed.decalFarDistance;
             this._nodeIndexLayout = parsed.nodeIndexLayout;
             this._heightRanges = parsed.ranges;
+            this._minimumNormalY = parsed.minimumNormalY;
             if (config.LANDSCAPE_DEBUG) {
                 log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxLevel + 1} minTileLevel=${this._data.minTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
             }
@@ -424,13 +435,11 @@ export class LandscapeAsset {
                 return;
             }
             const count = config.SOURCE_NORMAL_RESOLUTION ** 2;
-            let minimumNormalY = 1;
             for (let i = 0; i < count; ++i) {
-                minimumNormalY = Math.min(minimumNormalY, Math.max(0, tile.normal[i * 3 + 1] / 127.5 - 1));
                 tile.normal[i * 2] = tile.normal[i * 3];
                 tile.normal[i * 2 + 1] = tile.normal[i * 3 + 2];
             }
-            this._ready.push({ ...tile, normal: tile.normal.subarray(0, count * 2), key: makeNodeKey(level, x, z), minimumNormalY });
+            this._ready.push({ ...tile, normal: tile.normal.subarray(0, count * 2), key: makeNodeKey(level, x, z) });
         }).catch((cause) => {
             if (generation === this._generation) {
                 this._loadFailed = true;

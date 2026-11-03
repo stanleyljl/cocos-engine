@@ -40,9 +40,6 @@ namespace config {
 constexpr int VERTS_PER_NODE_SIDE = 17;
 constexpr float LOD_DISTANCE_RATIO = 2.0F;
 constexpr float MORPH_START_RATIO = 0.70F;
-// Slope threshold in degrees from horizontal, evaluated on the fixed sector source.
-constexpr float CLIFF_ANGLE = 60.0F;
-static_assert(CLIFF_ANGLE >= 0.0F && CLIFF_ANGLE <= 90.0F, "Cliff angle must be between 0 and 90 degrees");
 constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
 // Normal interiors share the height grid; real neighboring samples cover VT gutters.
 constexpr uint32_t SOURCE_NORMAL_BORDER = 8;
@@ -70,6 +67,11 @@ static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 te
 // 256 usable texels per logical unit at the finest page. Up to 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 4; // 2x2 interiors; padded sources also cover filtering gutters.
+constexpr uint32_t VT_PROJECTION_SOURCE_COUNT = 9; // Interior and eight gutter regions; height sources have no padding.
+constexpr uint32_t VT_SOURCE_COUNT = VT_NORMAL_SOURCE_COUNT + VT_PROJECTION_SOURCE_COUNT;
+// Fade side projections from 55 to 60 degrees; CPU culling uses the same start angle.
+constexpr float TRIPLANAR_START_NORMAL_Y = 0.573576436351046F;
+constexpr float TRIPLANAR_FULL_NORMAL_Y = 0.5F;
 constexpr uint32_t VT_NORMAL_DETAIL_MIN_LEVEL = 6;
 constexpr uint32_t VT_PAGE_BORDER = 8;
 constexpr uint32_t VT_MIP_LEVELS = 3; // interiors 256/128/64, borders 8/4/2

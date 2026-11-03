@@ -82,9 +82,6 @@ bool VTPageComposer::setGlobalColorStrength(float) {
 bool VTPageComposer::setHeightBlendEnabled(bool) {
     std::abort();
 }
-bool VTPageComposer::setTriplanarEnabled(bool) {
-    std::abort();
-}
 VTPageMipGenerator::VTPageMipGenerator() {
     std::abort();
 }
@@ -147,7 +144,11 @@ public:
 
 class VTResidencyFixture final : public VTRenderer {
 public:
-    using VTRenderer::initPages;
+    ccstd::vector<float> slopes;
+    bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT) {
+        slopes.assign(NodeIndexLayout(data).nodeCount(), 0.0F);
+        return VTRenderer::initPages(data, slopes, capacity);
+    }
     using VTRenderer::publish;
 };
 
@@ -1497,13 +1498,31 @@ void testPageCompositionBudget() {
     std::cout << "PASS: shared page allowance, multiple commits and partial composition\n";
 }
 
+void testCliffCulling() {
+    auto data = cacheData(3, 2, 1);
+    data.sectorSize = 128.0F;
+    VTResidencyFixture pages;
+    require(pages.initPages(data), "Initialize cliff culling metadata");
+    std::fill(pages.slopes.begin(), pages.slopes.end(), 1.0F);
+    const NodeIndexLayout index(data);
+    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
+        pages.slopes[index.globalNodeIndex(level, 8U >> level, 2U >> level)] = 0.4F;
+    }
+    require(pages.selectSources({3, 0, 0}, true, true).projections.empty(), "Ordinary pages must use the XZ shader even when triplanar is enabled");
+    require(pages.selectSources({0, 128, 32}, true, true).projections.size() == 9, "Fine cliff page must use triplanar");
+    require(pages.selectSources({4, 7, 2}, true, true).projections.size() == 9, "Cross-sector gutter must retain its cliff");
+    require(pages.selectSources({7, 1, 0}, true, true).projections.size() == 9, "Coarse pages must retain narrow cliffs");
+    require(pages.selectSources({7, 1, 0}, true, false).projections.empty(), "Disabling triplanar must bypass cliffs");
+}
+
 void testCompositionSources() {
     auto data = cacheData(7, 2, 2);
     data.sectorSize = 2048.0F;
     data.minTileLevel = 3;
     VTResidencyFixture pages;
     require(pages.initPages(data), "Initialize source selection without a source data manager");
-    const auto interior = pages.selectSources({8, 2, 2}, true);
+    const auto interior = pages.selectSources({8, 2, 2}, true, false);
+    require(interior.projections.empty(), "XZ projection must not reserve height gutters");
     require(interior.splat.key() == NodeAddress{4, 2, 2}.key(), "Splat source must cover the entire page");
     for (uint32_t row = 0; row < 2; ++row) {
         for (uint32_t col = 0; col < 2; ++col) {
@@ -1516,7 +1535,7 @@ void testCompositionSources() {
     interior.appendTo(sources);
     require(sources.size() == 5, "Appending to existing reservations must not duplicate sources");
 
-    const auto corner = pages.selectSources({8, 0, 0}, true);
+    const auto corner = pages.selectSources({8, 0, 0}, true, false);
     sources.clear();
     corner.appendTo(sources);
     require(sources.size() == 5, "Landscape corners also need only four interior normals plus splat");
@@ -1525,28 +1544,28 @@ void testCompositionSources() {
             require(corner.normals[row * 2 + col].key() == NodeAddress{3, col, row}.key(), "Outer boundary padding must not request tiles outside the landscape");
         }
     }
-    const auto coarse = pages.selectSources({8, 2, 2}, false);
+    const auto coarse = pages.selectSources({8, 2, 2}, false, false);
     sources.clear();
     coarse.appendTo(sources);
     require(sources.size() == 1, "Base precision shares one padded normal and splat tile without gutter neighbors");
     for (const auto normal : coarse.normals) {
         require(normal.key() == coarse.splat.key(), "All base-precision quadrants must share one source");
     }
-    const auto fine = pages.selectSources({0, 17, 29}, true);
+    const auto fine = pages.selectSources({0, 17, 29}, true, false);
     sources.clear();
     fine.appendTo(sources);
     require(sources.size() == 1 && sources.front().key() == NodeAddress{3, 0, 0}.key(), "Sub-tile pages must respect the minimum source level");
 
     data.minTileLevel = 0;
     require(pages.initPages(data), "Reinitialize source precision tests");
-    const auto near = pages.selectSources({5, 4, 4}, true);
-    const auto nearDisabled = pages.selectSources({5, 4, 4}, false);
+    const auto near = pages.selectSources({5, 4, 4}, true, false);
+    const auto nearDisabled = pages.selectSources({5, 4, 4}, false, false);
     for (size_t i = 0; i < near.normals.size(); ++i) {
         require(near.normals[i].key() == nearDisabled.normals[i].key(), "Far detail must not change near page sources");
     }
     require(near.normals[0].level == 1, "Near pages use one page-sized interior normal tile");
-    require(pages.selectSources({6, 2, 2}, true).normals[0].level == 1, "Far detail starts at VT L6 with half-page sources");
-    require(pages.selectSources({6, 2, 2}, false).normals[0].level == 2, "Disabling far detail retains page-sized normal sources");
+    require(pages.selectSources({6, 2, 2}, true, false).normals[0].level == 1, "Far detail starts at VT L6 with half-page sources");
+    require(pages.selectSources({6, 2, 2}, false, false).normals[0].level == 2, "Disabling far detail retains page-sized normal sources");
 
     // Mirror the shader lookup at interior, edge and corner samples, including
     // the full gutter. Each padded tile must cover the point without neighbor reads.
@@ -1559,9 +1578,17 @@ void testCompositionSources() {
         for (const uint32_t x : {0U, last / 2, last}) {
             for (const uint32_t z : {0U, last / 2, last}) {
                 for (const bool detailed : {false, true}) {
-                    const auto inputs = pages.selectSources({level, x, z}, detailed);
+                    const auto inputs = pages.selectSources({level, x, z}, detailed, true);
+                    require(inputs.projections.size() == 9 && inputs.projections[4].key() == inputs.splat.key(), "Projection must use page-resolution heights and all gutter owners");
                     for (const float u : samples) {
                         for (const float v : samples) {
+                            const uint32_t heightCol = u < 0.0F ? 0U : (u < 1.0F ? 1U : 2U);
+                            const uint32_t heightRow = v < 0.0F ? 0U : (v < 1.0F ? 1U : 2U);
+                            const auto heightRegion = data.nodeRegion(inputs.projections[heightRow * 3 + heightCol]);
+                            const float heightX = std::clamp((x + u) * size, 0.0F, data.width());
+                            const float heightZ = std::clamp((z + v) * size, 0.0F, data.depth());
+                            require(heightX >= heightRegion.x && heightX <= heightRegion.x + heightRegion.size && heightZ >= heightRegion.z && heightZ <= heightRegion.z + heightRegion.size,
+                                    "Height projection clamped an interior/sector-edge sample to the wrong tile");
                             const auto col = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(u * 2)), 0, 1));
                             const auto row = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(v * 2)), 0, 1));
                             const auto region = data.nodeRegion(inputs.normals[row * 2 + col]);
@@ -1856,6 +1883,7 @@ int main(int argc, char **argv) {
     testVTDistanceThresholds();
     testPageTableUpdatesAndReuse();
     testCompositionSources();
+    testCliffCulling();
     testSectorCountLimit();
     testHeightReservations();
     testExactPageLifecycle();

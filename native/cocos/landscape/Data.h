@@ -123,6 +123,8 @@ struct VTPageSources {
     // 2x2 lookup: base precision repeats one tile; far detail uses up to four.
     // Each source includes its own real-neighbor border for the VT gutters.
     std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normals;
+    // Empty for XZ projection; otherwise a 3x3 lookup covering the page and its gutters.
+    ccstd::vector<NodeAddress> projections;
     // Append unique addresses in sampling order, preserving existing entries.
     void appendTo(ccstd::vector<NodeAddress> &output) const;
 };

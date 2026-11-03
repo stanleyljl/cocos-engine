@@ -67,6 +67,7 @@ struct LandscapeAsset::Manifest {
     LandscapeData parsed;
     NodeIndexLayout nodeIndexLayout;
     ccstd::vector<HeightRange> ranges;
+    ccstd::vector<float> minimumNormalY;
     ccstd::string assetDir;
     bool imported{false};
     ccstd::unordered_map<ccstd::string, ccstd::string> files;
@@ -132,6 +133,7 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
     }
 
     nodeIndexLayout = NodeIndexLayout(parsed);
+    minimumNormalY.resize(nodeIndexLayout.nodeCount());
     ranges.assign(nodeIndexLayout.nodeCount(),
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
@@ -148,6 +150,11 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has no height range", level);
         return false;
     }
+    if (!levelValue.HasMember("minimumNormalY") || !levelValue["minimumNormalY"].IsArray()) {
+        CC_LOG_WARNING("[Landscape] manifest level L%u has no slope statistics", level);
+        return false;
+    }
+    const auto &slopes = levelValue["minimumNormalY"];
     const auto &range = levelValue["heightRange"];
     if (!range.HasMember("min") || !range.HasMember("max")) {
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has incomplete height range", level);
@@ -157,7 +164,7 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
     const auto &maxs = range["max"];
     const uint32_t side = parsed.nodesPerSectorSide(level);
     const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
-    if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected) {
+    if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected || slopes.Size() != expected) {
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
         return false;
     }
@@ -171,7 +178,12 @@ bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidj
                 CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
                 return false;
             }
+            if (!slopes[index].IsNumber() || slopes[index].GetFloat() < 0.0F || slopes[index].GetFloat() > 1.0F) {
+                CC_LOG_WARNING("[Landscape] manifest level L%u has invalid minimum normal Y", level);
+                return false;
+            }
             const size_t dst = nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
+            minimumNormalY[dst] = slopes[index].GetFloat();
             ranges[dst] = HeightRange{parsed.heightBias + mins[index].GetFloat() * scale,
                                       parsed.heightBias + maxs[index].GetFloat() * scale};
         }
@@ -370,6 +382,7 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _decalFarDistance = manifest.decalFarDistance;
     _nodeIndexLayout = manifest.nodeIndexLayout;
     _heightRanges = std::move(manifest.ranges);
+    _minimumNormalY = std::move(manifest.minimumNormalY);
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] Asset: sectors=%ux%u levels=%u minTileLevel=%u materials=%zu decals=%zu", _data.sectorsX, _data.sectorsZ, _data.maxLevel + 1U, _data.minTileLevel, _materialLayers.size(), _decals.size());
 #endif
@@ -391,9 +404,7 @@ bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd:
         // Forward compaction is safe because each destination precedes the next
         // unread RGB pixel. No extra allocation or per-frame conversion needed.
         const size_t count = static_cast<size_t>(config::SOURCE_NORMAL_RESOLUTION) * config::SOURCE_NORMAL_RESOLUTION;
-        tile.minimumNormalY = 1.0F;
         for (size_t i = 0; i < count; ++i) {
-            tile.minimumNormalY = std::min(tile.minimumNormalY, std::max(0.0F, tile.normal[i * 3U + 1U] / 127.5F - 1.0F));
             tile.normal[i * 2U] = tile.normal[i * 3U];
             tile.normal[i * 2U + 1U] = tile.normal[i * 3U + 2U];
         }

@@ -14,14 +14,11 @@ import { LandscapeRegion, VTPageSources } from './Data';
 import * as config from './Config';
 
 const TRIPLANAR_BLEND_SHARPNESS = 4;
-const TRIPLANAR_FADE_RATIO = 1 / 16;
-const CLIFF_NORMAL_Y = Math.cos(config.CLIFF_ANGLE * Math.PI / 180);
 
 export interface VTPageInstance {
     pageInfo: Vec4;
     region: Vec4;
     splatSource: Vec4;
-    projectionSource: Vec4;
 }
 
 function createPipeline (device: Device, pass: Pass, renderPass: RenderPass, ia: InputAssembler): PipelineState {
@@ -54,10 +51,9 @@ export class VTPageComposer {
     private _ia: InputAssembler | null = null;
     private _pipelines: PipelineState[] = [];
     private _material: Material | null = null;
-    private _normalSourceTable: Texture | null = null;
-    private _normalSourceRows = new Float32Array();
+    private _sourceTable: Texture | null = null;
+    private _sourceRows = new Float32Array();
     private _decals!: DecalRenderer;
-    private _rootLevel = 0;
     private _fallbackGlobalColor!: Texture;
     private _globalColorSampler!: Sampler;
     private _globalColorMap: Texture2D | null = null;
@@ -100,7 +96,6 @@ export class VTPageComposer {
         const device = this._device;
         const data = asset.data();
         this._decals = decals;
-        this._rootLevel = data.maxLevel;
         // This runtime is WebGL2-only and needs two color attachments. Its GFX
         // backend reports MRT through Feature; maxColorRenderTargets is unset.
         if (!device.hasFeature(Feature.MULTIPLE_RENDER_TARGETS)) {
@@ -134,7 +129,7 @@ export class VTPageComposer {
         if (this._material.passes.length !== 2) {
             throw new Error(`Landscape VT compose material requires two passes; got ${this._material.passes.length}`);
         }
-        const requiredProperties = ['vtLayout', 'splatmap', 'albedoHeightMap', 'normalRoughnessAOMap', 'materialParams', 'globalColorMap', 'globalColorParams', 'heightBlendParams', 'terrainNormalMap', 'normalSourceMap', 'terrainHeightMap', 'terrainHeightParams', 'triplanarParams'];
+        const requiredProperties = ['vtLayout', 'splatmap', 'albedoHeightMap', 'normalRoughnessAOMap', 'materialParams', 'globalColorMap', 'globalColorParams', 'heightBlendParams', 'terrainNormalMap', 'sourceMap', 'terrainHeightMap', 'terrainHeightParams', 'triplanarParams'];
         for (const name of requiredProperties) {
             if (!this._material.passes[0].getHandle(name)) {
                 throw new Error(`Landscape VT effect is missing ${name}; rebuild project effects`);
@@ -151,23 +146,23 @@ export class VTPageComposer {
         this._inverseDepth = 1 / data.depth();
         this.applyGlobalColorMap();
         this._material.setProperty('materialParams', [...materials.materialParams()]);
-        this._material.setProperty('terrainHeightParams', new Vec4(data.heightScale, data.heightBias, data.sectorSize, 0));
-        this._material.setProperty('triplanarParams', new Vec4(1, (config.VT_PAGE_BORDER + 2) / config.VT_PAGE_INTERIOR, TRIPLANAR_FADE_RATIO, TRIPLANAR_BLEND_SHARPNESS));
+        this._material.setProperty('terrainHeightParams', new Vec4(data.heightScale, data.heightBias, 0, 0));
+        this._material.setProperty('triplanarParams', new Vec4(config.TRIPLANAR_START_NORMAL_Y, config.TRIPLANAR_FULL_NORMAL_Y, 0, TRIPLANAR_BLEND_SHARPNESS));
         this._material.setProperty('vtLayout', new Vec4(this._size, config.VT_PAGE_RES, config.VT_PAGE_BORDER, device.capabilities.screenSpaceSignY * device.capabilities.clipSpaceSignY));
         if (!decals.bindComposeMaterial(this._material, materials)) {
             throw new Error('Landscape VT compose material is missing decal texture bindings');
         }
         const count = (this._size / config.VT_PAGE_RES) ** 2;
-        this._normalSourceTable = device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RGBA32F, config.VT_NORMAL_SOURCE_COUNT, count));
-        this._normalSourceRows = new Float32Array(count * config.VT_NORMAL_SOURCE_COUNT * 4);
-        this.bindTexture('normalSourceMap', this._normalSourceTable, residency.splatSampler());
+        this._sourceTable = device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RGBA32F, config.VT_SOURCE_COUNT, count));
+        this._sourceRows = new Float32Array(count * config.VT_SOURCE_COUNT * 4);
+        this.bindTexture('sourceMap', this._sourceTable, residency.splatSampler());
         for (const pass of this._material.passes) {
             pass.update();
         }
         this._mesh = GridMesh.createVTQuad(device);
-        this._instances = device.createBuffer(new BufferInfo(BufferUsageBit.VERTEX | BufferUsageBit.TRANSFER_DST, MemoryUsageBit.DEVICE, count * 64, 64));
+        this._instances = device.createBuffer(new BufferInfo(BufferUsageBit.VERTEX | BufferUsageBit.TRANSFER_DST, MemoryUsageBit.DEVICE, count * 48, 48));
         const attributes = this._mesh.attributes.slice();
-        for (const [i, name] of ['a_vtPage', 'a_vtRegion', 'a_vtSource', 'a_vtProjection'].entries()) {
+        for (const [i, name] of ['a_vtPage', 'a_vtRegion', 'a_vtSource'].entries()) {
             attributes.push(new Attribute(name, Format.RGBA32F, false, 1, true, i + 1));
         }
         this._ia = device.createInputAssembler(new InputAssemblerInfo(attributes, [...this._mesh.vertexBuffers, this._instances], this._mesh.indexBuffer!));
@@ -186,8 +181,7 @@ export class VTPageComposer {
 
     public prepareInputs (slot: number, region: LandscapeRegion, sources: VTPageSources, residency: LandscapeResidency): VTPageInstance | null {
         const splat = residency.resolve(sources.splat);
-        const projection = residency.resolve(sources.splat.ancestor(this._rootLevel));
-        if (splat.layer < 0 || projection.layer < 0) {
+        if (splat.layer < 0) {
             return null;
         }
         const normals = sources.normals.map((source) => residency.resolve(source));
@@ -195,17 +189,21 @@ export class VTPageComposer {
             return null;
         }
         for (let i = 0; i < normals.length; ++i) {
-            Vec4.toArray(this._normalSourceRows, residency.shaderParams(normals[i]), (slot * config.VT_NORMAL_SOURCE_COUNT + i) * 4);
+            Vec4.toArray(this._sourceRows, residency.shaderParams(normals[i]), (slot * config.VT_SOURCE_COUNT + i) * 4);
         }
-        const pass = this.material().passes[0];
-        const enabled = pass.getUniform(pass.getHandle('triplanarParams'), new Vec4()).x > 0;
-        const cliff = enabled && residency.minimumNormalY(projection.address) < CLIFF_NORMAL_Y;
+        for (let i = 0; i < sources.projections.length; ++i) {
+            const projection = residency.resolve(sources.projections[i]);
+            if (projection.layer < 0) {
+                return null;
+            }
+            Vec4.toArray(this._sourceRows, residency.shaderParams(projection), (slot * config.VT_SOURCE_COUNT + config.VT_NORMAL_SOURCE_COUNT + i) * 4);
+        }
+        const enabled = sources.projections.length > 0;
         const bounds = new Vec4(region.x, region.z, region.size, 0);
         return {
-            pageInfo: new Vec4(slot, this._decals.collectPageDecals(slot, bounds), cliff ? 1 : 0, 0),
+            pageInfo: new Vec4(slot, this._decals.collectPageDecals(slot, bounds), enabled ? 1 : 0, 0),
             region: bounds,
             splatSource: residency.shaderParams(splat),
-            projectionSource: residency.shaderParams(projection),
         };
     }
 
@@ -213,21 +211,20 @@ export class VTPageComposer {
         this._decals.updateComposeMaterial(this.material());
         this._decals.uploadPageDecals();
         const copy = new BufferTextureCopy();
-        copy.texExtent.width = config.VT_NORMAL_SOURCE_COUNT;
-        copy.texExtent.height = this._normalSourceRows.length / (config.VT_NORMAL_SOURCE_COUNT * 4);
-        this._device.copyBuffersToTexture([this._normalSourceRows], this._normalSourceTable!, [copy]);
+        copy.texExtent.width = config.VT_SOURCE_COUNT;
+        copy.texExtent.height = this._sourceRows.length / (config.VT_SOURCE_COUNT * 4);
+        this._device.copyBuffersToTexture([this._sourceRows], this._sourceTable!, [copy]);
         for (const pass of this.material().passes) {
             pass.update();
         }
     }
 
     public record (commands: CommandBuffer, instances: readonly VTPageInstance[], initialize: boolean): void {
-        const bytes = new Float32Array(instances.length * 16);
+        const bytes = new Float32Array(instances.length * 12);
         instances.forEach((instance, i) => {
-            Vec4.toArray(bytes, instance.pageInfo, i * 16);
-            Vec4.toArray(bytes, instance.region, i * 16 + 4);
-            Vec4.toArray(bytes, instance.splatSource, i * 16 + 8);
-            Vec4.toArray(bytes, instance.projectionSource, i * 16 + 12);
+            Vec4.toArray(bytes, instance.pageInfo, i * 12);
+            Vec4.toArray(bytes, instance.region, i * 12 + 4);
+            Vec4.toArray(bytes, instance.splatSource, i * 12 + 8);
         });
         commands.updateBuffer(this._instances!, bytes);
         const variant = instances[0].pageInfo.z;
@@ -260,9 +257,6 @@ export class VTPageComposer {
     public setHeightBlendEnabled (enabled: boolean): boolean {
         return this.setEnabled('heightBlendParams', enabled);
     }
-    public setTriplanarEnabled (enabled: boolean): boolean {
-        return this.setEnabled('triplanarParams', enabled);
-    }
 
     private setEnabled (name: string, enabled: boolean): boolean {
         const pass = this.material().passes[0];
@@ -287,7 +281,7 @@ export class VTPageComposer {
         this._framebuffer?.destroy();
         this._renderPass?.destroy();
         this._initialPass?.destroy();
-        this._normalSourceTable?.destroy();
+        this._sourceTable?.destroy();
         this._material?.destroy();
         this._albedo?.destroy();
         this._normal?.destroy();
@@ -297,7 +291,7 @@ export class VTPageComposer {
         this._framebuffer = null;
         this._renderPass = null;
         this._initialPass = null;
-        this._normalSourceTable = null;
+        this._sourceTable = null;
         this._material = null;
         this._albedo = null;
         this._normal = null;

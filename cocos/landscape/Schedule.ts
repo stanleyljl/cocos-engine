@@ -245,7 +245,7 @@ export class LandscapeSchedule {
         const retained = new Set(resources.sources.map((source) => source.key()));
         for (const page of resources.pages) {
             const inputs: NodeAddress[] = [];
-            this._vtRenderer.selectSources(page, true).appendTo(inputs);
+            this._vtRenderer.selectSources(page, true, true).appendTo(inputs);
             if (!sourcesFit(retained, inputs, this._residency.layerCount())) {
                 return false;
             }
@@ -261,7 +261,7 @@ export class LandscapeSchedule {
                 continue;
             }
             const inputs: NodeAddress[] = [];
-            this._vtRenderer.selectSources(page, this._vtRenderer.getRefineFarDetail()).appendTo(inputs);
+            this._vtRenderer.selectSources(page, this._vtRenderer.getRefineFarDetail(), this._vtRenderer.getTriplanarEnabled()).appendTo(inputs);
             if (!sourcesFit(keys, inputs, this._residency.layerCount())) {
                 continue;
             }
