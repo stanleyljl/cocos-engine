@@ -130,12 +130,6 @@ export enum DirectorEvent {
     AFTER_RENDER = 'director_after_render',
 
     /**
-     * @en Triggered after rendering callbacks, before presenting the current frame.
-     * @zh 渲染回调完成后、当前帧呈现前触发。
-     */
-    BEFORE_PRESENT = 'director_before_present',
-
-    /**
      * @en The event which will be triggered before the physics process.<br/>
      * @zh 物理过程之前所触发的事件。
      * @event BEFORE_PHYSICS
@@ -265,13 +259,6 @@ export class Director extends EventTarget {
      * @event Director.EVENT_AFTER_RENDER
      */
     public static readonly EVENT_AFTER_RENDER = DirectorEvent.AFTER_RENDER;
-
-    /**
-     * @en Triggered after rendering callbacks, before presenting the current frame.
-     * @zh 渲染回调完成后、当前帧呈现前触发。
-     * @event Director.EVENT_BEFORE_PRESENT
-     */
-    public static readonly EVENT_BEFORE_PRESENT = DirectorEvent.BEFORE_PRESENT;
 
     /**
      * @en The event which will be triggered before the physics process.<br/>

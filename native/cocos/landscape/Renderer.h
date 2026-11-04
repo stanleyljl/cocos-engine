@@ -80,10 +80,10 @@ public:
     // Runtime methods require successful initialization of all owned modules.
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
-    // Initial display waits for asynchronous loading and composition; later streaming stays visible.
+    // Reports initial streaming completion; ready nodes render independently.
     bool isReady() const;
 
-    bool addDecal(uint32_t id, float x, float z, float size, uint32_t layer);
+    uint32_t addDecal(float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
     void setDebugData(const LandscapeDebugData &data);
     void preparePasses();

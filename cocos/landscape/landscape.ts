@@ -28,9 +28,9 @@ import { Component } from '../scene-graph/component';
 import { Asset, RenderTexture, Texture2D } from '../asset/assets';
 import downloader from '../asset/asset-manager/downloader';
 import { director, DirectorEvent } from '../game/director';
-import { LandscapeStartup } from './Startup';
 import { Enum, isValid, System, SystemPriority, Vec3 } from '../core';
 import { Node } from '../scene-graph/node';
+import type { RenderScene } from '../render-scene/core/render-scene';
 import { LandscapePhysics } from './landscape-physics';
 import { LandscapeInstance, LandscapeInstanceInterface } from './LandscapeInstance';
 import { API } from '../gfx';
@@ -273,7 +273,7 @@ export class Landscape extends Component {
     /** Native binding on JSB; parallel TypeScript runtime on WebGL2. */
     private _runtime: LandscapeInstanceInterface | null = null;
     private _enableGeneration = 0;
-    private _cancelInitialPresentation: (() => void) | null = null;
+    private _initializingScene: RenderScene | null = null;
     private _physics: LandscapePhysics | null = null;
 
     /** Explicit world-space collision regions, independent of rendering LOD. */
@@ -410,6 +410,7 @@ export class Landscape extends Component {
      * above existing ones. VT refresh uses the normal page budget.
      * Decals do not change collision or sampleSurface results.
      * Runtime instances are discarded on disable or asset replacement, not serialized.
+     * Discard their IDs too: each new load starts allocating IDs from 1 again.
      */
     public addDecal (decal: Readonly<LandscapeDecal>): number {
         if (typeof decal.x !== 'number' || typeof decal.z !== 'number' || typeof decal.size !== 'number'
@@ -423,7 +424,8 @@ export class Landscape extends Component {
         return this._runtime.addDecal(decal.x, decal.z, decal.size, decal.layer);
     }
 
-    /** Remove an instance returned by addDecal. Returns false for stale/unknown IDs.
+    /** Remove an instance returned by addDecal during the current enable cycle.
+     * Returns false for removed/unknown IDs. IDs from previous loads must not be reused.
      * Authored asset instances are unaffected. VT pixels refresh over subsequent frames.
      */
     public removeDecal (id: number): boolean {
@@ -586,8 +588,10 @@ export class Landscape extends Component {
     public onEnable (): void {
         const generation = ++this._enableGeneration;
         if (!EDITOR_NOT_IN_PREVIEW && this._landscapeAsset) {
-            // Register before async initialization can yield, including failure paths.
-            this._cancelInitialPresentation = LandscapeStartup.forScene(this.node.scene!).deferUntilReady(() => this._isReadyToPresent());
+            // Count initialization before Web resources can yield. Failed initialization
+            // keeps the scene pending until the component is disabled or destroyed.
+            this._initializingScene = this.node.scene!.renderScene!;
+            this._initializingScene.beginLandscapeInitialization();
         }
         if (!this._runtime) {
             return;
@@ -618,26 +622,24 @@ export class Landscape extends Component {
         }
     }
 
+    private _endInitialization (): void {
+        if (this._initializingScene) {
+            this._initializingScene.endLandscapeInitialization();
+            this._initializingScene = null;
+        }
+    }
+
     private _startUpdates (): void {
+        this._endInitialization();
         this._physics?._setEnabled(true);
         LandscapeSystem.getInstance().add(this);
         // Debug geometry is submitted for every draw, including while paused.
         director.on(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
     }
 
-    private _isReadyToPresent (): boolean {
-        const layer = this.node.layer;
-        const cameras = this.node.scene!.renderScene!.cameras;
-        // An intentionally hidden Landscape is not part of the initial visible frame.
-        // With no enabled camera yet, keep waiting for the initial view to be known.
-        const visible = cameras.some((camera) => camera.enabled && (camera.visibility & layer) === layer);
-        return this.isReady || (!visible && cameras.some((camera) => camera.enabled));
-    }
-
     public onDisable (): void {
         ++this._enableGeneration;
-        this._cancelInitialPresentation?.();
-        this._cancelInitialPresentation = null;
+        this._endInitialization();
         this._physics?._setEnabled(false);
         LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
@@ -677,8 +679,7 @@ export class Landscape extends Component {
 
     public onDestroy (): void {
         ++this._enableGeneration;
-        this._cancelInitialPresentation?.();
-        this._cancelInitialPresentation = null;
+        this._endInitialization();
         LandscapeSystem.remove(this);
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         this._physics?._destroy();

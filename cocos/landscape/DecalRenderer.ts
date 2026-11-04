@@ -89,6 +89,7 @@ export class DecalRenderer {
     private _pageIndexTexture: Texture | null = null;
     private _pageIndexData = new Uint8Array();
     private readonly _instances: Instance[] = [];
+    private _nextDecalId = 1;
     private readonly _nodes = new Map<NodeKey, NodeDraws>();
     private readonly _pool: Model[] = [];
     private readonly _scratch = new Float32Array(4);
@@ -132,6 +133,7 @@ export class DecalRenderer {
             this.removeNode(key);
         }
         this._instances.length = 0;
+        this._nextDecalId = 1;
         for (const decal of asset.decals()) {
             this._instances.push(this.initializeInstance(decal, 0));
         }
@@ -171,17 +173,18 @@ export class DecalRenderer {
         return instance;
     }
 
-    public addDecal (id: number, d: Decal): boolean {
+    // IDs belong to the current asset load; zero reports failure.
+    public addDecal (d: Decal): number {
         const data = this._asset.data();
-        if (!id || this._instances.length >= config.DECAL_INSTANCE_MAX || !Number.isInteger(d.layer) || d.layer < 0
+        if (this._nextDecalId > 0xFFFFFFFF || this._instances.length >= config.DECAL_INSTANCE_MAX || !Number.isInteger(d.layer) || d.layer < 0
             || d.layer >= this._asset.decalLayers().length || d.size <= 0 || d.size > 64 || d.x < 0 || d.z < 0
             || d.x + d.size > data.width() || d.z + d.size > data.depth()) {
-            return false;
+            return 0;
         }
-        this._instances.push(this.initializeInstance(d, id));
+        this._instances.push(this.initializeInstance(d, this._nextDecalId));
         this._regionsDirty = true;
         this.updateView(this._viewPosition);
-        return true;
+        return this._nextDecalId++;
     }
 
     public removeDecal (id: number): LandscapeRegion | null {

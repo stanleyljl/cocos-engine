@@ -109,6 +109,10 @@ public:
 
     void addLandscape(landscape::LandscapeInstance *terrain);
     void removeLandscape(landscape::LandscapeInstance *terrain);
+    // Track initialization separately; only fully initialized runtimes are published.
+    void beginLandscapeInitialization();
+    void endLandscapeInitialization();
+    bool isReady() const;
     const ccstd::vector<landscape::LandscapeInstance *> &getLandscapes() const { return _landscapes; }
 
     void addBatch(DrawBatch2D *);
@@ -140,6 +144,7 @@ private:
     IntrusivePtr<LodStateCache> _lodStateCache;
     ccstd::vector<IntrusivePtr<Model>> _models;
     ccstd::vector<landscape::LandscapeInstance *> _landscapes;
+    uint32_t _initializingLandscapes{0};
     ccstd::vector<IntrusivePtr<Camera>> _cameras;
     ccstd::vector<IntrusivePtr<DirectionalLight>> _directionalLights;
     ccstd::vector<IntrusivePtr<LODGroup>> _lodGroups;

@@ -92,7 +92,7 @@ public:
 
     // Main-thread runtime instances, using preloaded asset layers and local XZ.
     // Returns a nonzero handle on success, zero when unavailable/invalid/full.
-    // Instances are released on disable/reload; stale handles cannot remove new instances.
+    // Handles are valid only until disable/reload; discard them before IDs are reused.
     uint32_t addDecal(float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
 
@@ -137,7 +137,6 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
     std::unique_ptr<LandscapeQuery> _query;
-    uint32_t _nextDecalId{1}; // Never reset when reloading this LandscapeInstance object.
 };
 
 } // namespace landscape

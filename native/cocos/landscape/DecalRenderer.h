@@ -80,7 +80,8 @@ public:
 
     bool init(Node *node, scene::RenderScene *scene, bool heightUnorm);
     bool setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_t pageCount);
-    bool addDecal(uint32_t id, const LandscapeAsset::Decal &decal);
+    // IDs belong to the current asset load; zero reports failure.
+    uint32_t addDecal(const LandscapeAsset::Decal &decal);
     bool removeDecal(uint32_t id, LandscapeRegion &region);
     // Only shared terrain shader uniforms/textures/variants are set by the caller.
     std::array<Material *, 2> materials() const;
@@ -145,6 +146,7 @@ private:
     IntrusivePtr<gfx::Texture> _pageIndexTexture;
     ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
     ccstd::vector<Instance> _instances;
+    uint32_t _nextDecalId{1};
     ccstd::unordered_map<uint64_t, NodeDraws> _nodes;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
     TypedArray _scratch;

@@ -132,6 +132,7 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_
     }
     _nodes.clear();
     _instances.clear();
+    _nextDecalId = 1;
     for (const auto &decal : asset->decals()) {
         auto &instance = _instances.emplace_back();
         instance.decal = decal;
@@ -183,23 +184,23 @@ void DecalRenderer::initializeInstance(Instance &instance) {
     }
 }
 
-bool DecalRenderer::addDecal(uint32_t id, const LandscapeAsset::Decal &decal) {
-    if (id == 0 || _instances.size() >= config::DECAL_INSTANCE_MAX) {
-        return false;
+uint32_t DecalRenderer::addDecal(const LandscapeAsset::Decal &decal) {
+    if (_nextDecalId == 0 || _instances.size() >= config::DECAL_INSTANCE_MAX) {
+        return 0;
     }
     const auto &data = _asset->data();
     if (decal.layer >= _asset->decalLayers().size() || decal.size <= 0.0F || decal.size > 64.0F ||
         decal.x < 0.0F || decal.z < 0.0F ||
         decal.x + decal.size > data.width() || decal.z + decal.size > data.depth()) {
-        return false;
+        return 0;
     }
     auto &instance = _instances.emplace_back();
     instance.decal = decal;
-    instance.id = id;
+    instance.id = _nextDecalId;
     initializeInstance(instance);
     _regionsDirty = true;
     updateView(_viewPosition);
-    return true;
+    return _nextDecalId++;
 }
 
 bool DecalRenderer::removeDecal(uint32_t id, LandscapeRegion &region) {

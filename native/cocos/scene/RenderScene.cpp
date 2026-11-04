@@ -409,6 +409,21 @@ void RenderScene::removeLandscape(landscape::LandscapeInstance *terrain) {
     if (it != _landscapes.end()) _landscapes.erase(it);
 }
 
+void RenderScene::beginLandscapeInitialization() {
+    ++_initializingLandscapes;
+}
+
+void RenderScene::endLandscapeInitialization() {
+    CC_ASSERT(_initializingLandscapes > 0);
+    --_initializingLandscapes;
+}
+
+bool RenderScene::isReady() const {
+    return _initializingLandscapes == 0 && std::all_of(_landscapes.begin(), _landscapes.end(), [](const auto *terrain) {
+        return terrain->isReady();
+    });
+}
+
 void RenderScene::onGlobalPipelineStateChanged() {
     for (auto *terrain : _landscapes) terrain->onGlobalPipelineStateChanged();
     for (const auto &model : _models) {

@@ -34,6 +34,7 @@ import { TransformBit } from '../../scene-graph/node-enum';
 import { DrawBatch2D } from '../../2d/renderer/draw-batch';
 import { LODGroup } from '../scene/lod-group';
 import type { LandscapeInstance } from '../../landscape/LandscapeInstance';
+import { assert } from '../../core/platform/debug';
 
 export interface IRenderSceneInfo {
     name: string;
@@ -163,6 +164,7 @@ export class RenderScene {
     private _cameras: Camera[] = [];
     private _models: Model[] = [];
     private readonly _landscapes: LandscapeInstance[] = [];
+    private _initializingLandscapes = 0;
     private _lodGroups: LODGroup[] = []; // LOD Group gathered
     private _batches: DrawBatch2D[] = [];
     private _directionalLights: DirectionalLight[] = [];
@@ -508,6 +510,22 @@ export class RenderScene {
         if (!this._landscapes.includes(landscape)) {
             this._landscapes.push(landscape);
         }
+    }
+
+    /** @engineInternal Includes asynchronous initialization before runtimes are published. */
+    public beginLandscapeInitialization (): void {
+        ++this._initializingLandscapes;
+    }
+
+    /** @engineInternal Balance on successful initialization, disable or destruction. */
+    public endLandscapeInitialization (): void {
+        assert(this._initializingLandscapes > 0);
+        --this._initializingLandscapes;
+    }
+
+    /** Initial terrain resources have reached the configured LOD/capacity target. */
+    public isReady (): boolean {
+        return this._initializingLandscapes === 0 && this._landscapes.every((landscape) => landscape.isReady());
     }
 
     /** @engineInternal Detach a LandscapeInstance before releasing its runtime. */

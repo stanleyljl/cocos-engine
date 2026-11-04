@@ -473,6 +473,9 @@ export class Game extends EventTarget {
     private _deltaTime = 0.0;
     private _useFixedDeltaTime = false;
     private _shouldLoadLaunchScene = true;
+    // One readiness decision per tick, shared by the splash draws for both XR eyes.
+    private _splashSceneReady = false;
+    private _splashEye = 0;
 
     /**
      * @en The event delegate pre base module initialization. At this point you can not use pal/logging/sys/settings API.
@@ -630,6 +633,9 @@ export class Game extends EventTarget {
             this.pause();
             this.resume();
             this._shouldLoadLaunchScene = true;
+            this._splashSceneReady = false;
+            this._splashEye = 0;
+            SplashScreen.releaseInstance();
         }).then((): Promise<void[]> => {
             if (WECHAT) {
                 return Promise.resolve([]);
@@ -1064,9 +1070,11 @@ export class Game extends EventTarget {
         if (!WECHAT && SplashScreen.instance && !SplashScreen.instance.isFinished) {
             SplashScreen.instance.update(this._calculateDT(false));
         } else if (this._shouldLoadLaunchScene) {
-            if (!WECHAT) {
+            if (!WECHAT && !SplashScreen.instance?.enabled) {
                 SplashScreen.releaseInstance();
             }
+            // Animation duration does not end loading. Keep the configured splash
+            // alive while the launch scene initializes and prepares its resources.
             this._shouldLoadLaunchScene = false;
             const launchScene = querySettings(SettingsCategory.LAUNCH, 'launchScene') as string;
             if (launchScene) {
@@ -1083,8 +1091,38 @@ export class Game extends EventTarget {
                 this.onStart?.();
             }
         } else {
+            this._splashEye = 0;
             director.tick(this._calculateDT(false));
+            const splash = SplashScreen.instance;
+            if (splash) {
+                const scene = director.getScene();
+                // Check after component updates: start() may enable the first camera.
+                // A loaded scene without enabled cameras needs no presentation wait.
+                const noEnabledCamera = scene !== null && !scene.renderScene!.cameras.some((camera) => camera.enabled);
+                if (this._splashSceneReady || noEnabledCamera) {
+                    SplashScreen.releaseInstance();
+                } else if (this._splashEye === 0) {
+                    // Keep drawing while the scene is loading or rendering is deferred.
+                    splash.update(0);
+                }
+            }
         }
+    }
+
+    private _onAfterRender (): void {
+        const splash = SplashScreen.instance;
+        if (this._shouldLoadLaunchScene || !splash?.enabled) {
+            return;
+        }
+        if (this._splashEye === 0) {
+            const scene = director.getScene();
+            this._splashSceneReady = scene !== null && scene.renderScene!.isReady();
+        }
+        if (!this._splashSceneReady) {
+            // Preparation continues normally; present the existing splash until ready.
+            splash.draw(this._splashEye);
+        }
+        ++this._splashEye;
     }
 
     private initPacer (): void {
@@ -1096,6 +1134,7 @@ export class Game extends EventTarget {
     }
 
     private _initEvents (): void {
+        director.on(DirectorEvent.AFTER_RENDER, this._onAfterRender, this);
         systemInfo.on('show', this._onShow, this);
         systemInfo.on('hide', this._onHide, this);
         systemInfo.on('close', this._onClose, this);

@@ -116,8 +116,14 @@ export class SplashScreen {
 
     private scaleSize = 1;
 
+    /** Animation duration has elapsed; Game separately waits for scene readiness. */
     public get isFinished (): boolean {
         return this._curTime >= this.settings.totalTime;
+    }
+
+    /** Whether the project configured a drawable startup screen. */
+    public get enabled (): boolean {
+        return this.settings.totalTime > 0;
     }
 
     set curTime (val) {
@@ -296,6 +302,15 @@ export class SplashScreen {
     }
 
     public update (deltaTime: number): void {
+        this.updateFrame(deltaTime, true, 0);
+    }
+
+    /** @engineInternal Redraw the last animation state inside Root's acquired frame. */
+    public draw (eye: number): void {
+        this.updateFrame(0, false, eye);
+    }
+
+    private updateFrame (deltaTime: number, present: boolean, eye: number): void {
         const settings = this.settings;
         const { device, swapchain } = this;
         const { capabilities } = device;
@@ -388,7 +403,7 @@ export class SplashScreen {
             setMaterialProperty(watermarkMat, 'u_projection', this.projection);
             watermarkMat.passes[0].update();
         }
-        this.frame();
+        this.frame(present, eye);
     }
 
     private initBG (): void {
@@ -506,15 +521,18 @@ export class SplashScreen {
         pass.descriptorSet.update();
     }
 
-    private frame (): void {
+    private frame (present: boolean, eye: number): void {
         const { device, swapchain, projection, bgMat, logoMat, watermarkMat, settings, quadAssmebler } = this;
         const { capabilities } = device;
 
         if (!sys.isXR || xr.entry.isRenderAllowable()) {
-            const renderSize = sys.isXR ? 2 : 1;
-            for (let xrEye = 0; xrEye < renderSize; xrEye++) {
+            const renderSize = present && sys.isXR ? 2 : 1;
+            for (let index = 0; index < renderSize; ++index) {
+                const xrEye = present ? index : eye;
                 if (USE_XR && sys.isXR) {
-                    xr.entry.renderLoopStart(xrEye);
+                    if (present) {
+                        xr.entry.renderLoopStart(xrEye);
+                    }
                     const xrFov = xr.entry.getEyeFov(xrEye);
                     // device's fov may be asymmetry
                     let radioLeft = 1.0;
@@ -557,7 +575,9 @@ export class SplashScreen {
                 // for legacy pipeline
                 device.enableAutoBarrier(true);
 
-                device.acquire([swapchain]);
+                if (present) {
+                    device.acquire([swapchain]);
+                }
                 // record command
                 const cmdBuff = this.cmdBuff;
                 const framebuffer = cclegacy.director.root!.mainWindow!.framebuffer as Framebuffer;
@@ -621,10 +641,12 @@ export class SplashScreen {
                 cmdBuff.end();
                 device.flushCommands([cmdBuff]);
                 device.queue.submit([cmdBuff]);
-                device.present();
+                if (present) {
+                    device.present();
+                }
                 device.enableAutoBarrier(!legacyCC.rendering);
 
-                if (USE_XR && sys.isXR) {
+                if (present && USE_XR && sys.isXR) {
                     xr.entry.renderLoopEnd(xrEye);
                 }
             }

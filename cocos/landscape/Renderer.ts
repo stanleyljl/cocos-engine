@@ -139,6 +139,7 @@ export class LandscapeRenderer {
         return true;
     }
 
+    // Reports initial streaming completion; ready nodes render independently.
     public isReady (): boolean {
         return this._ready;
     }
@@ -268,9 +269,7 @@ export class LandscapeRenderer {
             this._quadtree.clearChangedNodes();
         }
         this._decals.updateView(this._viewPosition);
-        if (!this._ready) {
-            return;
-        }
+        // Selection contains only resource-backed nodes, including during startup.
         for (const { model } of this._draws.values()) {
             model.updateTransform(frame);
             model.updateUBOs(frame);
@@ -332,9 +331,6 @@ export class LandscapeRenderer {
     }
 
     public collectPassModels (frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): void {
-        if (!this._ready) {
-            return;
-        }
         const origin = this._node.worldPosition;
         const lift = this._debugData.decal3DEnabled ? Math.max(0, ...this._asset.decalLayers().map((layer) => layer.heightScale)) : 0;
         this._quadtree.cull((address, renderable) => {
@@ -381,12 +377,13 @@ export class LandscapeRenderer {
         this._decals.onGlobalPipelineStateChanged();
     }
 
-    public addDecal (id: number, x: number, z: number, size: number, layer: number): boolean {
-        if (!this._decals.addDecal(id, { x, z, size, layer })) {
-            return false;
+    public addDecal (x: number, z: number, size: number, layer: number): number {
+        const id = this._decals.addDecal({ x, z, size, layer });
+        if (id === 0) {
+            return 0;
         }
         this._vt!.invalidate({ x, z, size });
-        return true;
+        return id;
     }
 
     public removeDecal (id: number): boolean {

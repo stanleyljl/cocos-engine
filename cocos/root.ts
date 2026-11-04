@@ -800,7 +800,6 @@ export class Root {
             director.emit(Director.EVENT_BEFORE_RENDER);
             this._pipeline.render(cameraList);
             director.emit(Director.EVENT_AFTER_RENDER);
-            director.emit(Director.EVENT_BEFORE_PRESENT);
             this._device.present();
         }
 

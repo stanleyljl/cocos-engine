@@ -72,7 +72,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     private _receiveShadow = true;
     private _globalColorStrength = 0.1;
     private _globalColorMap: Texture2D | null = null;
-    private _nextDecalId = 1;
     private readonly _lodViewPosition = new Vec3();
     private readonly _passes: PassSelection[] = [];
 
@@ -313,11 +312,11 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     }
 
     public addDecal (x: number, z: number, size: number, layer: number): number {
-        if (!this._renderer || this._nextDecalId > 0xFFFFFFFF || !this._renderer.addDecal(this._nextDecalId, x, z, size, layer)) {
+        const id = this._renderer ? this._renderer.addDecal(x, z, size, layer) : 0;
+        if (id === 0) {
             warn(`[Landscape] Cannot add decal: initialize terrain, use a valid preloaded layer and region, and keep at most ${config.DECAL_INSTANCE_MAX} instances.`);
-            return 0;
         }
-        return this._nextDecalId++;
+        return id;
     }
 
     public removeDecal (id: number): boolean {

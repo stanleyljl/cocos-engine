@@ -167,12 +167,12 @@ void LandscapeInstance::onDisable() {
 }
 
 uint32_t LandscapeInstance::addDecal(float x, float z, float size, uint32_t layer) {
-    if (!_renderer || _nextDecalId == 0 || !_renderer->addDecal(_nextDecalId, x, z, size, layer)) {
+    const uint32_t id = _renderer ? _renderer->addDecal(x, z, size, layer) : 0;
+    if (id == 0) {
         CC_LOG_WARNING("[Landscape] Cannot add decal: initialize terrain, use a valid preloaded layer and region, and keep at most %u instances.",
                        config::DECAL_INSTANCE_MAX);
-        return 0;
     }
-    return _nextDecalId++;
+    return id;
 }
 
 bool LandscapeInstance::removeDecal(uint32_t id) {
@@ -372,6 +372,7 @@ void LandscapeInstance::onGlobalPipelineStateChanged() {
 bool LandscapeInstance::isReady() const {
     return _renderer != nullptr && _renderer->isReady();
 }
+
 
 void LandscapeInstance::setHoleMode(uint32_t mode) {
     _holeMode = mode == 0U ? 0U : 1U;

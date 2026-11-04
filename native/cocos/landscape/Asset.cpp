@@ -383,9 +383,7 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _nodeIndexLayout = manifest.nodeIndexLayout;
     _heightRanges = std::move(manifest.ranges);
     _minimumNormalY = std::move(manifest.minimumNormalY);
-#if CC_LANDSCAPE_DEBUG
-    CC_LOG_INFO("[Landscape] Asset: sectors=%ux%u levels=%u minTileLevel=%u materials=%zu decals=%zu", _data.sectorsX, _data.sectorsZ, _data.maxLevel + 1U, _data.minTileLevel, _materialLayers.size(), _decals.size());
-#endif
+
     return true;
 }
 

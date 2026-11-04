@@ -368,9 +368,7 @@ void LandscapeRenderer::syncRenderables(uint32_t frame, gfx::Texture *previousMa
         _quadtree.clearChangedNodes();
     }
     _decals->updateView(_viewPosition);
-    if (!isReady()) {
-        return;
-    }
+    // Selection contains only resource-backed nodes, including during startup.
     for (const auto &entry : _draws) {
         const auto &draw = entry.second;
         if (draw.model) {
@@ -382,9 +380,6 @@ void LandscapeRenderer::syncRenderables(uint32_t frame, gfx::Texture *previousMa
 }
 
 void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const {
-    if (!isReady()) {
-        return;
-    }
     const auto &origin = _node->getWorldPosition();
     float decalLift = 0;
     if (_debugData.decal3DEnabled) {
@@ -445,12 +440,13 @@ void LandscapeRenderer::onGlobalPipelineStateChanged() {
     _decals->onGlobalPipelineStateChanged();
 }
 
-bool LandscapeRenderer::addDecal(uint32_t id, float x, float z, float size, uint32_t layer) {
-    if (!_decals->addDecal(id, {x, z, size, layer})) {
-        return false;
+uint32_t LandscapeRenderer::addDecal(float x, float z, float size, uint32_t layer) {
+    const uint32_t id = _decals->addDecal({x, z, size, layer});
+    if (id == 0) {
+        return 0;
     }
     _vtRenderer->invalidate({x, z, size});
-    return true;
+    return id;
 }
 
 bool LandscapeRenderer::removeDecal(uint32_t id) {
