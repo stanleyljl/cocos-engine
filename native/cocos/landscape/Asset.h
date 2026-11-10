@@ -103,6 +103,9 @@ public:
     static Uint16Array decodeSamples(const Uint8Array &png, uint32_t resolution);
 
     const ccstd::vector<DecalLayer> &decalLayers() const { return _decalLayers; }
+    float maxDecalHeight() const {
+        return _maxDecalHeight;
+    }
     const ccstd::vector<Decal> &decals() const { return _decals; }
     float decalNearDistance() const { return _decalNearDistance; }
     float decalFarDistance() const { return _decalFarDistance; }
@@ -133,6 +136,7 @@ private:
     ccstd::vector<MaterialLayer> _materialLayers;
     uint32_t _materialResolution{0};
     ccstd::vector<DecalLayer> _decalLayers;
+    float _maxDecalHeight{0.0F}; // Derived from decal layers; recomputed on every successful load.
     ccstd::vector<Decal> _decals;
     uint32_t _decalResolution{1};
     float _decalNearDistance{12.0F};

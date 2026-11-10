@@ -81,12 +81,6 @@ static void setLandscapeInstanceAttribute(scene::Model *model, TypedArray &scrat
     model->setInstancedAttribute(name, scratch);
 }
 
-void LandscapeGridParams::apply(scene::Model *model, TypedArray &scratch) const {
-    setLandscapeInstanceAttribute(model, scratch, "a_gridInst", grid);
-    setLandscapeInstanceAttribute(model, scratch, "a_tileInst", tile);
-    setLandscapeInstanceAttribute(model, scratch, "a_mappingInst", mapping);
-}
-
 DecalRenderer::DecalRenderer() = default;
 DecalRenderer::~DecalRenderer() {
     for (auto &entry : _nodes) {
@@ -304,7 +298,9 @@ void DecalRenderer::uploadPageDecals() {
 }
 
 void DecalRenderer::updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged) {
-    node.gridParams.apply(draw.model, _scratch);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_gridInst", node.gridParams.grid);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_tileInst", node.gridParams.tile);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_mappingInst", node.gridParams.mapping);
     if (boundsChanged) {
         const auto &d = _instances[draw.decal].decal;
         const float lift = _asset->decalLayers()[d.layer].heightScale;

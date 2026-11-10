@@ -44,8 +44,8 @@ class LandscapeResidency;
 // Direct vertex-buffer layout: page, region and splat source (RGBA32F).
 struct VTPageInstance {
     Vec4 pageInfo; // X: physical VT slot; Y: decal count; Z: triplanar variant; W: unused.
-    Vec4 region;
-    Vec4 splatSource;
+    Vec4 region; // XY: page minimum XZ in landscape-local coordinates; Z: side length; W: unused.
+    Vec4 splatSource; // XY: source tile minimum XZ in landscape-local coordinates; Z: side length; W: splatmap array layer.
     uint32_t physicalSlot() const { return static_cast<uint32_t>(pageInfo.x); }
 };
 
@@ -138,7 +138,7 @@ public:
     bool init(gfx::Device *device, RenderTexture &composition, uint32_t atlasSize);
     Texture2D *atlas() const;
     gfx::Texture *albedo() const;
-    gfx::Texture *normalRoughnessAO() const;
+    gfx::Texture *normalRoughness() const;
     void begin(gfx::CommandBuffer &commands, bool discardContents);
     void record(gfx::CommandBuffer &commands, uint32_t slot);
     void end(gfx::CommandBuffer &commands);

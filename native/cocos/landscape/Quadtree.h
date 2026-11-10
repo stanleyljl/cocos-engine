@@ -90,7 +90,7 @@ public:
 
     // Traversal helpers. Boolean callbacks return false to skip a node's descendants.
     void forEachNode(const std::function<bool(const Node &)> &visit) const;
-    void cull(const std::function<bool(NodeAddress, bool)> &visit) const;
+    void cull(const std::function<bool(const Node &)> &visit) const;
     void forEachRenderable(const std::function<void(const Node &)> &visit) const;
 
 private:

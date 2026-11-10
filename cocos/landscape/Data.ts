@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import type { Vec3 } from '../core/math';
+import { Vec4 } from '../core/math';
 import * as config from './Config';
 
 export interface LandscapePoint {
@@ -9,6 +10,13 @@ export interface LandscapePoint {
 
 export interface LandscapeRegion extends LandscapePoint {
     size: number;
+}
+
+// Grid instance parameters shared by terrain and displaced decals.
+export class LandscapeGridParams {
+    public grid = new Vec4(); // landscape-local XZ origin, size, geometry LOD
+    public tile = new Vec4(); // source tile XZ origin, size, texture array layer
+    public mapping = new Vec4(); // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
 }
 
 export interface HeightRange {
@@ -136,8 +144,8 @@ export class VTPageSources {
 export class LandscapeData {
     public sectorsX = 0;
     public sectorsZ = 0;
-    public maxLevel = 0;
-    public minTileLevel = 0;
+    public maxTileLevel = 0; // Coarsest source tile level; also the sector root level.
+    public minTileLevel = 0; // Finest source tile level; finer geometry nodes sample ancestor tiles.
     public sectorSize = 0;
     public heightScale = 0;
     public heightBias = 0;
@@ -158,14 +166,14 @@ export class LandscapeData {
     public valid (): boolean {
         return Number.isInteger(this.sectorsX) && Number.isInteger(this.sectorsZ)
             && this.sectorsX > 0 && this.sectorsZ > 0
-            && Number.isInteger(this.maxLevel) && this.maxLevel >= 0 && this.maxLevel < config.MAX_LOD_LEVELS
+            && Number.isInteger(this.maxTileLevel) && this.maxTileLevel >= 0 && this.maxTileLevel < config.MAX_LOD_LEVELS
             && this.sectorsX * this.sectorsZ <= config.MAX_SECTOR_COUNT
-            && Number.isInteger(this.minTileLevel) && this.minTileLevel >= 0 && this.minTileLevel <= this.maxLevel
+            && Number.isInteger(this.minTileLevel) && this.minTileLevel >= 0 && this.minTileLevel <= this.maxTileLevel
             && this.sectorSize > 0 && this.heightScale > 0;
     }
 
     public nodesPerSectorSide (level: number): number {
-        return level >= 0 && level <= this.maxLevel && this.maxLevel < config.MAX_LOD_LEVELS ? 2 ** (this.maxLevel - level) : 0;
+        return level >= 0 && level <= this.maxTileLevel && this.maxTileLevel < config.MAX_LOD_LEVELS ? 2 ** (this.maxTileLevel - level) : 0;
     }
 
     public nodeSize (level: number): number {
@@ -208,13 +216,13 @@ export class NodeIndexLayout {
     private _nodesPerSector = 0;
 
     constructor (data?: LandscapeData) {
-        if (!data || data.sectorsX <= 0 || data.sectorsZ <= 0 || data.maxLevel >= config.MAX_LOD_LEVELS
+        if (!data || data.sectorsX <= 0 || data.sectorsZ <= 0 || data.maxTileLevel >= config.MAX_LOD_LEVELS
             || data.sectorsX * data.sectorsZ > config.MAX_SECTOR_COUNT) {
             return;
         }
         this._sectorsX = data.sectorsX;
         this._sectorsZ = data.sectorsZ;
-        for (let level = 0; level <= data.maxLevel; ++level) {
+        for (let level = 0; level <= data.maxTileLevel; ++level) {
             const side = data.nodesPerSectorSide(level);
             this._levels.push({ nodesPerSide: side, offset: this._nodesPerSector });
             this._nodesPerSector += side * side;

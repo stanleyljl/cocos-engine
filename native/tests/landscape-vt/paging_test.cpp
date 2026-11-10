@@ -106,7 +106,7 @@ Texture2D *VTPageCompressor::atlas() const {
 gfx::Texture *VTPageCompressor::albedo() const {
     std::abort();
 }
-gfx::Texture *VTPageCompressor::normalRoughnessAO() const {
+gfx::Texture *VTPageCompressor::normalRoughness() const {
     std::abort();
 }
 void VTPageCompressor::begin(gfx::CommandBuffer &, bool) {
@@ -184,7 +184,7 @@ public:
         if (initializeResources) {
             for (uint32_t z = 0; z < data.sectorsZ; ++z) {
                 for (uint32_t x = 0; x < data.sectorsX; ++x) {
-                    const NodeAddress address{data.maxLevel, x, z};
+                    const NodeAddress address{data.maxTileLevel, x, z};
                     require(publish(address, testMapping(address)), "Initialize synthetic sector resources");
                 }
             }
@@ -371,7 +371,7 @@ LandscapeData cacheData(uint32_t root, uint32_t sectorsX = 1, uint32_t sectorsZ 
     LandscapeData d;
     d.sectorsX = sectorsX;
     d.sectorsZ = sectorsZ;
-    d.maxLevel = std::min(root, 8U);
+    d.maxTileLevel = std::min(root, 8U);
     d.sectorSize = static_cast<float>(1U << root);
     d.heightScale = 1;
     return d;
@@ -390,7 +390,7 @@ void testSectorCountLimit() {
         const VTPageLayout layout(d.sectorSize);
         for (uint32_t z = 0; z < d.sectorsZ; ++z) {
             for (uint32_t x = 0; x < d.sectorsX; ++x) {
-                roots.push_back({d.maxLevel, x, z});
+                roots.push_back({d.maxTileLevel, x, z});
                 rootPages.push_back({layout.rootLevel(), x, z});
             }
         }
@@ -573,7 +573,7 @@ void testRegionalInvalidation() {
 // boundary, and no avoidable coarse draws. Does not use production edge masks.
 void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = false) {
     const auto keys = target ? targetKeys(selection) : renderableKeys(selection);
-    const uint32_t w = d.sectorsX << d.maxLevel, h = d.sectorsZ << d.maxLevel;
+    const uint32_t w = d.sectorsX << d.maxTileLevel, h = d.sectorsZ << d.maxTileLevel;
     std::vector<int> cells(w * h, -1);
     for (const auto key : keys) {
         const auto n = NodeAddress::fromKey(key);
@@ -747,7 +747,7 @@ public:
             }
             require(node.loaded, "Ready node must retain its loaded source data");
             const auto address = node.geometry.address();
-            if (address.level < data.maxLevel) {
+            if (address.level < data.maxTileLevel) {
                 require(tree.find(address.ancestor(address.level + 1))->ready, "Ready ancestor invariant violated");
             }
             const auto source = address.ancestor(std::max(address.level, data.minTileLevel));
@@ -883,14 +883,15 @@ void testSingleRoot() {
             side *= 2;
             ++levels;
         }
-        require(rootAddress(tree).level == d.maxLevel + levels, "Incorrect padded global root");
+        require(rootAddress(tree).level == d.maxTileLevel + levels, "Incorrect padded global root");
         uint32_t renderableCount = 0;
-        tree.cull([&](NodeAddress node, bool renderable) {
-            if (renderable) {
+        tree.cull([&](const Quadtree::Node &treeNode) {
+            const auto node = treeNode.geometry.address();
+            if (treeNode.renderable) {
                 ++renderableCount;
-                require(node.level == d.maxLevel && node.x < d.sectorsX && node.z < d.sectorsZ, "Absent sector became a renderable");
+                require(node.level == d.maxTileLevel && node.x < d.sectorsX && node.z < d.sectorsZ, "Absent sector became a renderable");
             }
-            if (node.level > d.maxLevel) {
+            if (node.level > d.maxTileLevel) {
                 require(childMask(node) != 0, "Empty management branch");
             }
             return true;
@@ -898,10 +899,10 @@ void testSingleRoot() {
         require(renderableCount == d.sectorsX * d.sectorsZ, "Single root does not cover all sectors");
         if (d.sectorsX == 3 && d.sectorsZ == 3) {
             require(childMask(rootAddress(tree)) == 15, "3x3 root must have four valid quadrants");
-            require(childMask({d.maxLevel + 1, 0, 0}) == 15, "3x3 upper-left group");
-            require(childMask({d.maxLevel + 1, 1, 0}) == 5, "3x3 upper-right group");
-            require(childMask({d.maxLevel + 1, 0, 1}) == 3, "3x3 lower-left group");
-            require(childMask({d.maxLevel + 1, 1, 1}) == 1, "3x3 lower-right group");
+            require(childMask({d.maxTileLevel + 1, 0, 0}) == 15, "3x3 upper-left group");
+            require(childMask({d.maxTileLevel + 1, 1, 0}) == 5, "3x3 upper-right group");
+            require(childMask({d.maxTileLevel + 1, 0, 1}) == 3, "3x3 lower-left group");
+            require(childMask({d.maxTileLevel + 1, 1, 1}) == 1, "3x3 lower-right group");
         }
         if (levels) {
             require(!tree.publish(rootAddress(tree), testMapping(rootAddress(tree))), "Management root must not own render resources");
@@ -955,7 +956,7 @@ void testReadySelection() {
     // retain coarse render nodes despite ready fine resources at the boundary.
     for (uint32_t round = 0; round < 4; ++round) {
         for (const auto &request : tree.requests()) {
-            const auto owner = request.ancestor(data.maxLevel);
+            const auto owner = request.ancestor(data.maxTileLevel);
             if (owner.x == 0 && owner.z == 0 && !tree.find(request)->ready) {
                 require(tree.publish(request, testMapping(request)), "Load fine boundary resources");
             }
@@ -996,14 +997,14 @@ void testUpdateStages() {
     require(targetKeys(tree).size() > data.sectorsX * data.sectorsZ, "Target stage waited for resources");
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            const NodeAddress address{data.maxLevel, x, z};
+            const NodeAddress address{data.maxTileLevel, x, z};
             require(tree.publish(address, testMapping(address)), "Prepare initial coverage without selecting draws");
         }
     }
     require(tree.sectorRootsReady() && renderableKeys(tree).size() == 0, "Resource readiness must be independent of render selection");
     // Several publications may share one resource stage. No intermediate draw
     // selection is needed to request the next generation of resources.
-    for (uint32_t level = 0; level < data.maxLevel; ++level) {
+    for (uint32_t level = 0; level < data.maxTileLevel; ++level) {
         for (const auto &request : tree.requests()) {
             if (!tree.find(request)->ready) {
                 require(tree.publish(request, testMapping(request)), "Prepare descendants before selecting draws");
@@ -1042,13 +1043,14 @@ void testCommittedVisibility() {
     // The frustum-like box at Y=[1,4] rejects the fine target, not the coarse draw.
     const auto visible = [&](double x0, double z0, double x1, double z1) {
         ccstd::unordered_set<uint64_t> result;
-        selection.cull([&](NodeAddress n, bool renderable) {
+        selection.cull([&](const Quadtree::Node &treeNode) {
+            const auto n = treeNode.geometry.address();
             const double size = selection.region(n).size;
             const double lowX = n.x * size;
             const double lowZ = n.z * size;
             const double maxY = n.level == 0 ? 0.0 : 10.0;
             const bool intersects = lowX < x1 && lowX + size > x0 && lowZ < z1 && lowZ + size > z0 && maxY >= 1.0;
-            if (intersects && renderable) {
+            if (intersects && treeNode.renderable) {
                 require(result.insert(n.key()).second, "Duplicate visible renderable");
             }
             return intersects;
@@ -1072,10 +1074,11 @@ void testCommittedVisibility() {
     require(shadow.size() == 1 && shadow.count(NodeAddress{5, 1, 1}.key()),
             "Pass visibility leaked the main camera's target selection");
     uint32_t visited = 0;
-    selection.cull([&](NodeAddress n, bool renderable) {
+    selection.cull([&](const Quadtree::Node &treeNode) {
+        const auto n = treeNode.geometry.address();
         ++visited;
         require(n.level == rootAddress(selection).level, "Rejected root still traversed its children");
-        require(renderable == (renderableKeys(selection).count(n.key()) != 0), "Incorrect committed renderable classification");
+        require(treeNode.renderable == (renderableKeys(selection).count(n.key()) != 0), "Incorrect committed renderable classification");
         return false;
     });
     require(visited == 1,
@@ -1149,7 +1152,7 @@ void testMaterialPublication() {
     const auto address = NodeAddress::fromKey(*before.begin());
     auto *node = tree.find(address);
     const auto oldMaterial = node->material;
-    auto replacement = testMapping(address.ancestor(data.maxLevel));
+    auto replacement = testMapping(address.ancestor(data.maxTileLevel));
     require(node->ready && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
     tree.clearChangedNodes();
     require(tree.publish(address, replacement), "Material refresh publication failed");
@@ -1228,7 +1231,7 @@ void testDistanceAndPasses() {
         ccstd::unordered_set<uint64_t> splits;
         for (const auto &candidate : tree.requests()) {
             if (!tree.find(candidate)->ready) {
-                splits.insert(candidate.ancestor(data.maxLevel).key());
+                splits.insert(candidate.ancestor(data.maxTileLevel).key());
             }
         }
         tree.forEachRenderable([&](const Quadtree::Node &renderable) {
@@ -1299,7 +1302,7 @@ void testCameraRotation() {
     // Repeat with no fine data, incomplete siblings, and fully loaded detail.
     for (uint32_t phase = 0; phase < 3; ++phase) {
         if (phase == 1) {
-            auto &sector = *tree.find({data.maxLevel, 0, 0});
+            auto &sector = *tree.find({data.maxTileLevel, 0, 0});
             for (uint32_t q = 0; q < 3; ++q) {
                 const auto address = sector.children[q].geometry.address();
                 require(tree.publish(address, testMapping(address)), "Rotation setup could not publish partial siblings");
@@ -1349,7 +1352,7 @@ void testCoordinateLayouts() {
         LandscapeData data;
         data.sectorsX = 2;
         data.sectorsZ = 3;
-        data.maxLevel = root;
+        data.maxTileLevel = root;
         data.sectorSize = 1000;
         const NodeIndexLayout layout(data);
         size_t expected = 0;
@@ -1405,7 +1408,7 @@ void testCoordinateLayouts() {
                     data.nodeAtClamped(level, {after, data.sectorSize}).z == side,
                     "Float position at/after sector edge selected the previous sector");
         }
-        data.maxLevel = config::MAX_LOD_LEVELS;
+        data.maxTileLevel = config::MAX_LOD_LEVELS;
         require(NodeIndexLayout(data).nodeCount() == 0, "Invalid LOD must produce an empty layout");
         require(layout.nodeCount() == expected, "Layout must own its dimension snapshot");
     }
@@ -1505,7 +1508,7 @@ void testCliffCulling() {
     require(pages.initPages(data), "Initialize cliff culling metadata");
     std::fill(pages.slopes.begin(), pages.slopes.end(), 1.0F);
     const NodeIndexLayout index(data);
-    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
+    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
         pages.slopes[index.globalNodeIndex(level, 8U >> level, 2U >> level)] = 0.4F;
     }
     require(pages.selectSources({3, 0, 0}, true, true).projections.empty(), "Ordinary pages must use the XZ shader even when triplanar is enabled");
@@ -1788,11 +1791,11 @@ std::string pagingParityTrace() {
             require(first.has_value(), "Material replacement needs a committed draw");
             const auto before = renderableKeys(tree);
             tree.clearChangedNodes();
-            const auto mapping = testMapping(first->ancestor(data.maxLevel));
+            const auto mapping = testMapping(first->ancestor(data.maxTileLevel));
             require(tree.publish(*first, mapping) && tree.selectRenderables(), "Material replacement failed");
             require(renderableKeys(tree) == before && !tree.renderSelectionChanged(), "Material replacement changed geometry");
             require(tree.changedNodes().size() == 1 && tree.changedNodes().count(first->key()), "Replacement did not update its draw binding");
-            trace << "material " << parityAddress(*first) << ' ' << parityAddress(first->ancestor(data.maxLevel)) << '\n';
+            trace << "material " << parityAddress(*first) << ' ' << parityAddress(first->ancestor(data.maxTileLevel)) << '\n';
         } else if (command == "reserve" || command == "compose" || command == "invalidate") {
             if (command == "reserve") {
                 uint32_t count;

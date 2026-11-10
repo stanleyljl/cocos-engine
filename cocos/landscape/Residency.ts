@@ -107,7 +107,7 @@ export class LandscapeResidency {
 
     public canReserve (sources: readonly NodeAddress[]): boolean {
         return sources.length <= this._capacity && sources.every((source) => source.level >= this._data.minTileLevel
-            && source.level <= this._data.maxLevel && source.x >= 0 && source.z >= 0
+            && source.level <= this._data.maxTileLevel && source.x >= 0 && source.z >= 0
             && source.x < this._data.nodesX(source.level) && source.z < this._data.nodesZ(source.level));
     }
 

@@ -527,10 +527,10 @@ CCProgram vt-compose-fs %{
     surface.normal = normalize(frameTangent * surface.normal.x + frameBitangent * surface.normal.y +
                                shadingNormal * surface.normal.z);
     // Three signed components filter continuously, even when the composed
-    // normal points below the horizon. Reuse the otherwise unused albedo alpha.
+    // normal points below the horizon. Store XYZ together with roughness.
     // Every page uses terrain-local space, independent of its source precision.
-    albedoOut = vec4(surface.albedo, surface.normal.y * 0.5 + 0.5);
-    normalOut = vec4(surface.normal.xz * 0.5 + 0.5, surface.roughness, surface.ao);
+    albedoOut = vec4(surface.albedo, surface.ao);
+    normalOut = vec4(surface.normal * 0.5 + 0.5, surface.roughness);
   }
   #else
   void main() { gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0); }

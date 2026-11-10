@@ -118,27 +118,27 @@ function main () {
     }
     const sectorsX = safeInteger(manifest.sectorCount[0], 'Manifest sectorCount[0]', 1);
     const sectorsY = safeInteger(manifest.sectorCount[1], 'Manifest sectorCount[1]', 1);
-    const maxLevel = safeInteger(manifest.maxLevel, 'Manifest maxLevel', 0, 8);
+    const maxTileLevel = safeInteger(manifest.maxTileLevel, 'Manifest maxTileLevel', 0, 8);
     const tileSize = 129;
-    const minTileLevel = safeInteger(manifest.minTileLevel, 'Manifest minTileLevel', 0, maxLevel);
+    const minTileLevel = safeInteger(manifest.minTileLevel, 'Manifest minTileLevel', 0, maxTileLevel);
     const scaleValue = manifest.heightScale;
     const biasValue = manifest.heightBias;
     const scale = readNumber(scaleValue, 'Manifest heightScale');
     const bias = readNumber(biasValue, 'Manifest heightBias');
     if (scale <= 0) fail('Manifest heightScale must be positive');
-    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxLevel + 1) fail('Manifest requires maxLevel + 1 levels');
+    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxTileLevel + 1) fail('Manifest requires maxTileLevel + 1 levels');
     const levelEntries = new Map();
     for (const [level, lv] of manifest.levels.entries()) {
         if (!lv || typeof lv !== 'object' || Array.isArray(lv)) fail('Manifest levels[] contains a malformed entry');
         levelEntries.set(level, lv);
     }
-    for (let level = 0; level <= maxLevel; ++level) {
+    for (let level = 0; level <= maxTileLevel; ++level) {
         if (!levelEntries.has(level)) fail(`Manifest is missing level L${level}`);
     }
 
     const bounds = [];
-    for (let level = 0; level <= maxLevel; ++level) {
-        const divisions = 1 << (maxLevel - level); // L0 = finest = most divisions
+    for (let level = 0; level <= maxTileLevel; ++level) {
+        const divisions = 1 << (maxTileLevel - level); // L0 = finest = most divisions
         const nx = safeProduct(sectorsX, divisions, `Level L${level} X dimensions`);
         const nz = safeProduct(sectorsY, divisions, `Level L${level} Z dimensions`);
         const count = safeProduct(nx, nz, `Level L${level} bounds`);
@@ -186,7 +186,7 @@ function main () {
 
     // Bottom-up merge so a node's box encloses its whole subtree. L0 is finest,
     // so a level-L node encloses its four children at level L-1.
-    for (let level = 1; level <= maxLevel; ++level) {
+    for (let level = 1; level <= maxTileLevel; ++level) {
         const { nx, nz, min, max } = bounds[level];
         const cnx = bounds[level - 1].nx;
         const cmin = bounds[level - 1].min;
@@ -209,17 +209,17 @@ function main () {
     }
 
     // Array indices define levels, with L0 finest.
-    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxLevel + 1) fail('Manifest requires maxLevel + 1 levels');
+    if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxTileLevel + 1) fail('Manifest requires maxTileLevel + 1 levels');
     for (const [level, lv] of manifest.levels.entries()) {
-        if (level < 0 || level > maxLevel) fail(`Unexpected level ${level}`);
+        if (level < 0 || level > maxTileLevel) fail(`Unexpected level ${level}`);
         lv.heightRange = { min: bounds[level].min, max: bounds[level].max };
     }
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));
     // Report the world-space span of the root so the effect is easy to verify.
-    const rMin = bias + (bounds[maxLevel].min[0] / HEIGHT_MAX) * scale;
-    const rMax = bias + (bounds[maxLevel].max[0] / HEIGHT_MAX) * scale;
+    const rMin = bias + (bounds[maxTileLevel].min[0] / HEIGHT_MAX) * scale;
+    const rMax = bias + (bounds[maxTileLevel].max[0] / HEIGHT_MAX) * scale;
     console.log(`Patched ${manifestPath}`);
-    console.log(`Root L${maxLevel} node[0] height span: ${rMin.toFixed(1)}m .. ${rMax.toFixed(1)}m (global range is ${bias.toFixed(1)}..${(bias + scale).toFixed(1)})`);
+    console.log(`Root L${maxTileLevel} node[0] height span: ${rMin.toFixed(1)}m .. ${rMax.toFixed(1)}m (global range is ${bias.toFixed(1)}..${(bias + scale).toFixed(1)})`);
 }
 
 try { main(); } catch (e) { /* message already printed */ }

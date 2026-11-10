@@ -65,7 +65,6 @@ class LandscapeAsset;
 class LandscapeSchedule;
 class Quadtree;
 class LandscapeResidency;
-struct LandscapeGridParams;
 
 /**
  * Owns terrain models and material bindings. Landscape owns the single

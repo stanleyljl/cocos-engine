@@ -126,10 +126,10 @@ full 16 bits quantized height in [0, 65535]
 
 LOD numbering follows CDLOD: `L0` is the finest (smallest) node level and
 larger level numbers are progressively coarser, with `Lmax` as the root. The
-global node subdivision at level `L` is `2^(maxLevel-L)` per sector axis.
+global node subdivision at level `L` is `2^(maxTileLevel-L)` per sector axis.
 
 The node coordinates are global within each level. A sector coordinate is
-derived by shifting the node coordinate right by `maxLevel-level`.
+derived by shifting the node coordinate right by `maxTileLevel-level`.
 
 Each level entry in the manifest also carries `heightRange.{min,max}`: per-node
 quantized height bounds (`uint16`, row-major `iz*nx+ix`, global per-level

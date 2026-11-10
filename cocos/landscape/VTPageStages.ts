@@ -17,8 +17,8 @@ const TRIPLANAR_BLEND_SHARPNESS = 4;
 
 export interface VTPageInstance {
     pageInfo: Vec4;
-    region: Vec4;
-    splatSource: Vec4;
+    region: Vec4; // XY: page minimum XZ in landscape-local coordinates; Z: side length; W: unused.
+    splatSource: Vec4; // XY: source tile minimum XZ in landscape-local coordinates; Z: side length; W: splatmap array layer.
 }
 
 function createPipeline (device: Device, pass: Pass, renderPass: RenderPass, ia: InputAssembler): PipelineState {
@@ -30,7 +30,7 @@ function createPipeline (device: Device, pass: Pass, renderPass: RenderPass, ia:
 }
 
 function recordPagePass (commands: CommandBuffer, ia: InputAssembler, renderPass: RenderPass, pass: Pass, pipeline: PipelineState, framebuffer: Framebuffer, size: number, count: number): void {
-    commands.beginRenderPass(renderPass, framebuffer, new Rect(0, 0, size, size), [new Color(0, 0, 0, 1), new Color(0.5, 0.5, 1, 1)], 1, 0);
+    commands.beginRenderPass(renderPass, framebuffer, new Rect(0, 0, size, size), [new Color(0, 0, 0, 1), new Color(0.5, 1, 0.5, 1)], 1, 0);
     commands.bindPipelineState(pipeline);
     commands.bindDescriptorSet(SetIndex.MATERIAL, pass.descriptorSet);
     commands.bindInputAssembler(ia);

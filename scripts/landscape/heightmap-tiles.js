@@ -8,7 +8,7 @@ const DEFAULT_SECTOR_SIZE = 4096;
 // Total X * Y sectors; must match native Config.h.
 const MAX_SECTOR_COUNT = 64;
 const DEFAULT_TILE_SIZE = 129;
-const DEFAULT_MAX_LEVEL = 5;
+const DEFAULT_MAX_TILE_LEVEL = 5;
 const DEFAULT_MIN_TILE_LEVEL = 0;
 const DEFAULT_HEIGHT_SCALE = 2000;
 const DEFAULT_HEIGHT_BIAS = 0;
@@ -49,7 +49,7 @@ function parseArgs (argv) {
         }
         const key = arg.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
         if (!['input', 'out', 'name', 'force', 'procedural', 'sectorsX', 'sectorsY', 'sectorSize',
-            'maxLevel', 'minTileLevel', 'heightScale', 'heightBias'].includes(key)) fail(`Unknown option: ${arg}`);
+            'maxTileLevel', 'minTileLevel', 'heightScale', 'heightBias'].includes(key)) fail(`Unknown option: ${arg}`);
         const next = argv[i + 1];
         if (next === undefined || next.startsWith('--')) {
             result[key] = true;
@@ -149,7 +149,7 @@ Layout options:
   --sectors-y <n>     Sector count on Y (default: 1)
                       Total sectors (X * Y) must not exceed ${MAX_SECTOR_COUNT}
   --sector-size <m>   Sector size in meters (default: 4096)
-  --max-level <n>     Quadtree levels L0..Ln (default: 5)
+  --max-tile-level <n>     Quadtree levels L0..Ln (default: 5)
   --min-tile-level <n> Finest level with a generated tile (default: 0).
                       Levels finer than this (L0..n-1) get NO height tile
                       and share the finest available source grid at L<n>.
@@ -274,7 +274,7 @@ function makeManifest (options) {
         sectorsX,
         sectorsY,
         sectorSize,
-        maxLevel,
+        maxTileLevel,
         minTileLevel,
         heightScale,
         heightBias,
@@ -282,7 +282,7 @@ function makeManifest (options) {
         bounds,
     } = options;
     const levels = [];
-    for (let level = 0; level <= maxLevel; ++level) {
+    for (let level = 0; level <= maxTileLevel; ++level) {
         levels.push({
             // Per-node quantized height bounds, row-major iz*nx+ix (global coords).
             // Runtime builds a tight node AABB: y = heightBias + (v/65535)*heightScale.
@@ -296,7 +296,7 @@ function makeManifest (options) {
     return {
         sectorSizeMeters: sectorSize,
         sectorCount: [sectorsX, sectorsY],
-        maxLevel,
+        maxTileLevel,
         minTileLevel,
         heightScale,
         heightBias,
@@ -327,24 +327,24 @@ function generate (rawOptions) {
     }
     const sectorSize = intOption(options, 'sectorSize', DEFAULT_SECTOR_SIZE);
     const tileSize = DEFAULT_TILE_SIZE;
-    const maxLevel = intOption(options, 'maxLevel', DEFAULT_MAX_LEVEL, 0);
-    if (maxLevel > 8) {
-        fail('--max-level must be <= 8');
+    const maxTileLevel = intOption(options, 'maxTileLevel', DEFAULT_MAX_TILE_LEVEL, 0);
+    if (maxTileLevel > 8) {
+        fail('--max-tile-level must be <= 8');
     }
     const minTileLevel = intOption(options, 'minTileLevel', DEFAULT_MIN_TILE_LEVEL, 0);
     const heightScale = numberOption(options, 'heightScale', DEFAULT_HEIGHT_SCALE);
     const heightBias = numberOption(options, 'heightBias', DEFAULT_HEIGHT_BIAS);
 
-    if (sectorSize % (1 << maxLevel) !== 0) {
-        fail('--sector-size must be divisible by 2^max-level');
+    if (sectorSize % (1 << maxTileLevel) !== 0) {
+        fail('--sector-size must be divisible by 2^max-tile-level');
     }
-    if (minTileLevel > maxLevel) {
-        fail('--min-tile-level must be <= --max-level');
+    if (minTileLevel > maxTileLevel) {
+        fail('--min-tile-level must be <= --max-tile-level');
     }
     // Only tile-generating levels (>= minTileLevel) need an integer source
     // sample step; finer levels have no tile and only need per-node bounds.
-    for (let level = minTileLevel; level <= maxLevel; ++level) {
-        const divisions = 1 << (maxLevel - level);
+    for (let level = minTileLevel; level <= maxTileLevel; ++level) {
+        const divisions = 1 << (maxTileLevel - level);
         const nodeSize = sectorSize / divisions;
         if (nodeSize % (tileSize - 1) !== 0) {
             fail(`Level L${level} does not have an integer source sample step`);
@@ -387,8 +387,8 @@ function generate (rawOptions) {
     // per-level coords). L0 (finest) bounds come from each tile; coarser levels
     // are merged bottom-up below so a node's box encloses its whole subtree.
     const bounds = [];
-    for (let level = 0; level <= maxLevel; ++level) {
-        const divisions = 1 << (maxLevel - level);
+    for (let level = 0; level <= maxTileLevel; ++level) {
+        const divisions = 1 << (maxTileLevel - level);
         const nx = safeProduct(sectorsX, divisions, `Level L${level} X dimensions`);
         const nz = safeProduct(sectorsY, divisions, `Level L${level} Y dimensions`);
         bounds.push({
@@ -399,8 +399,8 @@ function generate (rawOptions) {
         });
     }
 
-    for (let level = 0; level <= maxLevel; ++level) {
-        const divisions = 1 << (maxLevel - level); // L0 = finest = most divisions
+    for (let level = 0; level <= maxTileLevel; ++level) {
+        const divisions = 1 << (maxTileLevel - level); // L0 = finest = most divisions
         const nodeSize = sectorSize / divisions;
         const hasTile = level >= minTileLevel;
         const sampleStep = hasTile ? nodeSize / (tileSize - 1) : 1; // bounds-only fine levels sample at 1m
@@ -437,7 +437,7 @@ function generate (rawOptions) {
     // Bottom-up merge: a node's bound must enclose its 4 children so hierarchical
     // frustum culling never rejects a subtree whose finer detail pokes out. L0 is
     // finest, so a level-L node encloses its four children at level L-1.
-    for (let level = 1; level <= maxLevel; ++level) {
+    for (let level = 1; level <= maxTileLevel; ++level) {
         const nx = bounds[level].nx;
         const nz = bounds[level].nz;
         const cnx = bounds[level - 1].nx;
@@ -462,7 +462,7 @@ function generate (rawOptions) {
         sectorsX,
         sectorsY,
         sectorSize,
-        maxLevel,
+        maxTileLevel,
         minTileLevel,
         heightScale,
         heightBias,

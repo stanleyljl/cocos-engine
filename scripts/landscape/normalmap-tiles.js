@@ -86,14 +86,14 @@ function generateNormalTiles(manifestPath, output) {
     const original = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(original);
     const root = path.dirname(manifestPath);
-    const { sectorSizeMeters: sectorSize, sectorCount, maxLevel, minTileLevel, heightScale } = manifest;
+    const { sectorSizeMeters: sectorSize, sectorCount, maxTileLevel, minTileLevel, heightScale } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2 || sectorCount.some(v => !Number.isInteger(v) || v < 1)
-        || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
+        || !Number.isInteger(maxTileLevel) || maxTileLevel < 0 || maxTileLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxTileLevel
         || typeof sectorSize !== 'number' || sectorSize <= 0 || typeof heightScale !== 'number' || heightScale <= 0) {
         throw new Error('Unsupported height tile layout');
     }
     const resolution = TILE_RESOLUTION;
-    const divisions = 2 ** (maxLevel - minTileLevel);
+    const divisions = 2 ** (maxTileLevel - minTileLevel);
     const edge = resolution - 1;
     const nx = sectorCount[0] * divisions;
     const nz = sectorCount[1] * divisions;
@@ -126,7 +126,7 @@ function generateNormalTiles(manifestPath, output) {
     let normals = normalsFromHeights(heights, width, depth, sectorSize / divisions / edge, heightScale);
     heights = null;
     let tiles = 0;
-    for (let level = minTileLevel; level <= maxLevel; ++level) {
+    for (let level = minTileLevel; level <= maxTileLevel; ++level) {
         const dir = path.join(output, `nodes/L${level}`);
         fs.mkdirSync(dir, { recursive: true });
         for (let z = 0; z < (depth - 1) / edge; ++z) {
@@ -137,7 +137,7 @@ function generateNormalTiles(manifestPath, output) {
             }
         }
         console.log(`L${level}: RGB8 PNG normals written (${width}x${depth} global samples)`);
-        if (level < maxLevel) {
+        if (level < maxTileLevel) {
             ({ normals, width, depth } = downsampleNormals(normals, width, depth));
         }
     }

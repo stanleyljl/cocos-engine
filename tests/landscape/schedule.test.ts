@@ -6,6 +6,37 @@ import { LandscapeResidency } from '../../cocos/landscape/Residency';
 import { LandscapeSchedule } from '../../cocos/landscape/Schedule';
 import { VTRenderer } from '../../cocos/landscape/VTRenderer';
 
+test('reused page sources still check capacity against the current retained set', () => {
+    const first = new NodeAddress(0, 0, 0);
+    const second = new NodeAddress(0, 1, 0);
+    const input = new NodeAddress(0, 2, 0);
+    const page = new VTPageAddress(0, 0, 0);
+    const selectSources = jest.fn(() => {
+        const result = new VTPageSources();
+        result.splat = input;
+        result.normals.fill(input);
+        return result;
+    });
+    const residency = {
+        canReserve: (sources: NodeAddress[]): boolean => sources.length <= 2,
+        layerCount: (): number => 2,
+    } as LandscapeResidency;
+    const pages = {
+        canReserve: (): boolean => true,
+        selectSources,
+    } as unknown as VTRenderer;
+    const schedule = new LandscapeSchedule({} as LandscapeAsset, residency, pages, {} as Quadtree);
+    const pageSources = new Map<string, NodeAddress[]>();
+    expect(schedule['canPrepare']({ sources: [first], pages: [page] }, pageSources)).toBe(true);
+    // The old page must now be rejected, although its source list is reusable.
+    expect(schedule['canPrepare']({ sources: [first, second], pages: [page] }, pageSources)).toBe(false);
+    // A retained source can also satisfy the page's composition demand.
+    expect(schedule['canPrepare']({ sources: [first, input], pages: [page] }, pageSources)).toBe(true);
+    expect(selectSources).toHaveBeenCalledTimes(1);
+    expect(schedule['canPrepare']({ sources: [first], pages: [page] }, new Map())).toBe(true);
+    expect(selectSources).toHaveBeenCalledTimes(2);
+});
+
 // Same deterministic IO/GPU boundaries as native schedule_test.cpp. The actual
 // scheduler, quadtree and mapping layout execute; paging.test covers allocation.
 test.each([false, true])('scheduling preserves delayed sources, cancellation, refresh and duplicate frames (triplanar=%s)', (triplanar) => {
@@ -22,7 +53,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
     let reserved: VTPageAddress[] = [];
     let loaded = new Map<string, boolean>();
     let composed = new Map<string, boolean>();
-    const data = Object.assign(new LandscapeData(), { sectorsX: 2, sectorsZ: 1, maxLevel: 2, sectorSize: 4, heightScale: 1 });
+    const data = Object.assign(new LandscapeData(), { sectorsX: 2, sectorsZ: 1, maxTileLevel: 2, sectorSize: 4, heightScale: 1 });
     const ranges = Array.from({ length: new NodeIndexLayout(data).nodeCount() }, () => ({ minY: 0, maxY: 1 }));
     const asset = { data: () => data, heightRanges: () => ranges, loadingFailed: () => false } as LandscapeAsset;
     const residency = {
@@ -112,7 +143,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         hadCoverage = hadCoverage || coverage;
         const nodes: string[] = [];
         tree.forEachNode((node) => {
-            if (node.geometry.level <= data.maxLevel) {
+            if (node.geometry.level <= data.maxTileLevel) {
                 nodes.push(`${node.geometry.address().key()}:${Number(node.loaded)}:${Number(node.ready)}:${Number(node.renderable)}`);
             }
             if (node.ready) {

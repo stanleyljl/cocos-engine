@@ -12,8 +12,8 @@ import { Pass } from '../render-scene/core/pass';
 import { RenderScene } from '../render-scene/core/render-scene';
 import { Node } from '../scene-graph/node';
 import { LandscapeAsset } from './Asset';
-import { LandscapeData, LandscapeDebugData, NodeAddress, NodeKey, QuadNode, VTPageAddress, VTPageLayout } from './Data';
-import { bindLandscapeModelTextures, DecalRenderer, LandscapeGridParams } from './DecalRenderer';
+import { LandscapeData, LandscapeDebugData, LandscapeGridParams, NodeAddress, NodeKey, QuadNode, VTPageAddress, VTPageLayout } from './Data';
+import { bindLandscapeModelTextures, DecalRenderer, setLandscapeInstanceAttribute } from './DecalRenderer';
 import { GridMesh } from './GridMesh';
 import { MaterialLibrary } from './MaterialLibrary';
 import { Quadtree } from './Quadtree';
@@ -25,6 +25,12 @@ import * as config from './Config';
 interface GridDraw {
     model: Model;
     mapping: number;
+}
+
+function applyGridParams (model: Model, scratch: Float32Array, params: LandscapeGridParams): void {
+    setLandscapeInstanceAttribute(model, scratch, 'a_gridInst', params.grid);
+    setLandscapeInstanceAttribute(model, scratch, 'a_tileInst', params.tile);
+    setLandscapeInstanceAttribute(model, scratch, 'a_mappingInst', params.mapping);
 }
 
 function createLandscapeMaterial (wireframe: boolean): Material {
@@ -116,7 +122,7 @@ export class LandscapeRenderer {
         const rootKeys = new Set<NodeKey>();
         for (let z = 0; z < this._data.sectorsZ; ++z) {
             for (let x = 0; x < this._data.sectorsX; ++x) {
-                rootKeys.add(new NodeAddress(this._data.maxLevel, x, z).key());
+                rootKeys.add(new NodeAddress(this._data.maxTileLevel, x, z).key());
             }
         }
         const layout = new VTPageLayout(this._data.sectorSize);
@@ -158,7 +164,7 @@ export class LandscapeRenderer {
             setRuntimeTexture(material, 'heightmap', this._residency.heightArray(), this._residency.heightSampler());
             setRuntimeTexture(material, 'vtAlbedo', vt.albedo(), vt.sampler());
             setRuntimeTexture(material, 'vtPageMap', vt.pageTable().texture(), this._residency.splatSampler());
-            setRuntimeTexture(material, 'vtNormalRoughnessAO', vt.normalRoughnessAO(), vt.sampler());
+            setRuntimeTexture(material, 'vtNormalRoughness', vt.normalRoughness(), vt.sampler());
         }
         for (const material of this._decals.materials()) {
             setRuntimeTexture(material, 'decalHeightMap', this._materials.decalHeight(), this._residency.heightSampler());
@@ -278,7 +284,7 @@ export class LandscapeRenderer {
     }
 
     private updateModel (model: Model, node: QuadNode, gridParams: LandscapeGridParams): void {
-        gridParams.apply(model, this._scratch);
+        applyGridParams(model, this._scratch, gridParams);
         model.enabled = true;
         this.updateModelBounds(model, node);
     }
@@ -332,10 +338,11 @@ export class LandscapeRenderer {
 
     public collectPassModels (frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): void {
         const origin = this._node.worldPosition;
-        const lift = this._debugData.decal3DEnabled ? Math.max(0, ...this._asset.decalLayers().map((layer) => layer.heightScale)) : 0;
-        this._quadtree.cull((address, renderable) => {
-            if (!renderable) {
-                const node = this._quadtree.find(address)!.geometry;
+        const lift = this._debugData.decal3DEnabled ? this._asset.maxDecalHeight() : 0;
+        this._quadtree.cull((treeNode) => {
+            const node = treeNode.geometry;
+            const address = node.address();
+            if (!treeNode.renderable) {
                 const region = this._quadtree.region(address);
                 const top = node.maxY + lift;
                 const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + top) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (top - node.minY) * 0.5, region.size * 0.5);
@@ -359,7 +366,7 @@ export class LandscapeRenderer {
                         return false;
                     }
                 }
-                this._decals.collectPassModels(this._quadtree.findRenderable(address)!.geometry, frustum, shadow, models);
+                this._decals.collectPassModels(node, frustum, shadow, models);
             }
             return true;
         });
@@ -427,7 +434,7 @@ export class LandscapeRenderer {
         });
         for (const [key, draw] of this._draws) {
             const node = this._quadtree.findRenderable(NodeAddress.fromKey(key))!;
-            this.resolveGridParams(node.geometry, draw.mapping).apply(draw.model, this._scratch);
+            applyGridParams(draw.model, this._scratch, this.resolveGridParams(node.geometry, draw.mapping));
         }
     }
 

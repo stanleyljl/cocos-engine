@@ -63,7 +63,7 @@ test.each([0, 1, 2, 3, 4])('16-bit PNG filter %i preserves low bits and signed-b
 });
 
 test('finest tile layout and imported URLs retain content hash and query', async () => {
-    const manifest = { sectorCount: [2, 2], maxLevel: 7, minTileLevel: 3,
+    const manifest = { sectorCount: [2, 2], maxTileLevel: 7, minTileLevel: 3,
         sectorSizeMeters: 2048, heightScale: 3000, heightBias: 0, files: { 'nodes/L3/h_0_0.png': '.lsraw000042' } };
     const layout = parseLandscapeHeightLayout(manifest);
     expect([layout.tilesX, layout.tilesZ, layout.tileSize, layout.resolution]).toEqual([32, 32, 128, 129]);
@@ -80,7 +80,7 @@ test('finest tile layout and imported URLs retain content hash and query', async
 });
 
 test('sector limit applies to the total, including narrow landscapes', () => {
-    const manifest = { maxLevel: 0, minTileLevel: 0, sectorSizeMeters: 128, heightScale: 1, heightBias: 0, files: {} };
+    const manifest = { maxTileLevel: 0, minTileLevel: 0, sectorSizeMeters: 128, heightScale: 1, heightBias: 0, files: {} };
     for (const sectorCount of [[8, 8], [64, 1], [1, 64]]) {
         expect(() => parseLandscapeHeightLayout({ ...manifest, sectorCount })).not.toThrow();
     }

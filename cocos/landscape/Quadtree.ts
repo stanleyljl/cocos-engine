@@ -61,7 +61,7 @@ export class Quadtree {
         this._passes.length = 0;
         this._activePassCount = 0;
         this._lastMorphRangeWarning = false;
-        let rootLevel = this._data.maxLevel;
+        let rootLevel = this._data.maxTileLevel;
         for (let side = 1; side < Math.max(this._data.sectorsX, this._data.sectorsZ); side *= 2) {
             ++rootLevel;
         }
@@ -72,7 +72,7 @@ export class Quadtree {
     private initLodMorphRanges (quality: number): void {
         let totalWeight = 0;
         let weight = 1;
-        for (let level = 0; level <= this._data.maxLevel; ++level) {
+        for (let level = 0; level <= this._data.maxTileLevel; ++level) {
             totalWeight += weight;
             weight *= config.LOD_DISTANCE_RATIO;
         }
@@ -81,7 +81,7 @@ export class Quadtree {
         let start = 0;
         weight = 1;
         this._lodMorphRanges = [];
-        for (let level = 0; level <= this._data.maxLevel; ++level) {
+        for (let level = 0; level <= this._data.maxTileLevel; ++level) {
             end += section * weight;
             start += (end - start) * config.MORPH_START_RATIO;
             this._lodMorphRanges.push({ start, end });
@@ -127,7 +127,7 @@ export class Quadtree {
         if (!this.contains(address)) {
             return;
         }
-        let refine = address.level > this._data.maxLevel;
+        let refine = address.level > this._data.maxTileLevel;
         if (!refine && address.level > 0) {
             const range = this._lodMorphRanges[address.level - 1].end;
             for (let q = 0; q < 4; ++q) {
@@ -158,7 +158,7 @@ export class Quadtree {
         const refresh: NodeAddress[] = [];
         this.forEachNode((node) => {
             const address = node.geometry.address();
-            if (address.level > this._data.maxLevel) {
+            if (address.level > this._data.maxTileLevel) {
                 return true;
             }
             if (!node.ready) {
@@ -179,10 +179,10 @@ export class Quadtree {
 
     public publish (address: NodeAddress, material: VTGridMapping): boolean {
         const node = this.find(address);
-        if (!node || address.level > this._data.maxLevel || material.pages.length === 0) {
+        if (!node || address.level > this._data.maxTileLevel || material.pages.length === 0) {
             return false;
         }
-        if (address.level < this._data.maxLevel && !this.find(address.ancestor(address.level + 1))!.ready) {
+        if (address.level < this._data.maxTileLevel && !this.find(address.ancestor(address.level + 1))!.ready) {
             return false;
         }
         this._needsRenderSelection = this._needsRenderSelection || !node.ready;
@@ -205,7 +205,7 @@ export class Quadtree {
         }
         let current: QuadtreeNode[] = [];
         this.forEachNode((node) => {
-            node.renderable = node.geometry.level === this._data.maxLevel;
+            node.renderable = node.geometry.level === this._data.maxTileLevel;
             if (node.renderable) {
                 current.push(node);
             }
@@ -288,11 +288,11 @@ export class Quadtree {
         this.visitNodes(this._root, visit);
     }
 
-    public cull (visit: (address: NodeAddress, renderable: boolean) => boolean): void {
+    public cull (visit: (node: QuadtreeNode) => boolean): void {
         if (!this._renderNodeKeys.size) {
             return;
         }
-        this.forEachNode((node) => visit(node.geometry.address(), node.renderable) && !node.renderable);
+        this.forEachNode((node) => visit(node) && !node.renderable);
     }
 
     public forEachRenderable (visit: (node: QuadtreeNode) => void): void {
@@ -317,8 +317,8 @@ export class Quadtree {
     }
 
     private computeEdgeMask (address: NodeAddress): number {
-        const width = this._data.sectorsX * 2 ** this._data.maxLevel;
-        const depth = this._data.sectorsZ * 2 ** this._data.maxLevel;
+        const width = this._data.sectorsX * 2 ** this._data.maxTileLevel;
+        const depth = this._data.sectorsZ * 2 ** this._data.maxTileLevel;
         const size = 2 ** address.level;
         const x = address.x * size;
         const z = address.z * size;
@@ -347,7 +347,7 @@ export class Quadtree {
 
     private morphRangeTooSmall (node: QuadtreeNode): boolean {
         const address = node.geometry.address();
-        if (address.level === this._data.maxLevel) {
+        if (address.level === this._data.maxTileLevel) {
             return false;
         }
         const area = this.region(address);
@@ -367,7 +367,7 @@ export class Quadtree {
         const bounds = this.heightRange(address);
         const center = new Vec3(area.x + area.size * 0.5 + this._worldOrigin.x, (bounds.minY + bounds.maxY) * 0.5 + this._worldOrigin.y, area.z + area.size * 0.5 + this._worldOrigin.z);
         const extent = new Vec3(area.size * 0.5, (bounds.maxY - bounds.minY) * 0.5, area.size * 0.5);
-        const nearby = this._lodMorphRanges[Math.min(1, this._data.maxLevel)].end;
+        const nearby = this._lodMorphRanges[Math.min(1, this._data.maxTileLevel)].end;
         return this._passes.some((pass) => (pass.includeNearby && distance <= nearby * nearby) || pass.planes.every((plane) => {
             const radius = extent.x * Math.abs(plane.x) + extent.y * Math.abs(plane.y) + extent.z * Math.abs(plane.z);
             return center.x * plane.x + center.y * plane.y + center.z * plane.z + radius >= plane.w;
@@ -379,7 +379,7 @@ export class Quadtree {
         if (!this.contains(address)) {
             return;
         }
-        if (address.level === this._data.maxLevel) {
+        if (address.level === this._data.maxTileLevel) {
             node.geometry = this.geometry(address);
             return;
         }
@@ -405,7 +405,7 @@ export class Quadtree {
     public sectorRootsReady (): boolean {
         for (let z = 0; z < this._data.sectorsZ; ++z) {
             for (let x = 0; x < this._data.sectorsX; ++x) {
-                if (!this.find(new NodeAddress(this._data.maxLevel, x, z))!.ready) {
+                if (!this.find(new NodeAddress(this._data.maxTileLevel, x, z))!.ready) {
                     return false;
                 }
             }
@@ -414,7 +414,7 @@ export class Quadtree {
     }
 
     private contains (address: NodeAddress): boolean {
-        const scale = 2 ** (address.level - this._data.maxLevel);
+        const scale = 2 ** (address.level - this._data.maxTileLevel);
         return address.x >= 0 && address.z >= 0 && address.x * scale < this._data.sectorsX && address.z * scale < this._data.sectorsZ;
     }
 
@@ -440,12 +440,12 @@ export class Quadtree {
     }
 
     public region (address: NodeAddress): LandscapeRegion {
-        const size = this._data.sectorSize * 2 ** (address.level - this._data.maxLevel);
+        const size = this._data.sectorSize * 2 ** (address.level - this._data.maxTileLevel);
         return { x: address.x * size, z: address.z * size, size };
     }
 
     private heightRange (address: NodeAddress): HeightRange {
-        if (address.level > this._data.maxLevel) {
+        if (address.level > this._data.maxTileLevel) {
             const bounds = this.find(address)!.geometry;
             return { minY: bounds.minY, maxY: bounds.maxY };
         }

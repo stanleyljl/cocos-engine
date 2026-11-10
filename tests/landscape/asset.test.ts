@@ -5,7 +5,7 @@ import { captureErrors } from '../utils/log-capture';
 function manifest () {
     return {
         sectorCount: [1, 1],
-        maxLevel: 0,
+        maxTileLevel: 0,
         minTileLevel: 0,
         sectorSizeMeters: 4,
         heightScale: 20,
@@ -28,6 +28,40 @@ function manifest () {
 }
 
 afterEach(() => jest.restoreAllMocks());
+
+test('maximum decal height follows successful loads and survives rejected replacements', async () => {
+    const populated = manifest();
+    const layer = populated.decalLibrary.layers[0];
+    Object.assign(layer, { detailMaterials: undefined });
+    populated.decalLibrary.layers = [0.5, 2, 1].map((heightScale) => ({ ...layer, heightScale }));
+    let document: object = populated;
+    jest.spyOn(downloader, '_downloadJson').mockImplementation((_url, _options, complete) => complete(null, document));
+    const asset = new LandscapeAsset();
+    const url = 'https://example.test/data/terrain.lsmanifest';
+    expect(await asset.load(url)).toBe(true);
+    expect(asset.maxDecalHeight()).toBe(2);
+
+    const rejected = manifest();
+    rejected.decals[0].layer = 1;
+    document = rejected;
+    const errors = captureErrors();
+    expect(await asset.load(url)).toBe(false);
+    expect(asset.maxDecalHeight()).toBe(2);
+    errors.stop();
+
+    const lower = manifest();
+    Object.assign(lower.decalLibrary.layers[0], { detailMaterials: undefined });
+    lower.decalLibrary.layers[0].heightScale = 0.25;
+    document = lower;
+    expect(await asset.load(url)).toBe(true);
+    expect(asset.maxDecalHeight()).toBe(0.25);
+
+    const { decalLibrary, decals, ...withoutDecals } = manifest();
+    document = withoutDecals;
+    expect(await asset.load(url)).toBe(true);
+    expect(asset.maxDecalHeight()).toBe(0);
+    asset.destroy();
+});
 
 test.each([undefined, [], [-0.1], [1.1]])('invalid slope metadata prevents publication (%j)', async (slopes) => {
     const document = manifest();

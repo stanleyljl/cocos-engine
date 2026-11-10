@@ -47,7 +47,7 @@ void Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
 #if CC_LANDSCAPE_DEBUG
     _lastMorphRangeWarning = false;
 #endif
-    uint32_t rootLevel = _data.maxLevel;
+    uint32_t rootLevel = _data.maxTileLevel;
     for (uint32_t side = 1; side < std::max(_data.sectorsX, _data.sectorsZ); side *= 2) {
         ++rootLevel;
     }
@@ -56,11 +56,11 @@ void Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
 }
 
 void Quadtree::initLodMorphRanges(float lodQualityScale) {
-    _lodMorphRanges.assign(static_cast<size_t>(_data.maxLevel) + 1, MorphRange{});
+    _lodMorphRanges.assign(static_cast<size_t>(_data.maxTileLevel) + 1, MorphRange{});
 
     float totalWeight = 0.0F;
     float weight = 1.0F;
-    for (uint32_t level = 0; level <= _data.maxLevel; ++level) {
+    for (uint32_t level = 0; level <= _data.maxTileLevel; ++level) {
         totalWeight += weight;
         weight *= config::LOD_DISTANCE_RATIO;
     }
@@ -115,7 +115,7 @@ void Quadtree::updateTarget(Node &node) {
     if (!contains(address)) {
         return;
     }
-    bool refine = address.level > _data.maxLevel;
+    bool refine = address.level > _data.maxTileLevel;
     // Distance alone determines refinement; rotating a view must not discard
     // ready detail or change the target used to balance neighboring draws.
     if (!refine && address.level > 0) {
@@ -147,7 +147,7 @@ ccstd::vector<NodeAddress> Quadtree::requests() const {
     ccstd::vector<NodeAddress> refreshNodes;
     forEachNode([&](const Node &node) {
         const auto address = node.geometry.address();
-        if (address.level > _data.maxLevel) {
+        if (address.level > _data.maxTileLevel) {
             return true;
         }
         // Request the first missing node on each branch before its descendants.
@@ -179,13 +179,13 @@ bool Quadtree::publish(NodeAddress address, VTGridMapping material) {
     if (!node) {
         return false;
     }
-    if (address.level > _data.maxLevel) {
+    if (address.level > _data.maxTileLevel) {
         return false;
     }
     if (material.pages.empty()) {
         return false;
     }
-    if (address.level < _data.maxLevel) {
+    if (address.level < _data.maxTileLevel) {
         const auto *parent = find(address.ancestor(address.level + 1));
         if (!parent->ready) {
             return false;
@@ -213,7 +213,7 @@ bool Quadtree::selectRenderables() {
     ccstd::vector<Node *> currentLevelNodes;
     ccstd::vector<Node *> nextLevelNodes;
     visitNodes(*_root, [&](Node &node) {
-        node.renderable = node.geometry.level == _data.maxLevel;
+        node.renderable = node.geometry.level == _data.maxTileLevel;
         if (node.renderable) {
             currentLevelNodes.push_back(&node);
         }
@@ -296,12 +296,12 @@ void Quadtree::forEachNode(const std::function<bool(const Node &)> &visit) const
     visitNodes(static_cast<const Node &>(*_root), visit);
 }
 
-void Quadtree::cull(const std::function<bool(NodeAddress, bool)> &visit) const {
+void Quadtree::cull(const std::function<bool(const Node &)> &visit) const {
     if (_renderNodeKeys.empty()) {
         return;
     }
     visitNodes(static_cast<const Node &>(*_root), [&](const Node &node) {
-        if (!visit(node.geometry.address(), node.renderable)) {
+        if (!visit(node)) {
             return false;
         }
         return !node.renderable;
@@ -352,8 +352,8 @@ void Quadtree::visitNodes(Node &node, const std::function<bool(Node &)> &visit) 
 
 // Helpers: final morph edges and visibility diagnostics.
 uint8_t Quadtree::computeEdgeMask(NodeAddress address) const {
-    const uint32_t width = _data.sectorsX << _data.maxLevel;
-    const uint32_t depth = _data.sectorsZ << _data.maxLevel;
+    const uint32_t width = _data.sectorsX << _data.maxTileLevel;
+    const uint32_t depth = _data.sectorsZ << _data.maxTileLevel;
     // In the balanced cut, a whole edge meets one same/coarser node or two
     // children one level finer. One sample per edge determines its morph mask.
     const uint32_t gridX = address.x << address.level;
@@ -387,7 +387,7 @@ uint8_t Quadtree::computeEdgeMask(NodeAddress address) const {
 bool Quadtree::morphRangeTooSmall(const Node &node) const {
     const auto address = node.geometry.address();
     // Diagnose insufficient morph distance only for visible/nearby draws.
-    if (address.level == _data.maxLevel) {
+    if (address.level == _data.maxTileLevel) {
         return false;
     }
     const auto area = region(address);
@@ -406,7 +406,7 @@ bool Quadtree::morphRangeTooSmall(const Node &node) const {
     const auto bounds = heightRange(address);
     const Vec3 center{area.x + area.size * 0.5F + _worldOrigin.x, (bounds.minY + bounds.maxY) * 0.5F + _worldOrigin.y, area.z + area.size * 0.5F + _worldOrigin.z};
     const Vec3 extent{area.size * 0.5F, (bounds.maxY - bounds.minY) * 0.5F, area.size * 0.5F};
-    const float nearbyRange = _lodMorphRanges[std::min(1U, _data.maxLevel)].end;
+    const float nearbyRange = _lodMorphRanges[std::min(1U, _data.maxTileLevel)].end;
     return std::any_of(_passes.begin(), _passes.end(), [&](const Pass &pass) {
         if (pass.includeNearby && distanceSq <= nearbyRange * nearbyRange) {
             return true;
@@ -425,7 +425,7 @@ void Quadtree::buildRoot(Node &node, NodeAddress address) {
     if (!contains(address)) {
         return;
     }
-    if (address.level == _data.maxLevel) {
+    if (address.level == _data.maxTileLevel) {
         node.geometry = geometry(address);
         return;
     }
@@ -452,7 +452,7 @@ NodeAddress Quadtree::child(NodeAddress address, uint32_t quadrant) {
 bool Quadtree::sectorRootsReady() const {
     for (uint32_t z = 0; z < _data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < _data.sectorsX; ++x) {
-            if (!find({_data.maxLevel, x, z})->ready) {
+            if (!find({_data.maxTileLevel, x, z})->ready) {
                 return false;
             }
         }
@@ -461,11 +461,11 @@ bool Quadtree::sectorRootsReady() const {
 }
 
 bool Quadtree::contains(NodeAddress address) const {
-    if (address.level <= _data.maxLevel) {
-        const auto sector = address.ancestor(_data.maxLevel);
+    if (address.level <= _data.maxTileLevel) {
+        const auto sector = address.ancestor(_data.maxTileLevel);
         return sector.x < _data.sectorsX && sector.z < _data.sectorsZ;
     }
-    const auto shift = address.level - _data.maxLevel;
+    const auto shift = address.level - _data.maxTileLevel;
     return (static_cast<uint64_t>(address.x) << shift) < _data.sectorsX &&
            (static_cast<uint64_t>(address.z) << shift) < _data.sectorsZ;
 }
@@ -505,12 +505,12 @@ const Quadtree::Node *Quadtree::findRenderable(NodeAddress address) const {
 }
 
 LandscapeRegion Quadtree::region(NodeAddress address) const {
-    const float size = std::ldexp(_data.sectorSize, static_cast<int>(address.level) - static_cast<int>(_data.maxLevel));
+    const float size = std::ldexp(_data.sectorSize, static_cast<int>(address.level) - static_cast<int>(_data.maxTileLevel));
     return {address.x * size, address.z * size, size};
 }
 
 HeightRange Quadtree::heightRange(NodeAddress address) const {
-    if (address.level > _data.maxLevel) {
+    if (address.level > _data.maxTileLevel) {
         const auto &bounds = find(address)->geometry;
         return {bounds.minY, bounds.maxY};
     }

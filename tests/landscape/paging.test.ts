@@ -10,7 +10,7 @@ function requireCondition (condition: boolean, message: string): void {
 }
 
 function cacheData (level: number, sectorsX: number, sectorsZ: number): LandscapeData {
-    return Object.assign(new LandscapeData(), { maxLevel: level, sectorSize: 2 ** level, sectorsX, sectorsZ, heightScale: 1 });
+    return Object.assign(new LandscapeData(), { maxTileLevel: level, sectorSize: 2 ** level, sectorsX, sectorsZ, heightScale: 1 });
 }
 
 function mapping (address: NodeAddress): VTGridMapping {
@@ -79,7 +79,7 @@ test('CPU cliff culling separates gentle pages and retains cliffs in gutters and
     slopes.fill(1);
     const index = new NodeIndexLayout(data);
     // A narrow cliff in the second sector must survive every parent.
-    for (let level = 0; level <= data.maxLevel; ++level) {
+    for (let level = 0; level <= data.maxTileLevel; ++level) {
         slopes[index.globalNodeIndex(level, 8 >> level, 2 >> level)] = 0.4;
     }
     const ordinary = new VTPageAddress(3, 0, 0);
@@ -95,8 +95,8 @@ test('CPU cliff culling separates gentle pages and retains cliffs in gutters and
 // Independent cell rasterization checks coverage and every neighboring LOD pair.
 // Expected topology and edge masks additionally come from the common native trace.
 function checkCut (tree: Quadtree, data: LandscapeData): void {
-    const width = data.sectorsX * 2 ** data.maxLevel;
-    const depth = data.sectorsZ * 2 ** data.maxLevel;
+    const width = data.sectorsX * 2 ** data.maxTileLevel;
+    const depth = data.sectorsZ * 2 ** data.maxTileLevel;
     const cells = new Int32Array(width * depth).fill(-1);
     tree.forEachRenderable((node) => {
         const address = node.geometry.address();
@@ -214,7 +214,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
             } else if (command === 'replace') {
                 const before = drawKeys(tree);
                 const address = NodeAddress.fromKey(before[0]);
-                const parent = address.ancestor(data.maxLevel);
+                const parent = address.ancestor(data.maxTileLevel);
                 tree.clearChangedNodes();
                 requireCondition(tree.publish(address, mapping(parent)) && tree.selectRenderables(), 'Material replacement');
                 expect(drawKeys(tree)).toEqual(before);

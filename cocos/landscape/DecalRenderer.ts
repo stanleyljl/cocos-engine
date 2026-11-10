@@ -12,7 +12,7 @@ import { Node } from '../scene-graph/node';
 import { InstancedBuffer } from '../rendering/instanced-buffer';
 import { PipelineStateManager } from '../rendering/pipeline-state-manager';
 import { Decal, LandscapeAsset } from './Asset';
-import { LandscapeRegion, NodeKey, QuadNode } from './Data';
+import { LandscapeGridParams, LandscapeRegion, NodeKey, QuadNode } from './Data';
 import { GridMesh } from './GridMesh';
 import { MaterialLibrary } from './MaterialLibrary';
 import * as config from './Config';
@@ -33,18 +33,6 @@ export function setLandscapeInstanceAttribute (model: Model, scratch: Float32Arr
         if (index >= 0) {
             views[index].set(scratch);
         }
-    }
-}
-
-export class LandscapeGridParams {
-    public grid = new Vec4();
-    public tile = new Vec4();
-    public mapping = new Vec4();
-
-    public apply (model: Model, scratch: Float32Array): void {
-        setLandscapeInstanceAttribute(model, scratch, 'a_gridInst', this.grid);
-        setLandscapeInstanceAttribute(model, scratch, 'a_tileInst', this.tile);
-        setLandscapeInstanceAttribute(model, scratch, 'a_mappingInst', this.mapping);
     }
 }
 
@@ -267,7 +255,9 @@ export class DecalRenderer {
     }
 
     private updateBinding (draw: Draw, node: TerrainNode, boundsChanged: boolean): void {
-        node.gridParams.apply(draw.model, this._scratch);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_gridInst', node.gridParams.grid);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_tileInst', node.gridParams.tile);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_mappingInst', node.gridParams.mapping);
         if (boundsChanged) {
             const lift = this._asset.decalLayers()[this._instances[draw.decal].decal.layer].heightScale;
             draw.model.createBoundingShape(new Vec3(draw.grid.x, node.minY, draw.grid.y), new Vec3(draw.grid.x + draw.grid.z, node.maxY + lift, draw.grid.y + draw.grid.w));

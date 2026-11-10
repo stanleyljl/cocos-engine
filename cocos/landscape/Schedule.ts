@@ -157,16 +157,18 @@ export class LandscapeSchedule {
     }
 
     private admitNodes (resources: Resources, mappingCount: number, rootsReady: boolean): Resources {
+        // Worst-case source lists are fixed within this admission pass; capacity checks are not.
+        const pageSources = new Map<NodeKey, NodeAddress[]>();
         const data = this._asset.data();
         const layout = new VTPageLayout(data.sectorSize);
         const pendingKeys = new Set(this._pendingNodes.map((pending) => pending.node.key()));
         for (const request of this._quadtree.requests()) {
             const node = this._quadtree.find(request)!;
-            if (pendingKeys.has(request.key()) || (!rootsReady && (node.ready || request.level !== data.maxLevel))) {
+            if (pendingKeys.has(request.key()) || (!rootsReady && (node.ready || request.level !== data.maxTileLevel))) {
                 continue;
             }
             const pending = { node: request, material: new VTGridMapping() };
-            if (!node.ready && request.level === data.maxLevel) {
+            if (!node.ready && request.level === data.maxTileLevel) {
                 pending.material.pages = [new VTPageAddress(layout.rootLevel(), request.x, request.z)];
             } else {
                 pending.material = layout.buildGridMapping(data.nodeRegion(request), node.geometry.minY, node.geometry.maxY, this._quadtree.localCameraPosition());
@@ -176,7 +178,7 @@ export class LandscapeSchedule {
             }
             const candidate = { sources: resources.sources.slice(), pages: resources.pages.slice() };
             this.appendResources(candidate, pending);
-            if (!this.canPrepare(candidate)) {
+            if (!this.canPrepare(candidate, pageSources)) {
                 continue;
             }
             const required = mappingCount + (node.ready ? 0 : 1);
@@ -238,14 +240,18 @@ export class LandscapeSchedule {
         resources.pages.sort(comparePages);
     }
 
-    private canPrepare (resources: Resources): boolean {
+    private canPrepare (resources: Resources, pageSources: Map<NodeKey, NodeAddress[]>): boolean {
         if (!this._residency.canReserve(resources.sources) || !this._vtRenderer.canReserve(resources.pages)) {
             return false;
         }
         const retained = new Set(resources.sources.map((source) => source.key()));
         for (const page of resources.pages) {
-            const inputs: NodeAddress[] = [];
-            this._vtRenderer.selectSources(page, true, true).appendTo(inputs);
+            let inputs = pageSources.get(page.key());
+            if (!inputs) {
+                inputs = [];
+                this._vtRenderer.selectSources(page, true, true).appendTo(inputs);
+                pageSources.set(page.key(), inputs);
+            }
             if (!sourcesFit(retained, inputs, this._residency.layerCount())) {
                 return false;
             }

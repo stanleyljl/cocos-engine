@@ -66,7 +66,7 @@ constexpr float TRIPLANAR_BLEND_SHARPNESS = 4.0F;
 constexpr uint32_t COMPRESSION_GROUP_SIDE = 8;
 
 void recordPagePass(gfx::CommandBuffer &commands, gfx::InputAssembler *inputAssembler, gfx::RenderPass *renderPass, scene::Pass *pass, gfx::PipelineState *pipelineState, gfx::Framebuffer *framebuffer, uint32_t atlasSize, uint32_t instanceCount) {
-    const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 0.5F, 1, 1}};
+    const gfx::Color colors[2] = {{0, 0, 0, 1}, {0.5F, 1, 0.5F, 1}};
     commands.beginRenderPass(renderPass, framebuffer,
                                gfx::Rect{0, 0, atlasSize, atlasSize}, colors, 1.0F, 0);
     commands.bindPipelineState(pipelineState);
@@ -451,7 +451,7 @@ Texture2D *VTPageCompressor::atlas() const {
 gfx::Texture *VTPageCompressor::albedo() const {
     return _atlas[0]->getGFXTexture();
 }
-gfx::Texture *VTPageCompressor::normalRoughnessAO() const {
+gfx::Texture *VTPageCompressor::normalRoughness() const {
     return _atlas[1]->getGFXTexture();
 }
 
@@ -559,7 +559,7 @@ void VTPageCompressor::transition(gfx::CommandBuffer &commands, gfx::AccessFlags
     info.range.numSlices = 1;
     const gfx::TextureBarrier *barriers[] = {device->getTextureBarrier(info), device->getTextureBarrier(info)};
     // Texture2D exposes a sampling view; transfers target its underlying image.
-    const gfx::Texture *textures[] = {albedo()->getViewInfo().texture, normalRoughnessAO()->getViewInfo().texture};
+    const gfx::Texture *textures[] = {albedo()->getViewInfo().texture, normalRoughness()->getViewInfo().texture};
     commands.pipelineBarrier(nullptr, nullptr, nullptr, 0, barriers, textures, 2);
 }
 
@@ -587,7 +587,7 @@ void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
         copy.texSubres.mipLevel = level;
         commands.copyBufferToTexture(_blocks, albedo()->getViewInfo().texture, &copy, 1);
         copy.buffOffset = blocks * blocks * ASTC_BLOCK_BYTES;
-        commands.copyBufferToTexture(_blocks, normalRoughnessAO()->getViewInfo().texture, &copy, 1);
+        commands.copyBufferToTexture(_blocks, normalRoughness()->getViewInfo().texture, &copy, 1);
     }
 }
 

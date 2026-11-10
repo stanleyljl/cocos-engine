@@ -375,7 +375,7 @@ bool VTRenderer::hasCliff(LandscapeRegion region) const {
     // covers this footprint with at most 3x3 cells, including sector edges.
     const float border = region.size * config::VT_PAGE_BORDER / config::VT_PAGE_INTERIOR;
     uint32_t level = 0;
-    while (level < _data.maxLevel && _data.nodeSize(level) < region.size + 2 * border) {
+    while (level < _data.maxTileLevel && _data.nodeSize(level) < region.size + 2 * border) {
         ++level;
     }
     const auto first = _data.nodeAtClamped(level, {region.x - border, region.z - border});
@@ -483,8 +483,8 @@ gfx::Texture *VTRenderer::albedo() const {
     return _compressor ? _compressor->albedo() : _composer->target()->getWindow()->getColorTexture(0);
 }
 
-gfx::Texture *VTRenderer::normalRoughnessAO() const {
-    return _compressor ? _compressor->normalRoughnessAO() : _composer->target()->getWindow()->getColorTexture(1);
+gfx::Texture *VTRenderer::normalRoughness() const {
+    return _compressor ? _compressor->normalRoughness() : _composer->target()->getWindow()->getColorTexture(1);
 }
 
 bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<float> &minimumNormalY, uint32_t capacity) {
@@ -535,7 +535,7 @@ bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &
 
 uint32_t VTRenderer::sourceLevel(float size) const {
     uint32_t level = _data.minTileLevel;
-    while (level < _data.maxLevel && _data.nodeSize(level) < size) {
+    while (level < _data.maxTileLevel && _data.nodeSize(level) < size) {
         ++level;
     }
     return level;

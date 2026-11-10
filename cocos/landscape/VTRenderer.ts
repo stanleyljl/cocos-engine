@@ -244,7 +244,7 @@ export class VTRenderer {
     public albedo (): Texture {
         return this._composer.albedo();
     }
-    public normalRoughnessAO (): Texture {
+    public normalRoughness (): Texture {
         return this._composer.normal();
     }
     public sampler (): Sampler {
@@ -361,7 +361,7 @@ export class VTRenderer {
         // covers this footprint with at most 3x3 cells, including sector edges.
         const border = region.size * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
         let level = 0;
-        while (level < this._data.maxLevel && this._data.nodeSize(level) < region.size + 2 * border) {
+        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < region.size + 2 * border) {
             ++level;
         }
         const first = this._data.nodeAtClamped(level, { x: region.x - border, z: region.z - border });
@@ -452,7 +452,7 @@ export class VTRenderer {
 
     private sourceLevel (size: number): number {
         let level = this._data.minTileLevel;
-        while (level < this._data.maxLevel && this._data.nodeSize(level) < size) {
+        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < size) {
             ++level;
         }
         return level;

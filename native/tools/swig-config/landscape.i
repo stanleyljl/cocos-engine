@@ -27,6 +27,7 @@ using namespace cc;
 // Shared native data stays internal; retain only the existing debug-data binding.
 %ignore cc::landscape::LandscapePoint;
 %ignore cc::landscape::LandscapeRegion;
+%ignore cc::landscape::LandscapeGridParams;
 %ignore cc::landscape::HeightRange;
 %ignore cc::landscape::LandscapeQueryTile;
 %ignore cc::landscape::LandscapeQueryCompletion;
@@ -46,6 +47,7 @@ using namespace cc;
 %ignore cc::landscape::LandscapeAsset::DecalLayer;
 %ignore cc::landscape::LandscapeAsset::Decal;
 %ignore cc::landscape::LandscapeAsset::decalLayers;
+%ignore cc::landscape::LandscapeAsset::maxDecalHeight;
 %ignore cc::landscape::LandscapeAsset::decals;
 %ignore cc::landscape::LandscapeAsset::decalResolution;
 %ignore cc::landscape::LandscapeAsset::data;

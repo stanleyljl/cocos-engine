@@ -125,7 +125,7 @@ public:
     void setRefineFarDetail(bool enabled);
     TextureBase *atlas() const;
     gfx::Texture *albedo() const;
-    gfx::Texture *normalRoughnessAO() const;
+    gfx::Texture *normalRoughness() const;
     gfx::Sampler *sampler() const { return _sampler; }
 
 protected:

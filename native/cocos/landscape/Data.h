@@ -32,6 +32,7 @@
 
 #include "base/std/container/vector.h"
 #include "landscape/Config.h"
+#include "math/Vec4.h"
 
 namespace cc {
 class Vec3;
@@ -50,6 +51,13 @@ struct LandscapeRegion {
     float x{0};
     float z{0};
     float size{0};
+};
+
+// Grid instance parameters shared by terrain and displaced decals.
+struct LandscapeGridParams {
+    Vec4 grid; // landscape-local XZ origin, size, geometry LOD
+    Vec4 tile; // source tile XZ origin, size, texture array layer
+    Vec4 mapping; // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
 };
 
 // Node bounds in landscape-local height units, indexed by NodeIndexLayout.
@@ -147,8 +155,8 @@ struct LandscapeDebugData {
 struct LandscapeData {
     uint32_t sectorsX{0};
     uint32_t sectorsZ{0};
-    uint32_t maxLevel{0};
-    uint32_t minTileLevel{0};
+    uint32_t maxTileLevel{0}; // Coarsest source tile level; also the sector root level.
+    uint32_t minTileLevel{0}; // Finest source tile level; finer geometry nodes sample ancestor tiles.
     float sectorSize{0.0F};
     float heightScale{0.0F};
     float heightBias{0.0F};
@@ -159,7 +167,7 @@ struct LandscapeData {
     float maxHeight() const { return heightBias + heightScale; }
     bool valid() const;
 
-    // L0 is finest; maxLevel is the sector root. Invalid levels return zero.
+    // L0 is finest; maxTileLevel is the sector root. Invalid levels return zero.
     uint32_t nodesPerSectorSide(uint32_t level) const;
     float nodeSize(uint32_t level) const;
     uint32_t nodesX(uint32_t level) const { return sectorsX * nodesPerSectorSide(level); }
@@ -181,7 +189,7 @@ public:
     static constexpr size_t INVALID_INDEX = std::numeric_limits<size_t>::max();
 
     NodeIndexLayout() = default;
-    // Zero/excess sectors or an invalid maxLevel produce an empty layout.
+    // Zero/excess sectors or an invalid maxTileLevel produce an empty layout.
     explicit NodeIndexLayout(const LandscapeData &data);
 
     size_t nodeCount() const { return static_cast<size_t>(_sectorsX) * _sectorsZ * _nodesPerSector; }
@@ -204,7 +212,7 @@ private:
     size_t _nodesPerSector{0};
 };
 
-// Material-page dimensions are derived together; a geometry maxLevel cannot
+// Material-page dimensions are derived together; a geometry maxTileLevel cannot
 // accidentally be supplied as the VT root. This class does not own atlas slots.
 class VTPageLayout {
 public:

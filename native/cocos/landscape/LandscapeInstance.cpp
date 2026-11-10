@@ -127,7 +127,7 @@ void LandscapeInstance::logLodRanges(const LandscapeAsset &asset, const Quadtree
 #if CC_LANDSCAPE_DEBUG
     const auto &data = asset.data();
     ccstd::string message = "[Landscape] LOD ranges:";
-    for (uint32_t level = 0; level <= data.maxLevel; ++level) {
+    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
         const auto &range = quadtree.lodMorphRanges()[level];
         message += StringUtil::format(" [LOD%u: %.1f,%.1f]", level, range.start, range.end);
     }
@@ -444,15 +444,15 @@ void LandscapeInstance::drawDebugBounds() {
     static_assert(sizeof(colors) / sizeof(colors[0]) == config::MAX_LOD_LEVELS,
                   "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
-    _quadtree->cull([&](NodeAddress address, bool renderable) {
-        const auto &node = _quadtree->find(address)->geometry;
-        const auto region = _quadtree->region(address);
+    _quadtree->cull([&](const Quadtree::Node &treeNode) {
+        const auto &node = treeNode.geometry;
+        const auto region = _quadtree->region(node.address());
         const auto &origin = _node->getWorldPosition();
         const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + node.maxY) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z, region.size * 0.5F, (node.maxY - node.minY) * 0.5F, region.size * 0.5F};
         if (!bounds.aabbFrustum(camera->getFrustum())) {
             return false;
         }
-        if (!renderable) {
+        if (!treeNode.renderable) {
             return true;
         }
         const float quadrantSize = region.size * 0.5F;

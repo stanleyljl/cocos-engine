@@ -210,7 +210,7 @@ void LandscapeResidency::publish(uint64_t key) {
 }
 
 bool LandscapeResidency::validSource(NodeAddress source) const {
-    return source.level >= _data.minTileLevel && source.level <= _data.maxLevel &&
+    return source.level >= _data.minTileLevel && source.level <= _data.maxTileLevel &&
            source.x < _data.nodesX(source.level) && source.z < _data.nodesZ(source.level);
 }
 

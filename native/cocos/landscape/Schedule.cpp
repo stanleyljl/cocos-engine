@@ -210,6 +210,8 @@ bool LandscapeSchedule::publishNodes() {
 void LandscapeSchedule::admitNodes(Resources &resources, uint32_t mappingCount, bool sectorRootsReady) {
     const auto &data = _asset.data();
     const VTPageLayout layout(data.sectorSize);
+    // Worst-case source lists are fixed within this admission pass; capacity checks are not.
+    ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> pageSources;
     ccstd::unordered_set<uint64_t> pendingNodeKeys;
     for (const auto &pending : _pendingNodes) {
         pendingNodeKeys.insert(pending.node.key());
@@ -219,12 +221,12 @@ void LandscapeSchedule::admitNodes(Resources &resources, uint32_t mappingCount, 
         if (pendingNodeKeys.count(request.key())) {
             continue;
         }
-        if (!sectorRootsReady && (node.ready || request.level != data.maxLevel)) {
+        if (!sectorRootsReady && (node.ready || request.level != data.maxTileLevel)) {
             continue;
         }
         PendingNode pending;
         pending.node = request;
-        if (!node.ready && request.level == data.maxLevel) {
+        if (!node.ready && request.level == data.maxTileLevel) {
             // Reserve full coarse coverage before admitting finer requests.
             pending.material.pages = {{layout.rootLevel(), request.x, request.z}};
         } else {
@@ -235,7 +237,7 @@ void LandscapeSchedule::admitNodes(Resources &resources, uint32_t mappingCount, 
         }
         auto candidateResources = resources;
         appendResources(candidateResources, pending);
-        if (!canPrepare(candidateResources)) {
+        if (!canPrepare(candidateResources, pageSources)) {
             continue;
         }
         const uint32_t requiredMappingCount = mappingCount + (node.ready ? 0U : 1U);
@@ -304,7 +306,7 @@ void LandscapeSchedule::appendResources(Resources &resources, const PendingNode 
     }
 }
 
-bool LandscapeSchedule::canPrepare(const Resources &resources) const {
+bool LandscapeSchedule::canPrepare(const Resources &resources, ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> &pageSources) const {
     if (!_residency.canReserve(resources.sources)) {
         return false;
     }
@@ -318,9 +320,11 @@ bool LandscapeSchedule::canPrepare(const Resources &resources) const {
     // Reserve room for each page's worst-case composition footprint, including
     // far detail and triplanar projection. Composition inputs can then be streamed in bounded batches.
     for (const auto page : resources.pages) {
-        ccstd::vector<NodeAddress> inputs;
-        _vtRenderer.selectSources(page, true, true).appendTo(inputs);
-        if (!sourcesFit(retained, inputs, _residency.layerCount())) {
+        const auto [entry, inserted] = pageSources.try_emplace(page.key());
+        if (inserted) {
+            _vtRenderer.selectSources(page, true, true).appendTo(entry->second);
+        }
+        if (!sourcesFit(retained, entry->second, _residency.layerCount())) {
             return false;
         }
     }

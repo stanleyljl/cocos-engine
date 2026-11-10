@@ -143,7 +143,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     private logLodRanges (asset: LandscapeAsset, quadtree: Quadtree): void {
         if (config.LANDSCAPE_DEBUG) {
             let message = '[Landscape] LOD ranges:';
-            for (let level = 0; level <= asset.data().maxLevel; ++level) {
+            for (let level = 0; level <= asset.data().maxTileLevel; ++level) {
                 const range = quadtree.lodMorphRanges()[level];
                 message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
             }
@@ -388,14 +388,14 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         }
         const colors = [[1, 0.15, 0.15], [0.15, 0.9, 0.2], [0.2, 0.45, 1], [1, 0.9, 0.1], [1, 0.15, 0.9], [0.1, 0.9, 0.95], [0.65, 0.35, 0.85], [0.95, 0.55, 0.2], [0.9, 0.9, 0.9]].map(([r, g, b]) => new Color(r * 255, g * 255, b * 255, 255));
         const origin = this._node!.worldPosition;
-        this._quadtree!.cull((address, renderable) => {
-            const node = this._quadtree!.find(address)!.geometry;
-            const region = this._quadtree!.region(address);
+        this._quadtree!.cull((treeNode) => {
+            const node = treeNode.geometry;
+            const region = this._quadtree!.region(node.address());
             const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + node.maxY) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (node.maxY - node.minY) * 0.5, region.size * 0.5);
             if (!intersect.aabbFrustum(bounds, camera.frustum)) {
                 return false;
             }
-            if (!renderable) {
+            if (!treeNode.renderable) {
                 return true;
             }
             const half = region.size * 0.5;

@@ -5,7 +5,7 @@
 #if __VERSION__ >= 300
   uniform sampler2D vtPageMap;
   uniform sampler2D vtAlbedo;
-  uniform sampler2D vtNormalRoughnessAO;
+  uniform sampler2D vtNormalRoughness;
   flat in vec4 v_vtParams;
 #endif
 #if __VERSION__ >= 300
@@ -44,16 +44,16 @@ void virtualTextureCoordinates(vec2 localXZ, vec2 localDX, vec2 localDY, out vec
   atlasDY *= footprintScale;
 }
 
-void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY, out vec4 cachedAlbedo, out vec4 normalRoughnessAO) {
+void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY, out vec4 cachedAlbedo, out vec4 normalRoughness) {
   vec2 atlasUV;
   vec2 atlasDX;
   vec2 atlasDY;
   virtualTextureCoordinates(localXZ, localDX, localDY, atlasUV, atlasDX, atlasDY);
   cachedAlbedo = textureGrad(vtAlbedo, atlasUV, atlasDX, atlasDY);
   #if LANDSCAPE_DEBUG_UNLIT
-    normalRoughnessAO = vec4(0.5, 0.5, 1.0, 1.0);
+    normalRoughness = vec4(0.5, 1.0, 0.5, 1.0);
   #else
-    normalRoughnessAO = textureGrad(vtNormalRoughnessAO, atlasUV, atlasDX, atlasDY);
+    normalRoughness = textureGrad(vtNormalRoughness, atlasUV, atlasDX, atlasDY);
   #endif
 }
 #endif
@@ -104,28 +104,28 @@ void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
     vec2 localDY = dFdy(localXZ);
   #endif
   #include <landscape-surface-discard>
-  vec4 cachedAlbedo = vec4(0.0);
-  vec4 normalRoughnessAO = vec4(0.5, 0.5, 1.0, 1.0);
+  vec4 cachedAlbedo = vec4(0.0, 0.0, 0.0, 1.0);
+  vec4 normalRoughness = vec4(0.5, 1.0, 0.5, 1.0);
 #if !LANDSCAPE_DEBUG_UNLIT
   vec3 localNormal = vec3(0.0, 1.0, 0.0);
 #endif
 #if __VERSION__ >= 300
-  sampleVirtualTexture(localXZ, localDX, localDY, cachedAlbedo, normalRoughnessAO);
+  sampleVirtualTexture(localXZ, localDX, localDY, cachedAlbedo, normalRoughness);
   #if !LANDSCAPE_DEBUG_UNLIT
-    localNormal = normalize(vec3(normalRoughnessAO.r, cachedAlbedo.a, normalRoughnessAO.g) * 2.0 - 1.0);
+    localNormal = normalize(normalRoughness.rgb * 2.0 - 1.0);
   #endif
 #endif
   surfaceData.baseColor = vec4(cachedAlbedo.rgb * mainColor.rgb, 1.0);
 #if !LANDSCAPE_DEBUG_UNLIT
-  // RVT normals use NRA.RG for XZ and albedo.A for Y; opacity stays 1.
+  // RVT stores albedo RGB + AO and normal XYZ + roughness; opacity stays 1.
   vec3 normal = normalize(FSInput_worldNormal);
   vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
   // The surface frame is (+X, -Z, +Y); transform the composed local normal
   // through it so node transforms retain the existing world-space behavior.
   surfaceData.worldNormal = normalize(CalculateNormalFromTangentSpace(vec3(localNormal.x, -localNormal.z, localNormal.y), 1.0,
     normal, tangent, FSInput_mirrorNormal));
-  surfaceData.roughness = normalRoughnessAO.b;
-  surfaceData.ao = normalRoughnessAO.a;
+  surfaceData.roughness = normalRoughness.a;
+  surfaceData.ao = cachedAlbedo.a;
   surfaceData.metallic = 0.0;
   surfaceData.specularIntensity = 0.5;
   surfaceData.emissive = vec3(0.0);

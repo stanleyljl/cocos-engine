@@ -109,7 +109,7 @@ bool LandscapeAsset::Manifest::readDimensions() {
     const auto &sectorCount = document["sectorCount"];
     if (!sectorCount.IsArray() || sectorCount.Size() != 2U || !sectorCount[0].IsUint() ||
         !sectorCount[1].IsUint() || !readFloat(document, "sectorSizeMeters", parsed.sectorSize) ||
-        !readUnsigned(document, "maxLevel", parsed.maxLevel) ||
+        !readUnsigned(document, "maxTileLevel", parsed.maxTileLevel) ||
         !readUnsigned(document, "minTileLevel", parsed.minTileLevel) ||
         !readFloat(document, "heightScale", parsed.heightScale) ||
         !readFloat(document, "heightBias", parsed.heightBias)) {
@@ -127,7 +127,7 @@ bool LandscapeAsset::Manifest::readDimensions() {
 
 bool LandscapeAsset::Manifest::readHeightRanges() {
     const auto &levels = document["levels"];
-    if (!levels.IsArray() || levels.Size() != parsed.maxLevel + 1U) {
+    if (!levels.IsArray() || levels.Size() != parsed.maxTileLevel + 1U) {
         CC_LOG_WARNING("[Landscape] heightmap manifest '%s' has invalid levels", manifestPath.c_str());
         return false;
     }
@@ -137,7 +137,7 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
     ranges.assign(nodeIndexLayout.nodeCount(),
                   HeightRange{parsed.minHeight(), parsed.maxHeight()});
 
-    for (uint32_t level = 0; level <= parsed.maxLevel; ++level) {
+    for (uint32_t level = 0; level <= parsed.maxTileLevel; ++level) {
         if (!readHeightRangeLevel(level, levels[level])) {
             return false;
         }
@@ -376,6 +376,10 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _materialLayers = std::move(manifest.materialLayers);
     _materialResolution = manifest.materialResolution;
     _decalLayers = std::move(manifest.decalLayers);
+    _maxDecalHeight = 0.0F;
+    for (const auto &layer : _decalLayers) {
+        _maxDecalHeight = std::max(_maxDecalHeight, layer.heightScale);
+    }
     _decals = std::move(manifest.decals);
     _decalResolution = manifest.decalResolution;
     _decalNearDistance = manifest.decalNearDistance;
@@ -421,7 +425,7 @@ ccstd::string LandscapeAsset::resolveFile(const ccstd::string &logicalPath) cons
 
 bool LandscapeAsset::requestTile(uint32_t level, uint32_t x, uint32_t z, gfx::Format heightFormat) {
     if (loadingFailed() || (heightFormat != gfx::Format::RG8 && heightFormat != gfx::Format::R16UI) ||
-        level < _data.minTileLevel || level > _data.maxLevel) {
+        level < _data.minTileLevel || level > _data.maxTileLevel) {
         return false;
     }
     if (_async == nullptr) {
@@ -519,7 +523,7 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
 }
 
 bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const {
-    if (level > _data.maxLevel) {
+    if (level > _data.maxTileLevel) {
         return false;
     }
     const size_t offset = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);

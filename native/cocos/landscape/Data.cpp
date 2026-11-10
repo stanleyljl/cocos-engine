@@ -80,15 +80,15 @@ void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
 }
 
 bool LandscapeData::valid() const {
-    return sectorsX > 0U && sectorsZ > 0U && maxLevel < config::MAX_LOD_LEVELS &&
+    return sectorsX > 0U && sectorsZ > 0U && maxTileLevel < config::MAX_LOD_LEVELS &&
            static_cast<uint64_t>(sectorsX) * sectorsZ <= config::MAX_SECTOR_COUNT &&
-           minTileLevel <= maxLevel && sectorSize > 0.0F &&
+           minTileLevel <= maxTileLevel && sectorSize > 0.0F &&
            heightScale > 0.0F;
 }
 
 uint32_t LandscapeData::nodesPerSectorSide(uint32_t level) const {
-    return maxLevel < config::MAX_LOD_LEVELS && level <= maxLevel
-        ? 1U << (maxLevel - level) : 0U;
+    return maxTileLevel < config::MAX_LOD_LEVELS && level <= maxTileLevel
+        ? 1U << (maxTileLevel - level) : 0U;
 }
 
 float LandscapeData::nodeSize(uint32_t level) const {
@@ -114,13 +114,13 @@ LandscapeRegion LandscapeData::nodeRegion(NodeAddress address) const {
 }
 
 NodeIndexLayout::NodeIndexLayout(const LandscapeData &data) {
-    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxLevel >= config::MAX_LOD_LEVELS ||
+    if (data.sectorsX == 0U || data.sectorsZ == 0U || data.maxTileLevel >= config::MAX_LOD_LEVELS ||
         static_cast<uint64_t>(data.sectorsX) * data.sectorsZ > config::MAX_SECTOR_COUNT) {
         return;
     }
     _sectorsX = data.sectorsX;
     _sectorsZ = data.sectorsZ;
-    _levelCount = data.maxLevel + 1U;
+    _levelCount = data.maxTileLevel + 1U;
     for (uint32_t level = 0; level < _levelCount; ++level) {
         const uint32_t side = data.nodesPerSectorSide(level);
         _levels[level] = Level{side, _nodesPerSector};

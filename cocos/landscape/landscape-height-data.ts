@@ -83,11 +83,11 @@ export class LandscapeHeightGrid {
 }
 
 export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayout {
-    const { sectorCount, maxLevel, minTileLevel, sectorSizeMeters, heightScale, heightBias, files } = manifest;
+    const { sectorCount, maxTileLevel, minTileLevel, sectorSizeMeters, heightScale, heightBias, files } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2
         || !sectorCount.every((v: number) => Number.isInteger(v) && v > 0)
-        || !Number.isInteger(maxLevel) || maxLevel < 0 || maxLevel > 8
-        || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxLevel
+        || !Number.isInteger(maxTileLevel) || maxTileLevel < 0 || maxTileLevel > 8
+        || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxTileLevel
         || typeof sectorSizeMeters !== 'number' || sectorSizeMeters <= 0
         || typeof heightScale !== 'number' || heightScale <= 0 || typeof heightBias !== 'number'
         || !files || typeof files !== 'object') {
@@ -96,7 +96,7 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
     if (sectorCount[0] * sectorCount[1] > MAX_SECTOR_COUNT) {
         throw new Error(`Landscape sector count must not exceed ${MAX_SECTOR_COUNT}`);
     }
-    const side = 2 ** (maxLevel - minTileLevel);
+    const side = 2 ** (maxTileLevel - minTileLevel);
     const tilesX = sectorCount[0] * side; const tilesZ = sectorCount[1] * side;
     if (tilesX * tilesZ > 1000000) {
         throw new Error('Landscape tile count exceeds limit');

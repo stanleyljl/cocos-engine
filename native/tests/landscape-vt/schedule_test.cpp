@@ -196,7 +196,7 @@ int main(int argc, char **argv) {
     auto &data = const_cast<LandscapeData &>(asset.data());
     data.sectorsX = 2;
     data.sectorsZ = 1;
-    data.maxLevel = 2;
+    data.maxTileLevel = 2;
     data.sectorSize = 4;
     data.heightScale = 1;
     const_cast<ccstd::vector<HeightRange> &>(asset.heightRanges()).assign(NodeIndexLayout(data).nodeCount(), {0, 1});
@@ -242,7 +242,7 @@ int main(int argc, char **argv) {
         hadCoverage |= coverage;
         std::vector<std::string> nodes;
         tree.forEachNode([&](const Quadtree::Node &node) {
-            if (node.geometry.level <= data.maxLevel) {
+            if (node.geometry.level <= data.maxTileLevel) {
                 nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(node.loaded) + ":" + std::to_string(node.ready) + ":" + std::to_string(node.renderable));
             }
             if (node.ready) {

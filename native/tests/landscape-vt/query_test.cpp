@@ -26,7 +26,7 @@ LandscapeData data() {
     LandscapeData d;
     d.sectorsX = 2;
     d.sectorsZ = 1;
-    d.maxLevel = 1;
+    d.maxTileLevel = 1;
     d.minTileLevel = 0;
     d.sectorSize = 4;
     // Encode the same world-space plane exactly on the fixed 129-sample grid.
@@ -302,7 +302,7 @@ void benchmark() {
     auto d = data();
     d.sectorsX = 8;
     d.sectorsZ = 8;
-    d.maxLevel = 2;
+    d.maxTileLevel = 2;
     d.sectorSize = 8;
     Loading loading;
     LandscapeQuery q(d, loading.loader(), 64);

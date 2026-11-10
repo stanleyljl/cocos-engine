@@ -52,14 +52,6 @@ class RenderScene;
 namespace landscape {
 class MaterialLibrary;
 
-// Shader instance parameters for one grid, shared by terrain and displaced decals.
-struct LandscapeGridParams {
-    Vec4 grid; // landscape-local XZ origin, size, geometry LOD
-    Vec4 tile; // source tile XZ origin, size, texture array layer
-    Vec4 mapping; // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
-    void apply(scene::Model *model, TypedArray &scratch) const;
-};
-
 // Owns decal selection, VT composition inputs and displaced geometry.
 // LandscapeRenderer supplies resolved terrain nodes; VTRenderer schedules
 // page composition. Neither residency nor quadtree selection belongs here.

@@ -131,7 +131,7 @@ describe('Landscape runtime query parity', () => {
         return Object.assign(new LandscapeData(), {
             sectorsX: 2,
             sectorsZ: 1,
-            maxLevel: 1,
+            maxTileLevel: 1,
             minTileLevel: 0,
             sectorSize: 4,
             heightScale: 65535 * 25 / 32,

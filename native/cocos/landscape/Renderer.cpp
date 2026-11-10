@@ -57,6 +57,21 @@ namespace cc {
 namespace landscape {
 
 namespace {
+void applyGridParams(scene::Model *model, TypedArray &scratch, const LandscapeGridParams &params) {
+    auto &instance = ccstd::get<Float32Array>(scratch);
+    const auto apply = [&](const char *name, const Vec4 &value) {
+        instance[0] = value.x;
+        instance[1] = value.y;
+        instance[2] = value.z;
+        instance[3] = value.w;
+        model->setInstancedAttribute(name, scratch);
+    };
+    // Model copies synchronously, so the same scratch array serves all attributes.
+    apply("a_gridInst", params.grid);
+    apply("a_tileInst", params.tile);
+    apply("a_mappingInst", params.mapping);
+}
+
 Material *createLandscapeMaterial(bool wireframe, bool heightUnorm) {
     auto *material = ccnew Material();
     IMaterialInfo info;
@@ -174,7 +189,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     ccstd::unordered_set<uint64_t> rootKeys;
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            rootKeys.insert(NodeAddress{data.maxLevel, x, z}.key());
+            rootKeys.insert(NodeAddress{data.maxTileLevel, x, z}.key());
         }
     }
     const VTPageLayout layout(data.sectorSize);
@@ -221,7 +236,7 @@ void LandscapeRenderer::bindRuntimeTextures() {
         setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
         setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
-        setRuntimeTexture(material, "vtNormalRoughnessAO", vt.normalRoughnessAO(), vt.sampler());
+        setRuntimeTexture(material, "vtNormalRoughness", vt.normalRoughness(), vt.sampler());
     }
     for (auto *material : _decals->materials()) {
         setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
@@ -336,7 +351,7 @@ LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, u
 }
 
 void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams) {
-    gridParams.apply(model, _instanceAttributeScratch);
+    applyGridParams(model, _instanceAttributeScratch, gridParams);
     model->setEnabled(true);
     updateModelBounds(model, node);
 }
@@ -381,15 +396,11 @@ void LandscapeRenderer::syncRenderables(uint32_t frame, gfx::Texture *previousMa
 
 void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const {
     const auto &origin = _node->getWorldPosition();
-    float decalLift = 0;
-    if (_debugData.decal3DEnabled) {
-        for (const auto &layer : _asset->decalLayers()) {
-            decalLift = std::max(decalLift, layer.heightScale);
-        }
-    }
-    _quadtree.cull([&](NodeAddress address, bool renderable) {
-        if (!renderable) {
-            const auto &node = _quadtree.find(address)->geometry;
+    const float decalLift = _debugData.decal3DEnabled ? _asset->maxDecalHeight() : 0.0F;
+    _quadtree.cull([&](const Quadtree::Node &treeNode) {
+        const auto &node = treeNode.geometry;
+        const auto address = node.address();
+        if (!treeNode.renderable) {
             const auto region = _quadtree.region(address);
             // Include the bound source's height range (also for shared sources
             // below minTileLevel) and raised decals before pruning a subtree.
@@ -421,7 +432,7 @@ void LandscapeRenderer::collectPassModels(const geometry::Frustum &frustum, bool
                     return false;
                 }
             }
-            _decals->collectPassModels(_quadtree.findRenderable(address)->geometry, frustum, shadow, models);
+            _decals->collectPassModels(node, frustum, shadow, models);
         }
         return true;
     });
@@ -568,7 +579,7 @@ void LandscapeRenderer::refreshTerrainMaterials() {
         if (draw.model) {
             draw.model->setSubModelMaterial(0, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
             const auto &node = _quadtree.findRenderable(NodeAddress::fromKey(entry.first))->geometry;
-            resolveGridParams(node, static_cast<uint32_t>(draw.mapping)).apply(draw.model, _instanceAttributeScratch);
+            applyGridParams(draw.model, _instanceAttributeScratch, resolveGridParams(node, static_cast<uint32_t>(draw.mapping)));
         }
     }
     for (const auto &model : _pool) {

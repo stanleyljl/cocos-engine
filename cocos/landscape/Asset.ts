@@ -168,7 +168,7 @@ class Manifest {
         const data = this.parsed;
         data.sectorsX = manifest.sectorCount[0];
         data.sectorsZ = manifest.sectorCount[1];
-        data.maxLevel = manifest.maxLevel;
+        data.maxTileLevel = manifest.maxTileLevel;
         data.minTileLevel = manifest.minTileLevel;
         data.sectorSize = manifest.sectorSizeMeters;
         data.heightScale = manifest.heightScale;
@@ -179,11 +179,11 @@ class Manifest {
     private readHeightRanges (): void {
         const manifest = this.document;
         const data = this.parsed;
-        requireValue(Array.isArray(manifest.levels) && manifest.levels.length === data.maxLevel + 1, 'Invalid height range levels');
+        requireValue(Array.isArray(manifest.levels) && manifest.levels.length === data.maxTileLevel + 1, 'Invalid height range levels');
         this.nodeIndexLayout = new NodeIndexLayout(data);
         this.ranges = new Array(this.nodeIndexLayout.nodeCount());
         this.minimumNormalY = new Array(this.nodeIndexLayout.nodeCount());
-        for (let level = 0; level <= data.maxLevel; ++level) {
+        for (let level = 0; level <= data.maxTileLevel; ++level) {
             this.readHeightRangeLevel(level, manifest.levels[level]);
         }
     }
@@ -304,6 +304,8 @@ export class LandscapeAsset {
     private _materialLayers: MaterialLayer[] = [];
     private _materialResolution = 0;
     private _decalLayers: DecalLayer[] = [];
+    // Derived from decal layers; recomputed on every successful load.
+    private _maxDecalHeight = 0;
     private _decals: Decal[] = [];
     private _decalResolution = 1;
     private _decalNearDistance = 12;
@@ -330,6 +332,9 @@ export class LandscapeAsset {
     }
     public decalLayers (): readonly DecalLayer[] {
         return this._decalLayers;
+    }
+    public maxDecalHeight (): number {
+        return this._maxDecalHeight;
     }
     public decals (): readonly Decal[] {
         return this._decals;
@@ -372,6 +377,10 @@ export class LandscapeAsset {
             this._materialLayers = parsed.materialLayers;
             this._materialResolution = parsed.materialResolution;
             this._decalLayers = parsed.decalLayers;
+            this._maxDecalHeight = 0;
+            for (const layer of this._decalLayers) {
+                this._maxDecalHeight = Math.max(this._maxDecalHeight, layer.heightScale);
+            }
             this._decals = parsed.decals;
             this._decalResolution = parsed.decalResolution;
             this._decalNearDistance = parsed.decalNearDistance;
@@ -380,7 +389,7 @@ export class LandscapeAsset {
             this._heightRanges = parsed.ranges;
             this._minimumNormalY = parsed.minimumNormalY;
             if (config.LANDSCAPE_DEBUG) {
-                log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxLevel + 1} minTileLevel=${this._data.minTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
+                log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxTileLevel + 1} minTileLevel=${this._data.minTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
             }
             return true;
         } catch (cause) {
@@ -426,7 +435,7 @@ export class LandscapeAsset {
     }
 
     public requestTile (level: number, x: number, z: number): boolean {
-        if (this._loadFailed || level < this._data.minTileLevel || level > this._data.maxLevel) {
+        if (this._loadFailed || level < this._data.minTileLevel || level > this._data.maxTileLevel) {
             return false;
         }
         const generation = this._generation;

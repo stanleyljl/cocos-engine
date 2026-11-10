@@ -2,6 +2,7 @@
 #pragma once
 
 #include <optional>
+#include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/Data.h"
 
@@ -41,7 +42,7 @@ private:
     Resources collectResources(uint32_t &mappingCount) const;
     void admitNodes(Resources &resources, uint32_t mappingCount, bool sectorRootsReady);
     void appendResources(Resources &resources, const PendingNode &pending) const;
-    bool canPrepare(const Resources &resources) const;
+    bool canPrepare(const Resources &resources, ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> &pageSources) const;
     ccstd::vector<NodeAddress> compositionSources() const;
     void stopLoading();
 
