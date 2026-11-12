@@ -120,8 +120,9 @@ export class VTPageAddress {
 }
 
 export class VTGridMapping {
-    public static readonly SIDE = 16;
-    public static readonly CELL_COUNT = 256;
+    public static readonly SIDE_BITS = 4;
+    public static readonly SIDE = 1 << VTGridMapping.SIDE_BITS;
+    public static readonly CELL_COUNT = VTGridMapping.SIDE * VTGridMapping.SIDE;
     public readonly cells = new Uint8Array(VTGridMapping.CELL_COUNT);
     public pages: VTPageAddress[] = [];
 }
@@ -129,11 +130,11 @@ export class VTGridMapping {
 export class VTPageSources {
     public splat = new NodeAddress();
     public normals: NodeAddress[] = Array.from({ length: config.VT_NORMAL_SOURCE_COUNT }, () => new NodeAddress());
-    // Empty for XZ projection; otherwise a 3x3 lookup covering the page and its gutters.
-    public projections: NodeAddress[] = [];
+    // Side projections sample the padded height data of the splat source.
+    public triplanar = false;
 
     public appendTo (output: NodeAddress[]): void {
-        for (const source of [this.splat, ...this.normals, ...this.projections]) {
+        for (const source of [this.splat, ...this.normals]) {
             if (!output.some((entry) => entry.key() === source.key())) {
                 output.push(source);
             }
@@ -146,7 +147,7 @@ export class LandscapeData {
     public sectorsZ = 0;
     public maxTileLevel = 0; // Coarsest source tile level; also the sector root level.
     public minTileLevel = 0; // Finest source tile level; finer geometry nodes sample ancestor tiles.
-    public sectorSize = 0;
+    public sectorSize = 0; // Positive power of two.
     public heightScale = 0;
     public heightBias = 0;
 
@@ -169,7 +170,8 @@ export class LandscapeData {
             && Number.isInteger(this.maxTileLevel) && this.maxTileLevel >= 0 && this.maxTileLevel < config.MAX_LOD_LEVELS
             && this.sectorsX * this.sectorsZ <= config.MAX_SECTOR_COUNT
             && Number.isInteger(this.minTileLevel) && this.minTileLevel >= 0 && this.minTileLevel <= this.maxTileLevel
-            && this.sectorSize > 0 && this.heightScale > 0;
+            && this.sectorSize > 0 && 2 ** Math.floor(Math.log2(this.sectorSize)) === this.sectorSize
+            && this.heightScale > 0;
     }
 
     public nodesPerSectorSide (level: number): number {
@@ -205,52 +207,15 @@ export class LandscapeData {
     }
 }
 
-export class NodeIndexLayout {
-    public static readonly INVALID_INDEX = -1;
-    private readonly _levels: {
-        nodesPerSide: number;
-        offset: number;
-    }[] = [];
-    private _sectorsX = 0;
-    private _sectorsZ = 0;
-    private _nodesPerSector = 0;
-
-    constructor (data?: LandscapeData) {
-        if (!data || data.sectorsX <= 0 || data.sectorsZ <= 0 || data.maxTileLevel >= config.MAX_LOD_LEVELS
-            || data.sectorsX * data.sectorsZ > config.MAX_SECTOR_COUNT) {
-            return;
-        }
-        this._sectorsX = data.sectorsX;
-        this._sectorsZ = data.sectorsZ;
-        for (let level = 0; level <= data.maxTileLevel; ++level) {
-            const side = data.nodesPerSectorSide(level);
-            this._levels.push({ nodesPerSide: side, offset: this._nodesPerSector });
-            this._nodesPerSector += side * side;
-        }
-    }
-
-    public nodeCount (): number {
-        return this._sectorsX * this._sectorsZ * this._nodesPerSector;
-    }
-
-    public sectorNodeIndex (sectorX: number, sectorZ: number, level: number, localX: number, localZ: number): number {
-        if (level < 0 || level >= this._levels.length || sectorX < 0 || sectorZ < 0 || sectorX >= this._sectorsX || sectorZ >= this._sectorsZ) {
-            return NodeIndexLayout.INVALID_INDEX;
-        }
-        const layout = this._levels[level];
-        if (localX < 0 || localZ < 0 || localX >= layout.nodesPerSide || localZ >= layout.nodesPerSide) {
-            return NodeIndexLayout.INVALID_INDEX;
-        }
-        return (sectorZ * this._sectorsX + sectorX) * this._nodesPerSector + layout.offset + localZ * layout.nodesPerSide + localX;
-    }
-
-    public globalNodeIndex (level: number, x: number, z: number): number {
-        if (level < 0 || level >= this._levels.length) {
-            return NodeIndexLayout.INVALID_INDEX;
-        }
-        const side = this._levels[level].nodesPerSide;
-        return this.sectorNodeIndex(Math.floor(x / side), Math.floor(z / side), level, x % side, z % side);
-    }
+// Immutable inputs shared by one synchronous mapping traversal; never retained.
+interface GridMappingContext {
+    readonly node: NodeAddress;
+    readonly region: LandscapeRegion;
+    readonly cellSize: number;
+    // VT-relative level; negative when cells are smaller than an L0 page.
+    readonly cellLevel: number;
+    readonly camera: Readonly<Vec3>;
+    readonly heightDistance: number;
 }
 
 export class VTPageLayout {
@@ -287,56 +252,59 @@ export class VTPageLayout {
         return { x: page.x * size, z: page.z * size, size };
     }
 
-    public buildGridMapping (region: LandscapeRegion, minY: number, maxY: number, camera: Readonly<Vec3>): VTGridMapping {
+    // Subdivide a geometry node by distance; integer cell coordinates determine
+    // the containing page, including the complete morph/stitch trajectory.
+    public buildGridMapping (data: LandscapeData, node: NodeAddress, minY: number, maxY: number, camera: Readonly<Vec3>): VTGridMapping {
         const result = new VTGridMapping();
-        const heightDistance = Math.max(minY - camera.y, camera.y - maxY, 0);
-        const firstCell = { x: region.x, z: region.z, size: region.size / VTGridMapping.SIDE };
+        const region = data.nodeRegion(node);
+        const context: GridMappingContext = {
+            node,
+            region,
+            cellSize: region.size / VTGridMapping.SIDE,
+            cellLevel: this._rootLevel - (data.maxTileLevel - node.level + VTGridMapping.SIDE_BITS),
+            camera,
+            heightDistance: Math.max(minY - camera.y, camera.y - maxY, 0),
+        };
+        // Keep the four initial quadrants and traversal order used for page admission.
         const half = VTGridMapping.SIDE / 2;
         for (let z = 0; z < VTGridMapping.SIDE; z += half) {
             for (let x = 0; x < VTGridMapping.SIDE; x += half) {
-                this.mapCells(firstCell, camera, heightDistance, x, z, half, result);
+                this.mapGridBlock(context, x, z, VTGridMapping.SIDE_BITS - 1, result);
             }
         }
         return result;
     }
 
-    public coveringPage (desiredLevel: number, min: LandscapePoint, max: LandscapePoint): VTPageAddress {
-        for (let level = desiredLevel; level <= this._rootLevel; ++level) {
-            const size = this.pageSize(level);
-            const page = new VTPageAddress(level, Math.floor(min.x / size + 1e-7), Math.floor(min.z / size + 1e-7));
-            if (max.x <= (page.x + 1) * size + size * 1e-7 && max.z <= (page.z + 1) * size + size * 1e-7) {
-                return page;
-            }
-        }
-        throw new Error('VT coverage must not cross sector boundaries');
-    }
-
-    private mapCells (firstCell: LandscapeRegion, camera: Readonly<Vec3>, heightDistance: number, left: number, bottom: number, side: number, mapping: VTGridMapping): void {
-        const cellSize = firstCell.size;
-        const x = firstCell.x + left * cellSize;
-        const z = firstCell.z + bottom * cellSize;
-        const size = side * cellSize;
-        const dx = Math.max(x - camera.x, camera.x - x - size, 0);
-        const dz = Math.max(z - camera.z, camera.z - z - size, 0);
-        const level = this.levelForDistance(Math.sqrt(dx * dx + heightDistance * heightDistance + dz * dz));
-        if (side > 1 && this.pageSize(level) < size) {
+    private mapGridBlock (context: GridMappingContext, left: number, bottom: number, blockLevel: number, result: VTGridMapping): void {
+        const side = 1 << blockLevel;
+        const x = context.region.x + left * context.cellSize;
+        const z = context.region.z + bottom * context.cellSize;
+        const size = side * context.cellSize;
+        const dx = Math.max(x - context.camera.x, context.camera.x - x - size, 0);
+        const dz = Math.max(z - context.camera.z, context.camera.z - z - size, 0);
+        const desiredLevel = this.levelForDistance(Math.sqrt(dx * dx + context.heightDistance * context.heightDistance + dz * dz));
+        if (blockLevel > 0 && this.pageSize(desiredLevel) < size) {
             const half = side / 2;
             for (let row = bottom; row < bottom + side; row += half) {
-                for (let col = left; col < left + side; col += half) {
-                    this.mapCells(firstCell, camera, heightDistance, col, row, half, mapping);
+                for (let column = left; column < left + side; column += half) {
+                    this.mapGridBlock(context, column, row, blockLevel - 1, result);
                 }
             }
             return;
         }
-        // Include the complete trajectory of odd vertices during morph/stitching.
-        const page = this.coveringPage(level, { x: x - (left & 1) * cellSize, z: z - (bottom & 1) * cellSize }, { x: x + size, z: z + size });
-        let index = mapping.pages.findIndex((entry) => entry.key() === page.key());
+        // Aligned blocks contain every morph target. An odd single cell needs
+        // its 2x2 parent because odd vertices move to the preceding even vertex.
+        const coverageLevel = context.cellLevel + blockLevel + (blockLevel === 0 && ((left | bottom) & 1) ? 1 : 0);
+        const level = Math.max(desiredLevel, coverageLevel);
+        const shift = level - context.cellLevel;
+        const page = new VTPageAddress(level, (context.node.x * VTGridMapping.SIDE + left) >>> shift, (context.node.z * VTGridMapping.SIDE + bottom) >>> shift);
+        let index = result.pages.findIndex((entry) => entry.key() === page.key());
         if (index < 0) {
-            index = mapping.pages.length;
-            mapping.pages.push(page);
+            index = result.pages.length;
+            result.pages.push(page);
         }
         for (let row = bottom; row < bottom + side; ++row) {
-            mapping.cells.fill(index, row * VTGridMapping.SIDE + left, row * VTGridMapping.SIDE + left + side);
+            result.cells.fill(index, row * VTGridMapping.SIDE + left, row * VTGridMapping.SIDE + left + side);
         }
     }
 }

@@ -219,10 +219,6 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     return true;
 }
 
-bool LandscapeRenderer::isReady() const {
-    return _ready;
-}
-
 std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
     const auto decals = _decals->materials();
     return {_materialSolid.get(), _materialWire.get(), decals[0], decals[1]};
@@ -235,8 +231,8 @@ void LandscapeRenderer::bindRuntimeTextures() {
         setRuntimeTexture(material, "holeSplatmap", _residency->splatArray(), _residency->splatSampler());
         setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
         setRuntimeTexture(material, "vtNormalRoughness", vt.normalRoughness(), vt.sampler());
+        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
     }
     for (auto *material : _decals->materials()) {
         setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
@@ -252,23 +248,14 @@ void LandscapeRenderer::setGlobalColorStrength(float strength) {
 }
 
 void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
-    const auto previous = _debugData;
     _debugData = data;
-    // Unlit records the applied variant only after shader compilation succeeds.
-    _debugData.unlit = previous.unlit;
-    if (previous.wireframe != data.wireframe) {
-        _decals->setWireframe(data.wireframe);
-    }
-    if (previous.decal3DEnabled != data.decal3DEnabled) {
-        _decals->setEnabled(data.decal3DEnabled);
-    }
+    setUnlit(data.unlit);
+    _decals->setEnabled(data.decal3DEnabled);
+    _decals->setWireframe(data.wireframe);
     _vtRenderer->setHeightBlendEnabled(data.heightBlendEnabled);
     _vtRenderer->setTriplanarEnabled(data.triplanarEnabled);
     _vtRenderer->setRefineFarDetail(data.refineFarDetail);
-    if (previous.wireframe != data.wireframe) {
-        refreshTerrainMaterials();
-    }
-    setUnlit(data.unlit);
+    refreshTerrainMaterials();
     updateMaterialProperties();
 }
 
@@ -603,31 +590,14 @@ TextureBase *LandscapeRenderer::getVTAtlas() const {
 }
 
 void LandscapeRenderer::setUnlit(bool enabled) {
-    if (_debugData.unlit == enabled) {
-        return;
-    }
     // These passes belong exclusively to this renderer. Update their shader
-    // variants in place, preserving texture bindings and instanced batching.
-    const auto compile = [this](bool unlit) {
-        bool success = true;
-        for (auto *material : surfaceMaterials()) {
-            for (const auto &pass : *material->getPasses()) {
-                pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = unlit;
-                success = pass->tryCompile() && success;
-            }
+    // variants before setDebugData refreshes model materials and instance data.
+    for (auto *material : surfaceMaterials()) {
+        for (const auto &pass : *material->getPasses()) {
+            pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = enabled;
+            pass->tryCompile();
         }
-        return success;
-    };
-    if (compile(enabled)) {
-        _debugData.unlit = enabled;
-    } else {
-        compile(_debugData.unlit);
-        CC_LOG_ERROR("[Landscape] Failed to switch unlit shader variant");
     }
-    // Refresh cached submodel shaders and instance attributes, including pooled
-    // models, so reused models retain the correct instance layout.
-    refreshTerrainMaterials();
-    _decals->refreshMaterials();
 }
 
 void LandscapeRenderer::destroy() {

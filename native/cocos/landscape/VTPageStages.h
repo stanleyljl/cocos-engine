@@ -89,8 +89,8 @@ private:
     IntrusivePtr<gfx::RenderPass> _initialPass;
     IntrusivePtr<Material> _composeMaterial;
     IntrusivePtr<gfx::Texture> _sourceTable;
-    using SourceRow = std::array<Vec4, config::VT_SOURCE_COUNT>;
-    static_assert(sizeof(SourceRow) == config::VT_SOURCE_COUNT * 4 * sizeof(float), "Source rows must match RGBA32F texels");
+    using SourceRow = std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT>;
+    static_assert(sizeof(SourceRow) == config::VT_NORMAL_SOURCE_COUNT * 4 * sizeof(float), "Source rows must match RGBA32F texels");
     ccstd::vector<SourceRow> _sourceRows;
     DecalRenderer *_decals{nullptr}; // borrowed; owner destroys VT first
     IntrusivePtr<Texture2D> _globalColorMap;

@@ -49,7 +49,7 @@ LandscapeResidency::~LandscapeResidency() {
 
 bool LandscapeResidency::init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm) {
     CC_ASSERT(_device == nullptr);
-    if (device == nullptr || asset == nullptr || layerCount == 0 || layerCount > device->getCapabilities().maxArrayTextureLayers) {
+    if (device == nullptr || asset == nullptr || layerCount == 0) {
         return false;
     }
     if (!initSlots(asset->data(), layerCount)) {
@@ -219,12 +219,14 @@ bool LandscapeResidency::initTextures() {
     info.type = gfx::TextureType::TEX2D_ARRAY;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = _heightUnorm ? gfx::Format::R16_UNORM : gfx::Format::RG8;
-    info.width = config::SOURCE_TILE_RESOLUTION;
-    info.height = config::SOURCE_TILE_RESOLUTION;
+    info.width = config::SOURCE_HEIGHT_RESOLUTION;
+    info.height = config::SOURCE_HEIGHT_RESOLUTION;
     info.layerCount = _capacity;
     info.levelCount = 1;
     _heightArray = _device->createTexture(info);
     info.format = gfx::Format::R16UI;
+    info.width = config::SOURCE_TILE_RESOLUTION;
+    info.height = config::SOURCE_TILE_RESOLUTION;
     _splatArray = _device->createTexture(info);
     info.format = gfx::Format::RG8;
     info.width = config::SOURCE_NORMAL_RESOLUTION;

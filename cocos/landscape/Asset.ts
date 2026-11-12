@@ -2,9 +2,10 @@
 import type { LandscapeQueryTile, LandscapeQueryCompletion } from './Data';
 import downloader from '../asset/asset-manager/downloader';
 import { error, log } from '../core/platform/debug';
+import { Format } from '../gfx';
 import zlib from '../../external/compression/zlib.min';
 import { decodeLandscapeHeight } from './landscape-height-data';
-import { HeightRange, LandscapeData, NodeIndexLayout, NodeKey, makeNodeKey } from './Data';
+import { HeightRange, LandscapeData, NodeKey, makeNodeKey } from './Data';
 import * as config from './Config';
 
 export interface MaterialLayer {
@@ -127,9 +128,7 @@ function decodeColor (buffer: ArrayBuffer, resolution: number, channels: 3 | 4):
 // after every section validates; URL resolution remains local to the Web runtime.
 class Manifest {
     public readonly parsed = new LandscapeData();
-    public nodeIndexLayout = new NodeIndexLayout();
-    public ranges: HeightRange[] = [];
-    public minimumNormalY: number[] = [];
+    public ranges: HeightRange[][] = [];
     public assetDir = '';
     public files = new Map<string, string>();
     public materialLayers: MaterialLayer[] = [];
@@ -170,7 +169,7 @@ class Manifest {
         data.sectorsZ = manifest.sectorCount[1];
         data.maxTileLevel = manifest.maxTileLevel;
         data.minTileLevel = manifest.minTileLevel;
-        data.sectorSize = manifest.sectorSizeMeters;
+        data.sectorSize = manifest.sectorSize;
         data.heightScale = manifest.heightScale;
         data.heightBias = manifest.heightBias;
         requireValue(data.valid() && number(data.sectorSize) && number(data.heightScale) && number(data.heightBias), 'Invalid dimensions');
@@ -180,9 +179,7 @@ class Manifest {
         const manifest = this.document;
         const data = this.parsed;
         requireValue(Array.isArray(manifest.levels) && manifest.levels.length === data.maxTileLevel + 1, 'Invalid height range levels');
-        this.nodeIndexLayout = new NodeIndexLayout(data);
-        this.ranges = new Array(this.nodeIndexLayout.nodeCount());
-        this.minimumNormalY = new Array(this.nodeIndexLayout.nodeCount());
+        this.ranges = new Array(data.maxTileLevel + 1);
         for (let level = 0; level <= data.maxTileLevel; ++level) {
             this.readHeightRangeLevel(level, manifest.levels[level]);
         }
@@ -272,33 +269,23 @@ class Manifest {
 
     private readHeightRangeLevel (level: number, levelValue: any): void {
         const data = this.parsed;
-        const range = levelValue.heightRange;
-        const slopes = levelValue.minimumNormalY;
+        const ranges = levelValue.heightRange;
         const width = data.nodesX(level);
         const depth = data.nodesZ(level);
-        requireValue(range && Array.isArray(range.min) && Array.isArray(range.max)
-            && range.min.length === width * depth && range.max.length === width * depth, 'Invalid height range size');
-        requireValue(Array.isArray(slopes) && slopes.length === width * depth, 'Invalid slope statistics size');
-        for (let z = 0; z < depth; ++z) {
-            for (let x = 0; x < width; ++x) {
-                const index = z * width + x;
-                requireValue(number(range.min[index]) && number(range.max[index]), 'Invalid height range');
-                requireValue(number(slopes[index]) && slopes[index] >= 0 && slopes[index] <= 1, 'Invalid minimum normal Y');
-                this.minimumNormalY[this.nodeIndexLayout.globalNodeIndex(level, x, z)] = slopes[index];
-                this.ranges[this.nodeIndexLayout.globalNodeIndex(level, x, z)] = {
-                    minY: data.heightBias + range.min[index] * data.heightScale / 65535,
-                    maxY: data.heightBias + range.max[index] * data.heightScale / 65535,
-                };
-            }
-        }
+        requireValue(Array.isArray(ranges) && ranges.length === width * depth, 'Invalid height range size');
+        this.ranges[level] = ranges.map((range) => {
+            requireValue(Array.isArray(range) && range.length === 2 && number(range[0]) && number(range[1]), 'Invalid height range');
+            return {
+                minY: data.heightBias + range[0] * data.heightScale / 65535,
+                maxY: data.heightBias + range[1] * data.heightScale / 65535,
+            };
+        });
     }
 }
 
 export class LandscapeAsset {
     private _data = new LandscapeData();
-    private _heightRanges: HeightRange[] = [];
-    private _minimumNormalY: number[] = [];
-    private _nodeIndexLayout = new NodeIndexLayout();
+    private _heightRanges: HeightRange[][] = [];
     private _files = new Map<string, string>();
     private _dataDir = '';
     private _materialLayers: MaterialLayer[] = [];
@@ -317,11 +304,8 @@ export class LandscapeAsset {
     public data (): LandscapeData {
         return this._data;
     }
-    // Immutable asset metadata, indexed with NodeIndexLayout; shared by VT source selection.
-    public minimumNormalY (): readonly number[] {
-        return this._minimumNormalY;
-    }
-    public heightRanges (): readonly HeightRange[] {
+    // Immutable bounds: [level][z * nodesX(level) + x], spanning all sectors.
+    public heightRanges (): readonly (readonly HeightRange[])[] {
         return this._heightRanges;
     }
     public materialLayers (): readonly MaterialLayer[] {
@@ -385,9 +369,7 @@ export class LandscapeAsset {
             this._decalResolution = parsed.decalResolution;
             this._decalNearDistance = parsed.decalNearDistance;
             this._decalFarDistance = parsed.decalFarDistance;
-            this._nodeIndexLayout = parsed.nodeIndexLayout;
             this._heightRanges = parsed.ranges;
-            this._minimumNormalY = parsed.minimumNormalY;
             if (config.LANDSCAPE_DEBUG) {
                 log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxTileLevel + 1} minTileLevel=${this._data.minTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
             }
@@ -417,7 +399,7 @@ export class LandscapeAsset {
         return decodeColor(await LandscapeAsset.loadBytes(url), resolution, channels);
     }
 
-    private async loadTileSet (level: number, x: number, z: number): Promise<LandscapeQueryTile> {
+    private async loadTileSet (level: number, x: number, z: number, heightFormat: Format): Promise<LandscapeQueryTile> {
         const prefix = `nodes/L${level}/`;
         const suffix = `${x}_${z}.png`;
         const [heightBytes, splatBytes, normal] = await Promise.all([
@@ -425,21 +407,26 @@ export class LandscapeAsset {
             LandscapeAsset.loadBytes(this.resolveFile(`${prefix}s_${suffix}`)),
             LandscapeAsset.loadColor(this.resolveFile(`${prefix}n_${suffix}`), config.SOURCE_NORMAL_RESOLUTION, 3),
         ]);
-        const samples = decodeLandscapeHeight(heightBytes, config.SOURCE_TILE_RESOLUTION);
-        const height = new Uint8Array(samples.length * 2);
-        for (let i = 0; i < samples.length; ++i) {
-            height[i * 2] = samples[i] >> 8;
-            height[i * 2 + 1] = samples[i] & 255;
+        const samples = decodeLandscapeHeight(heightBytes, config.SOURCE_HEIGHT_RESOLUTION);
+        // R16_UNORM uploads use native-order uint16 bytes; RG8 and CPU queries use high/low bytes.
+        const height = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+        if (heightFormat === Format.RG8) {
+            for (let i = 0; i < samples.length; ++i) {
+                const sample = samples[i];
+                height[i * 2] = sample >> 8;
+                height[i * 2 + 1] = sample & 255;
+            }
         }
         return { height, splat: decodeLandscapeHeight(splatBytes, config.SOURCE_TILE_RESOLUTION), normal };
     }
 
-    public requestTile (level: number, x: number, z: number): boolean {
-        if (this._loadFailed || level < this._data.minTileLevel || level > this._data.maxTileLevel) {
+    public requestTile (level: number, x: number, z: number, heightFormat: Format): boolean {
+        if (this._loadFailed || (heightFormat !== Format.RG8 && heightFormat !== Format.R16UI)
+            || level < this._data.minTileLevel || level > this._data.maxTileLevel) {
             return false;
         }
         const generation = this._generation;
-        void this.loadTileSet(level, x, z).then((tile) => {
+        void this.loadTileSet(level, x, z, heightFormat).then((tile) => {
             if (generation !== this._generation || this._loadFailed) {
                 return;
             }
@@ -469,7 +456,7 @@ export class LandscapeAsset {
             return;
         }
         const generation = this._generation;
-        void this.loadTileSet(this._data.minTileLevel, x, z).then((tile) => {
+        void this.loadTileSet(this._data.minTileLevel, x, z, Format.RG8).then((tile) => {
             if (generation === this._generation) {
                 completion(tile);
             }
@@ -481,6 +468,10 @@ export class LandscapeAsset {
     }
 
     public getHeightRange (level: number, x: number, z: number): HeightRange | undefined {
-        return this._heightRanges[this._nodeIndexLayout.globalNodeIndex(level, x, z)];
+        if (level < 0 || level >= this._heightRanges.length || x < 0 || z < 0
+            || x >= this._data.nodesX(level) || z >= this._data.nodesZ(level)) {
+            return undefined;
+        }
+        return this._heightRanges[level][z * this._data.nodesX(level) + x];
     }
 }

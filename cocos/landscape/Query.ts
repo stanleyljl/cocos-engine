@@ -185,13 +185,14 @@ export class LandscapeQuery {
 
     public update (): void {
         const samples = config.SOURCE_TILE_RESOLUTION ** 2;
+        const heights = config.SOURCE_HEIGHT_RESOLUTION ** 2;
         const normals = config.SOURCE_NORMAL_RESOLUTION ** 2;
         for (const tile of this._tiles.values()) {
             if (tile.status !== LandscapeQueryStatus.NOT_READY || !tile.loaded) {
                 continue;
             }
             const data = tile.data;
-            tile.status = data && data.height.length === samples * 2 && data.splat.length === samples && data.normal.length === normals * 3
+            tile.status = data && data.height.length === heights * 2 && data.splat.length === samples && data.normal.length === normals * 3
                 ? LandscapeQueryStatus.HIT : LandscapeQueryStatus.ERROR;
         }
     }
@@ -227,6 +228,8 @@ export class LandscapeQuery {
             return result;
         }
         const indices = [a, a + 1, a + config.SOURCE_TILE_RESOLUTION, a + config.SOURCE_TILE_RESOLUTION + 1];
+        const h = (iz + config.SOURCE_HEIGHT_BORDER) * config.SOURCE_HEIGHT_RESOLUTION + ix + config.SOURCE_HEIGHT_BORDER;
+        const heightIndices = [h, h + 1, h + config.SOURCE_HEIGHT_RESOLUTION, h + config.SOURCE_HEIGHT_RESOLUTION + 1];
         const n = (iz + config.SOURCE_NORMAL_BORDER) * config.SOURCE_NORMAL_RESOLUTION + ix + config.SOURCE_NORMAL_BORDER;
         const normalIndices = [n, n + 1, n + config.SOURCE_NORMAL_RESOLUTION, n + config.SOURCE_NORMAL_RESOLUTION + 1];
         const fx = gx - ix;
@@ -239,7 +242,7 @@ export class LandscapeQuery {
         let nz = 0;
         const material = new Float64Array(config.MATERIAL_LIBRARY_MAX);
         for (let i = 0; i < 4; ++i) {
-            const h = indices[i] * 2;
+            const h = heightIndices[i] * 2;
             const normal = normalIndices[i] * 3;
             height += triangle[i] * (tile.height[h] * 256 + tile.height[h + 1]);
             nx += weights[i] * (tile.normal[normal] / 127.5 - 1);

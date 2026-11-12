@@ -1,5 +1,6 @@
+import * as config from '../../cocos/landscape/Config';
 import { Vec3 } from '../../cocos/core/math';
-import { LandscapeData, NodeAddress, NodeIndexLayout, VTGridMapping, VTPageAddress, VTPageLayout } from '../../cocos/landscape/Data';
+import { HeightRange, LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageLayout } from '../../cocos/landscape/Data';
 import { Quadtree } from '../../cocos/landscape/Quadtree';
 import { PageState, VTPage, VTRenderer } from '../../cocos/landscape/VTRenderer';
 
@@ -24,8 +25,7 @@ function mapping (address: NodeAddress): VTGridMapping {
 function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; slots: () => number[]; pages: () => VTPage[] } {
     const state = {
         _data: data,
-        _nodeIndexLayout: new NodeIndexLayout(data),
-        _minimumNormalY: new Array(new NodeIndexLayout(data).nodeCount()).fill(0),
+        _heightRanges: Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: data.sectorSize * 2 }))),
         _layout: new VTPageLayout(data.sectorSize),
         _pages: Array.from({ length: capacity }, () => new VTPage()),
         _reservedSlots: [] as number[],
@@ -37,12 +37,24 @@ function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRend
     return { renderer, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
 }
 
+test('sector dimensions must be powers of two', () => {
+    const data = cacheData(8, 1, 1);
+    for (const size of [0.125, 1, 1024, 4096]) {
+        data.sectorSize = size;
+        expect(data.valid()).toBe(true);
+    }
+    for (const size of [0, -1, 1.5, 1000]) {
+        data.sectorSize = size;
+        expect(data.valid()).toBe(false);
+    }
+});
+
 test('triplanar height sources cover page interiors and gutters across sectors', () => {
     // Same boundary samples as native testCompositionSources; no GPU resources.
     const data = Object.assign(cacheData(7, 2, 2), { sectorSize: 2048 });
     const { renderer } = pageFixture(data, 256);
     const layout = new VTPageLayout(data.sectorSize);
-    expect(renderer.selectSources(new VTPageAddress(8, 2, 2), true, false).projections).toHaveLength(0);
+    expect(renderer.selectSources(new VTPageAddress(8, 2, 2), true, false).triplanar).toBe(false);
     const samples = [-8 / 256, 0, 0.25, 0.5, 0.75, 1, 1 + 8 / 256];
     for (let level = 0; level <= layout.rootLevel(); ++level) {
         const size = layout.pageSize(level);
@@ -51,45 +63,49 @@ test('triplanar height sources cover page interiors and gutters across sectors',
             for (const z of [0, Math.floor(last / 2), last]) {
                 for (const detailed of [false, true]) {
                     const inputs = renderer.selectSources(new VTPageAddress(level, x, z), detailed, true);
-                    requireCondition(inputs.projections.length === 9 && inputs.projections[4].key() === inputs.splat.key(), 'Projection height precision differs from the page source');
+                    requireCondition(inputs.triplanar, 'Cliff pages must use triplanar');
+                    const region = data.nodeRegion(inputs.splat);
+                    const padding = region.size * config.SOURCE_HEIGHT_BORDER / (config.SOURCE_TILE_RESOLUTION - 1);
                     for (const u of samples) {
                         for (const v of samples) {
-                            const col = u < 0 ? 0 : (u < 1 ? 1 : 2);
-                            const row = v < 0 ? 0 : (v < 1 ? 1 : 2);
-                            const region = data.nodeRegion(inputs.projections[row * 3 + col]);
-                            const worldX = Math.max(0, Math.min(data.width(), (x + u) * size));
-                            const worldZ = Math.max(0, Math.min(data.depth(), (z + v) * size));
-                            requireCondition(worldX >= region.x && worldX <= region.x + region.size && worldZ >= region.z && worldZ <= region.z + region.size,
-                                'Height projection clamped an interior/sector-edge sample to the wrong tile');
+                            const worldX = (x + u) * size;
+                            const worldZ = (z + v) * size;
+                            requireCondition(worldX >= region.x - padding && worldX <= region.x + region.size + padding && worldZ >= region.z - padding && worldZ <= region.z + region.size + padding,
+                                'Padded height must cover page interiors and all gutter edges and corners');
                         }
                     }
                     const sources: NodeAddress[] = [];
                     inputs.appendTo(sources);
                     expect(new Set(sources.map((source) => source.key())).size).toBe(sources.length);
+                    expect(sources.length).toBeLessThanOrEqual(5);
+                    const withoutTriplanar: NodeAddress[] = [];
+                    renderer.selectSources(new VTPageAddress(level, x, z), detailed, false).appendTo(withoutTriplanar);
+                    expect(sources).toEqual(withoutTriplanar);
                 }
             }
         }
     }
 });
 
-test('CPU cliff culling separates gentle pages and retains cliffs in gutters and coarse pages', () => {
+test('CPU cliff estimates use height span and region size including gutters', () => {
     const data = Object.assign(cacheData(3, 2, 1), { sectorSize: 128 });
     const { renderer } = pageFixture(data, 256);
-    const slopes = (renderer as unknown as { _minimumNormalY: number[] })._minimumNormalY;
-    slopes.fill(1);
-    const index = new NodeIndexLayout(data);
-    // A narrow cliff in the second sector must survive every parent.
+    const ranges = (renderer as unknown as { _heightRanges: HeightRange[][] })._heightRanges;
+    for (const levelRanges of ranges) {
+        levelRanges.fill({ minY: 100, maxY: 100 });
+    }
+    // The same height span becomes gentle when averaged over a coarse region.
     for (let level = 0; level <= data.maxTileLevel; ++level) {
-        slopes[index.globalNodeIndex(level, 8 >> level, 2 >> level)] = 0.4;
+        ranges[level][(2 >> level) * data.nodesX(level) + (8 >> level)] = { minY: 100, maxY: 164 };
     }
     const ordinary = new VTPageAddress(3, 0, 0);
-    expect(renderer.selectSources(ordinary, true, true).projections).toHaveLength(0);
+    expect(renderer.selectSources(ordinary, true, true).triplanar).toBe(false);
     expect(renderer.selectSources(ordinary, true, true)).toEqual(renderer.selectSources(ordinary, true, false));
-    expect(renderer.selectSources(new VTPageAddress(0, 128, 32), true, true).projections).toHaveLength(9);
+    expect(renderer.selectSources(new VTPageAddress(0, 128, 32), true, true).triplanar).toBe(true);
     // Its gutter reaches a cliff across the sector boundary.
-    expect(renderer.selectSources(new VTPageAddress(4, 7, 2), true, true).projections).toHaveLength(9);
-    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, true).projections).toHaveLength(9);
-    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, false).projections).toHaveLength(0);
+    expect(renderer.selectSources(new VTPageAddress(4, 7, 2), true, true).triplanar).toBe(true);
+    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, true).triplanar).toBe(false);
+    expect(renderer.selectSources(new VTPageAddress(7, 1, 0), true, false).triplanar).toBe(false);
 });
 
 // Independent cell rasterization checks coverage and every neighboring LOD pair.
@@ -164,7 +180,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                 const [level, sectorsX, sectorsZ, capacity] = values;
                 data = cacheData(level, sectorsX, sectorsZ);
                 if (command === 'tree') {
-                    const ranges = Array.from({ length: new NodeIndexLayout(data).nodeCount() }, () => ({ minY: 0, maxY: 1 }));
+                    const ranges = Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: 1 })));
                     tree.init({ data: () => data, heightRanges: () => ranges });
                     for (let z = 0; z < sectorsZ; ++z) {
                         for (let x = 0; x < sectorsX; ++x) {
@@ -237,27 +253,34 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                 }
                 const slots = pages!.pages().map((page) => `${page.address.key()}:${page.state}:${renderer.resolve(page.address)},`).join('');
                 trace.push(`ready ${Number(renderer.ready())} reserved=${pages!.slots().map((slot) => `${slot},`).join('')} slots=${slots}`);
-            } else if (command === 'cover') {
-                const [size, desired, minX, minZ, maxX, maxZ] = values;
-                const page = new VTPageLayout(size).coveringPage(desired, { x: minX, z: minZ }, { x: maxX, z: maxZ });
+            } else if (command === 'map') {
+                const [sectorSize, nodeX, nodeZ, x, z, height] = values;
+                const data = Object.assign(cacheData(8, 2, 3), { sectorSize });
+                const address = new NodeAddress(0, nodeX, nodeZ);
+                const region = data.nodeRegion(address);
+                const cell = region.size / 16;
+                const mapping = new VTPageLayout(sectorSize).buildGridMapping(data, address, 0, 0, new Vec3(region.x + x * cell, height, region.z + z * cell));
+                const page = mapping.pages[mapping.cells[z * 16 + x]];
                 trace.push(`page ${page.key()}`);
             } else if (command === 'morph') {
                 const [sectorSize, maxLod] = values;
                 const layout = new VTPageLayout(sectorSize);
+                const data = Object.assign(cacheData(8, 1, 1), { sectorSize });
                 let checked = 0;
                 for (let lod = 0; lod <= maxLod; ++lod) {
-                    const cell = sectorSize / 4096 * 2 ** lod;
-                    for (let z = 0; z < 16; ++z) {
-                        for (let x = 0; x < 16; ++x) {
-                            for (let desired = 0; desired <= layout.rootLevel(); ++desired) {
-                                const page = layout.coveringPage(desired, { x: (x - (x & 1)) * cell, z: (z - (z & 1)) * cell }, { x: (x + 1) * cell, z: (z + 1) * cell });
+                    const cell = data.nodeSize(lod) / 16;
+                    for (let desired = 0; desired <= layout.rootLevel(); ++desired) {
+                        const mapping = layout.buildGridMapping(data, new NodeAddress(lod, 0, 0), 0, 0, new Vec3(0, layout.pageSize(desired) * 2, 0));
+                        for (let z = 0; z < 16; ++z) {
+                            for (let x = 0; x < 16; ++x) {
+                                const page = mapping.pages[mapping.cells[z * 16 + x]];
                                 const size = layout.pageSize(page.level);
                                 for (let vz = z; vz <= z + 1; ++vz) {
                                     for (let vx = x; vx <= x + 1; ++vx) {
                                         for (const amount of [0, 0.5, 1]) {
                                             const px = (vx - (vx & 1) * amount) * cell;
                                             const pz = (vz - (vz & 1) * amount) * cell;
-                                            requireCondition(px >= page.x * size && px <= (page.x + 1) * size && pz >= page.z * size && pz <= (page.z + 1) * size, 'Morph vertex escaped its selected page');
+                                            requireCondition(px >= page.x * size && px <= (page.x + 1) * size && pz >= page.z * size && pz <= (page.z + 1) * size, 'Morph vertex escaped its mapped page');
                                             ++checked;
                                         }
                                     }
@@ -319,15 +342,15 @@ reserve 2 0 0 0 0 1 0
 compose 2
 reserve 1 4 0 0
 reserve 1 0 8 0
-# cover: sector size, desired level, min XZ, max XZ (including morph extent).
-cover 4096 0 17 29 18 30
-cover 4096 0 16 28 18 30
-cover 4096 4 17 29 18 30
-cover 4096 12 8191 4095 8192 4096
-cover 1000 0 1500 500 1501 501
+# map: sector size, L0 node XZ, cell XZ, camera height above that cell.
+map 4096 1 1 0 0 0
+map 4096 1 1 1 13 0
+map 4096 1 1 1 13 32
+map 4096 511 255 15 15 8192
+map 1024 384 128 0 0 0
 # morph: sector size, maximum geometry LOD tested; checks all vertex trajectories.
 morph 4096 8
-morph 1000 5
+morph 1024 5
 `;
 
 const PARITY_EXPECTED = String.raw`
@@ -440,18 +463,18 @@ ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1
 reserve 1 0 8 0
 accepted 0
 ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
-cover 4096 0 17 29 18 30
-page 0:17:29
-cover 4096 0 16 28 18 30
+map 4096 1 1 0 0 0
+page 0:16:16
+map 4096 1 1 1 13 0
 page 1:8:14
-cover 4096 4 17 29 18 30
+map 4096 1 1 1 13 32
 page 4:1:1
-cover 4096 12 8191 4095 8192 4096
+map 4096 511 255 15 15 8192
 page 12:1:0
-cover 1000 0 1500 500 1501 501
-page 0:768:256
+map 1024 384 128 0 0 0
+page 0:1536:512
 morph 4096 8
 vertices 359424
-morph 1000 5
-vertices 184320
+morph 1024 5
+vertices 202752
 `;

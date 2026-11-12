@@ -6,7 +6,7 @@ import { AABB, Frustum, intersect } from '../core/geometry';
 import { Vec3, Vec4 } from '../core/math';
 import { error, log } from '../core/platform/debug';
 import { director } from '../game/director';
-import { CullMode, Sampler, Texture } from '../gfx';
+import { CullMode, Format, FormatFeatureBit, Sampler, Texture } from '../gfx';
 import { Model } from '../render-scene/scene/model';
 import { Pass } from '../render-scene/core/pass';
 import { RenderScene } from '../render-scene/core/render-scene';
@@ -24,7 +24,7 @@ import * as config from './Config';
 
 interface GridDraw {
     model: Model;
-    mapping: number;
+    mapping: number; // VTPageTable slot for this node's 16x16 cell-to-page mapping; allocated when the draw is created.
 }
 
 function applyGridParams (model: Model, scratch: Float32Array, params: LandscapeGridParams): void {
@@ -33,11 +33,11 @@ function applyGridParams (model: Model, scratch: Float32Array, params: Landscape
     setLandscapeInstanceAttribute(model, scratch, 'a_mappingInst', params.mapping);
 }
 
-function createLandscapeMaterial (wireframe: boolean): Material {
+function createLandscapeMaterial (wireframe: boolean, heightUnorm: boolean): Material {
     const material = new Material();
     material.initialize({
         effectName: 'landscape/builtin-landscape',
-        defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: false, LANDSCAPE_WIREFRAME: wireframe },
+        defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
         states: wireframe ? { rasterizerState: { cullMode: CullMode.NONE } } : undefined,
     });
     return material;
@@ -101,10 +101,12 @@ export class LandscapeRenderer {
         }
         this._atlasSize = side * config.VT_PAGE_RES;
         this._mesh = GridMesh.create(device, 16);
-        this._solid = createLandscapeMaterial(false);
-        this._wire = createLandscapeMaterial(true);
-        if (!this._solid.passes.length || !this._wire.passes.length || !this._decals.init(node, scene)
-            || !this._residency.init(device, asset, layers)) {
+        const filtered = FormatFeatureBit.SAMPLED_TEXTURE | FormatFeatureBit.LINEAR_FILTER;
+        const heightUnorm = (device.getFormatFeatures(Format.R16_UNORM) & filtered) === filtered;
+        this._solid = createLandscapeMaterial(false, heightUnorm);
+        this._wire = createLandscapeMaterial(true, heightUnorm);
+        if (!this._solid.passes.length || !this._wire.passes.length || !this._decals.init(node, scene, heightUnorm)
+            || !this._residency.init(device, asset, layers, heightUnorm)) {
             return false;
         }
         if (!await this._materials.init(device, asset) || generation !== this._generation) {
@@ -140,7 +142,7 @@ export class LandscapeRenderer {
         this.bindRuntimeTextures();
         this.updateMaterialProperties();
         if (config.LANDSCAPE_DEBUG) {
-            log(`[Landscape] Resources: sourceLayers=${layers} heightFormat=RG8`);
+            log(`[Landscape] Resources: sourceLayers=${layers} heightFormat=${heightUnorm ? 'R16_UNORM' : 'RG8'}`);
         }
         return true;
     }
@@ -163,8 +165,8 @@ export class LandscapeRenderer {
             setRuntimeTexture(material, 'holeSplatmap', this._residency.splatArray(), this._residency.splatSampler());
             setRuntimeTexture(material, 'heightmap', this._residency.heightArray(), this._residency.heightSampler());
             setRuntimeTexture(material, 'vtAlbedo', vt.albedo(), vt.sampler());
-            setRuntimeTexture(material, 'vtPageMap', vt.pageTable().texture(), this._residency.splatSampler());
             setRuntimeTexture(material, 'vtNormalRoughness', vt.normalRoughness(), vt.sampler());
+            setRuntimeTexture(material, 'vtPageMap', vt.pageTable().texture(), this._residency.splatSampler());
         }
         for (const material of this._decals.materials()) {
             setRuntimeTexture(material, 'decalHeightMap', this._materials.decalHeight(), this._residency.heightSampler());
@@ -179,19 +181,14 @@ export class LandscapeRenderer {
     }
 
     public setDebugData (data: LandscapeDebugData): void {
-        const previous = this._debugData;
-        this._debugData = { ...data, unlit: previous.unlit };
-        if (previous.wireframe !== data.wireframe) {
-            this._decals.setWireframe(data.wireframe);
-            this.refreshTerrainMaterials();
-        }
-        if (previous.decal3DEnabled !== data.decal3DEnabled) {
-            this._decals.setEnabled(data.decal3DEnabled);
-        }
+        this._debugData = { ...data };
+        this.setUnlit(data.unlit);
+        this._decals.setEnabled(data.decal3DEnabled);
+        this._decals.setWireframe(data.wireframe);
         this._vt!.setHeightBlendEnabled(data.heightBlendEnabled);
         this._vt!.setTriplanarEnabled(data.triplanarEnabled);
         this._vt!.setRefineFarDetail(data.refineFarDetail);
-        this.setUnlit(data.unlit);
+        this.refreshTerrainMaterials();
         this.updateMaterialProperties();
     }
 
@@ -447,27 +444,13 @@ export class LandscapeRenderer {
     }
 
     private setUnlit (enabled: boolean): void {
-        if (this._debugData.unlit === enabled) {
-            return;
-        }
-        const compile = (unlit: boolean): boolean => {
-            let success = true;
-            for (const material of this.surfaceMaterials()) {
-                for (const pass of material.passes) {
-                    pass.defines.LANDSCAPE_DEBUG_UNLIT = unlit;
-                    success = pass.tryCompile() && success;
-                }
+        // Update variants before setDebugData refreshes model materials and instance data.
+        for (const material of this.surfaceMaterials()) {
+            for (const pass of material.passes) {
+                pass.defines.LANDSCAPE_DEBUG_UNLIT = enabled;
+                pass.tryCompile();
             }
-            return success;
-        };
-        if (compile(enabled)) {
-            this._debugData.unlit = enabled;
-        } else {
-            compile(this._debugData.unlit);
-            error('[Landscape] Failed to switch unlit shader variant');
         }
-        this.refreshTerrainMaterials();
-        this._decals.refreshMaterials();
     }
 
     public destroy (): void {

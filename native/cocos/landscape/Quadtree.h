@@ -122,8 +122,7 @@ private:
 
     // Immutable metadata copied from the validated asset.
     LandscapeData _data;
-    NodeIndexLayout _nodeIndexLayout;
-    ccstd::vector<HeightRange> _heightRanges;
+    ccstd::vector<ccstd::vector<HeightRange>> _heightRanges;
     std::unique_ptr<Node> _root;
     // Snapshot of selected addresses, updated only by selectRenderables. IDs survive
     // target deletion for retirement notifications; edge values remain on the nodes.

@@ -125,7 +125,7 @@ export class VTPageComposer {
         this._initialPass = device.createRenderPass(new RenderPassInfo(initialColors));
         this._framebuffer = device.createFramebuffer(new FramebufferInfo(this._renderPass, [this.albedo(), this.normal()]));
         this._material = new Material();
-        this._material.initialize({ effectName: 'landscape/builtin-landscape-vt-compose', defines: { LANDSCAPE_VT_COMPACT: false, LANDSCAPE_HEIGHT_UNORM: false } });
+        this._material.initialize({ effectName: 'landscape/builtin-landscape-vt-compose', defines: { LANDSCAPE_VT_COMPACT: false, LANDSCAPE_HEIGHT_UNORM: residency.heightArray().format === Format.R16_UNORM } });
         if (this._material.passes.length !== 2) {
             throw new Error(`Landscape VT compose material requires two passes; got ${this._material.passes.length}`);
         }
@@ -153,8 +153,8 @@ export class VTPageComposer {
             throw new Error('Landscape VT compose material is missing decal texture bindings');
         }
         const count = (this._size / config.VT_PAGE_RES) ** 2;
-        this._sourceTable = device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RGBA32F, config.VT_SOURCE_COUNT, count));
-        this._sourceRows = new Float32Array(count * config.VT_SOURCE_COUNT * 4);
+        this._sourceTable = device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RGBA32F, config.VT_NORMAL_SOURCE_COUNT, count));
+        this._sourceRows = new Float32Array(count * config.VT_NORMAL_SOURCE_COUNT * 4);
         this.bindTexture('sourceMap', this._sourceTable, residency.splatSampler());
         for (const pass of this._material.passes) {
             pass.update();
@@ -189,19 +189,11 @@ export class VTPageComposer {
             return null;
         }
         for (let i = 0; i < normals.length; ++i) {
-            Vec4.toArray(this._sourceRows, residency.shaderParams(normals[i]), (slot * config.VT_SOURCE_COUNT + i) * 4);
+            Vec4.toArray(this._sourceRows, residency.shaderParams(normals[i]), (slot * config.VT_NORMAL_SOURCE_COUNT + i) * 4);
         }
-        for (let i = 0; i < sources.projections.length; ++i) {
-            const projection = residency.resolve(sources.projections[i]);
-            if (projection.layer < 0) {
-                return null;
-            }
-            Vec4.toArray(this._sourceRows, residency.shaderParams(projection), (slot * config.VT_SOURCE_COUNT + config.VT_NORMAL_SOURCE_COUNT + i) * 4);
-        }
-        const enabled = sources.projections.length > 0;
         const bounds = new Vec4(region.x, region.z, region.size, 0);
         return {
-            pageInfo: new Vec4(slot, this._decals.collectPageDecals(slot, bounds), enabled ? 1 : 0, 0),
+            pageInfo: new Vec4(slot, this._decals.collectPageDecals(slot, bounds), sources.triplanar ? 1 : 0, 0),
             region: bounds,
             splatSource: residency.shaderParams(splat),
         };
@@ -211,8 +203,8 @@ export class VTPageComposer {
         this._decals.updateComposeMaterial(this.material());
         this._decals.uploadPageDecals();
         const copy = new BufferTextureCopy();
-        copy.texExtent.width = config.VT_SOURCE_COUNT;
-        copy.texExtent.height = this._sourceRows.length / (config.VT_SOURCE_COUNT * 4);
+        copy.texExtent.width = config.VT_NORMAL_SOURCE_COUNT;
+        copy.texExtent.height = this._sourceRows.length / (config.VT_NORMAL_SOURCE_COUNT * 4);
         this._device.copyBuffersToTexture([this._sourceRows], this._sourceTable!, [copy]);
         for (const pass of this.material().passes) {
             pass.update();

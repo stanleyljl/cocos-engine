@@ -74,6 +74,7 @@ export function GFXFormatToWebGLType (format: Format, gl: WebGL2RenderingContext
     case Format.R8UI: return WebGLConstants.UNSIGNED_BYTE;
     case Format.R8I: return WebGLConstants.BYTE;
     case Format.R16F: return WebGLConstants.HALF_FLOAT;
+    case Format.R16_UNORM: return WebGLConstants.UNSIGNED_SHORT;
     case Format.R16UI: return WebGLConstants.UNSIGNED_SHORT;
     case Format.R16I: return WebGLConstants.SHORT;
     case Format.R32F: return WebGLConstants.FLOAT;
@@ -219,6 +220,7 @@ export function GFXFormatToWebGLInternalFormat (format: Format, gl: WebGL2Render
     case Format.RGBA8I: return WebGLConstants.RGBA8I;
     case Format.R16I: return WebGLConstants.R16I;
     case Format.R16UI: return WebGLConstants.R16UI;
+    case Format.R16_UNORM: return WebGL2EXT.R16_EXT;
     case Format.R16F: return WebGLConstants.R16F;
     case Format.RG16I: return WebGLConstants.RG16I;
     case Format.RG16UI: return WebGLConstants.RG16UI;
@@ -340,6 +342,7 @@ export function GFXFormatToWebGLFormat (format: Format, gl: WebGL2RenderingConte
     case Format.R16UI:
     case Format.R16I: return WebGLConstants.RED_INTEGER;
     case Format.R16F: return WebGLConstants.RED;
+    case Format.R16_UNORM: return WebGLConstants.RED;
     case Format.RG16UI:
     case Format.RG16I: return WebGLConstants.RG_INTEGER;
     case Format.RG16F: return WebGLConstants.RG;

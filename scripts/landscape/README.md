@@ -1,7 +1,11 @@
 # Landscape Asset Tools
 
-Source height and splat tiles use 129×129 samples. Normal tiles use 145×145:
-the same 129×129 interior plus eight real-neighbor samples on every side.
+All source tiles share a 129x129 interior. Height tiles use 137x137 samples
+(four real-neighbor samples per side), splat tiles use 129x129, and normal tiles
+use 145x145 (eight real-neighbor samples per side). Height padding supplies VT
+triplanar gutters from the same source as splat; only four normal source entries
+are needed in the VT source table. Physics crops the height interior; CPU surface
+queries use the padded height stride. Node height ranges exclude padding.
 Generate normals from the global height field before slicing; overlapping
 borders are identical, with clamping only at the landscape's outer boundary. Paths and
 formats are fixed in code; the manifest contains dataset dimensions, height ranges,
@@ -131,10 +135,10 @@ global node subdivision at level `L` is `2^(maxTileLevel-L)` per sector axis.
 The node coordinates are global within each level. A sector coordinate is
 derived by shifting the node coordinate right by `maxTileLevel-level`.
 
-Each level entry in the manifest also carries `heightRange.{min,max}`: per-node
+Each level entry in the manifest also carries `heightRange[index] = [min, max]`: per-node
 quantized height bounds (`uint16`, row-major `iz*nx+ix`, global per-level
 coords), merged bottom-up so a node encloses its whole subtree. The runtime
-turns these into a tight per-node AABB (`heightMeters = heightBias +
+turns these into a tight per-node AABB (`height = heightBias +
 (v/65535)*heightScale`) for frustum culling / LOD selection, instead of the
 whole `[minY,maxY]` band. `heightmap-tiles.js` emits this automatically.
 
@@ -164,21 +168,21 @@ node scripts/landscape/heightmap-tiles.js `
   --height-bias 0
 ```
 
-## Patching an older dataset with per-node height bounds
+## Recomputing per-node height bounds
 
-Datasets generated before `heightRange` existed lack the tight per-node
-bounds, so the runtime falls back to the global `[minY,maxY]` band (loose AABBs,
-oversized debug boxes). Backfill `heightRange` from the already-generated tiles
-— no source PNG needed, tiles are not rewritten:
+Recompute bounds from the generated height tiles without rewriting the tiles:
 
 ```powershell
 node scripts/landscape/patch-height-range.js `
   --manifest <dataset>/<name>.json
 ```
 
-It scans every `h_<x>_<y>.png`, computes each node's `min/max`, merges bottom-up,
-and writes `heightRange` back into the manifest. Refresh the project assets so
-the running app reloads the patched manifest.
+Each level stores an array of `[min, max]` pairs in global row order
+(`index = z * nodesX(level) + x`). Runtime bounds use the same order:
+`heightRanges[level][index]`, with values converted to landscape-local heights.
+The tool scans each available `h_<x>_<y>.png` and merges bounds bottom-up.
+Levels finer than `minTileLevel` have no tile files, so their source-derived
+bounds must already exist in the manifest and are preserved.
 
 ## RVT terrain normals
 

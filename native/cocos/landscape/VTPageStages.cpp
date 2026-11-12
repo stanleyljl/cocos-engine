@@ -127,17 +127,9 @@ bool VTPageComposer::prepareInputs(uint32_t slot, LandscapeRegion region, const 
         }
         inputs[i] = residency.shaderParams(tile);
     }
-    for (size_t i = 0; i < sources.projections.size(); ++i) {
-        const auto tile = residency.resolve(sources.projections[i]);
-        if (tile.layer < 0) {
-            return false;
-        }
-        inputs[config::VT_NORMAL_SOURCE_COUNT + i] = residency.shaderParams(tile);
-    }
     instance.region = {region.x, region.z, region.size, 0};
     instance.splatSource = residency.shaderParams(splat);
-    const bool triplanarEnabled = !sources.projections.empty();
-    instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), triplanarEnabled ? 1.0F : 0.0F, 0};
+    instance.pageInfo = {static_cast<float>(slot), static_cast<float>(_decals->collectPageDecals(slot, instance.region)), sources.triplanar ? 1.0F : 0.0F, 0};
     _sourceRows[slot] = inputs;
     return true;
 }
@@ -146,7 +138,7 @@ void VTPageComposer::uploadInputs() {
     _decals->updateComposeMaterial(_composeMaterial);
     _decals->uploadPageDecals();
     gfx::BufferTextureCopy indexCopy;
-    indexCopy.texExtent = {config::VT_SOURCE_COUNT, static_cast<uint32_t>(_sourceRows.size()), 1};
+    indexCopy.texExtent = {config::VT_NORMAL_SOURCE_COUNT, static_cast<uint32_t>(_sourceRows.size()), 1};
     const uint8_t *sourceBytes[]{reinterpret_cast<const uint8_t *>(_sourceRows.data())};
     Root::getInstance()->getDevice()->copyBuffersToTexture(sourceBytes, _sourceTable, &indexCopy, 1);
 
@@ -221,7 +213,7 @@ bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device 
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
     info.format = gfx::Format::RGBA32F;
-    info.width = config::VT_SOURCE_COUNT;
+    info.width = config::VT_NORMAL_SOURCE_COUNT;
     info.height = pageCount;
     _sourceTable = device->createTexture(info);
     if (!_sourceTable) {

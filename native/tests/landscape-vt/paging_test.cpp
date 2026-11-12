@@ -144,10 +144,13 @@ public:
 
 class VTResidencyFixture final : public VTRenderer {
 public:
-    ccstd::vector<float> slopes;
+    ccstd::vector<ccstd::vector<HeightRange>> ranges;
     bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT) {
-        slopes.assign(NodeIndexLayout(data).nodeCount(), 0.0F);
-        return VTRenderer::initPages(data, slopes, capacity);
+        ranges.resize(data.maxTileLevel + 1U);
+        for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
+            ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), HeightRange{0.0F, data.sectorSize * 2.0F});
+        }
+        return VTRenderer::initPages(data, ranges, capacity);
     }
     using VTRenderer::publish;
 };
@@ -174,12 +177,15 @@ VTGridMapping testMapping(NodeAddress address) {
 class TreeFixture final : public Quadtree {
 public:
     void init(const LandscapeData &data, bool initializeResources = true) {
-        const ccstd::vector<HeightRange> ranges(NodeIndexLayout(data).nodeCount(), {data.minHeight(), data.maxHeight()});
+        ccstd::vector<ccstd::vector<HeightRange>> ranges(data.maxTileLevel + 1U);
+        for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
+            ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), {data.minHeight(), data.maxHeight()});
+        }
         LandscapeAsset asset;
         // The fixture owns this non-const asset. Populate its synthetic metadata
         // through the existing views, then exercise the public initialization path.
         const_cast<LandscapeData &>(asset.data()) = data;
-        const_cast<ccstd::vector<HeightRange> &>(asset.heightRanges()) = ranges;
+        const_cast<ccstd::vector<ccstd::vector<HeightRange>> &>(asset.heightRanges()) = ranges;
         Quadtree::init(asset);
         if (initializeResources) {
             for (uint32_t z = 0; z < data.sectorsZ; ++z) {
@@ -380,7 +386,7 @@ LandscapeData cacheData(uint32_t root, uint32_t sectorsX = 1, uint32_t sectorsZ 
 void testSectorCountLimit() {
     for (const auto dimensions : {std::pair<uint32_t, uint32_t>{8, 8}, {64, 1}, {1, 64}}) {
         const auto d = cacheData(4, dimensions.first, dimensions.second);
-        require(d.valid() && NodeIndexLayout(d).nodeCount() > 0, "64 sectors must be accepted on either axis");
+        require(d.valid(), "64 sectors must be accepted on either axis");
         ResidencyFixture residency;
         require(residency.initSlots(d, config::PAGE_POOL_LAYERS), "Initialize source reservations");
         VTResidencyFixture pages;
@@ -398,7 +404,7 @@ void testSectorCountLimit() {
     }
     for (const auto dimensions : {std::pair<uint32_t, uint32_t>{65, 1}, {1, 65}, {9, 8}, {65536, 65536}}) {
         const auto d = cacheData(4, dimensions.first, dimensions.second);
-        require(!d.valid() && NodeIndexLayout(d).nodeCount() == 0, "excess sector count must be rejected without overflow");
+        require(!d.valid(), "excess sector count must be rejected without overflow");
     }
 }
 
@@ -1086,56 +1092,109 @@ void testCommittedVisibility() {
     std::cout << "PASS: actual-cut culling, empty targets, pending refinement, independent passes and subtree pruning\n";
 }
 
-void testStitchedPageBounds() {
-    const VTPageLayout layout(4096);
-    // Near-camera cell at x=1, z=0: the top edge can snap x=1 to x=0 even
-    // before the old distance morph threshold. Reproduce the former undersized page.
-    const auto unsafe = layout.coveringPage(0, {1, 0}, {2, 1});
-    require(unsafe.level == 0 && unsafe.x == 1, "Near-edge regression setup");
-    const auto horizontalMapping = layout.buildGridMapping({0, 0, 16}, 0, 0, cc::Vec3{1, 0, 0});
-    const auto safe = horizontalMapping.pages[horizontalMapping.cells[1]];
-    require(safe.level == 1 && safe.x == 0 && safe.z == 0,
-            "Near-camera stitching escaped its explicitly planned VT page");
-    const auto verticalMapping = layout.buildGridMapping({4096, 4096, 16}, 0, 0, cc::Vec3{4096, 0, 4097});
-    const auto vertical = verticalMapping.pages[verticalMapping.cells[16]];
-    require(vertical.level == 1 && vertical.x == 2048 && vertical.z == 2048,
-            "Vertical/cross-sector stitch coverage differs from horizontal coverage");
-    // Reconstruct page origins exactly as the fragment shader does, across
-    // nodes, distance bands and non-power-of-two sector dimensions.
-    for (const float sectorSize : {1000.0F, 2048.0F, 4096.0F}) {
-        const VTPageLayout localLayout(sectorSize);
-        for (const uint32_t divisions : {1U, 8U, 128U}) {
-            const float size = sectorSize / divisions;
-            const LandscapeRegion region{sectorSize + size, sectorSize + size, size};
-            // The root must remain within its sector as required by buildGridMapping.
-            const LandscapeRegion node = divisions == 1 ? LandscapeRegion{sectorSize, sectorSize, size} : region;
-            for (const float distance : {0.0F, 10.0F, 100.0F, 10000.0F}) {
-                const auto entries = localLayout.buildGridMapping(node, 0, 10, {node.x, distance, node.z});
-                std::unordered_set<uint64_t> unique;
-                for (const auto page : entries.pages) {
-                    require(unique.insert(page.key()).second, "Local mapping contains duplicate page addresses");
+// Independent reference: the former float-bounds search and distance subdivision.
+// Compare the complete mapping, including page insertion order, after the refactor.
+VTGridMapping referenceGridMapping(const VTPageLayout &layout, LandscapeRegion region, float minY, float maxY, const cc::Vec3 &camera) {
+    VTGridMapping result;
+    const float cellSize = region.size / 16;
+    const float heightDistance = std::max({minY - camera.y, camera.y - maxY, 0.0F});
+    const auto visit = [&](const auto &self, uint32_t left, uint32_t bottom, uint32_t side) -> void {
+        const float x = region.x + left * cellSize;
+        const float z = region.z + bottom * cellSize;
+        const float size = side * cellSize;
+        const float dx = std::max({x - camera.x, camera.x - (x + size), 0.0F});
+        const float dz = std::max({z - camera.z, camera.z - (z + size), 0.0F});
+        const uint32_t desired = layout.levelForDistance(std::sqrt(dx * dx + heightDistance * heightDistance + dz * dz));
+        if (side > 1 && layout.pageSize(desired) < size) {
+            for (uint32_t row = bottom; row < bottom + side; row += side / 2) {
+                for (uint32_t col = left; col < left + side; col += side / 2) {
+                    self(self, col, row, side / 2);
                 }
-                for (uint32_t z = 0; z < 16; ++z) {
-                    for (uint32_t x = 0; x < 16; ++x) {
-                        const auto index = entries.cells[z * 16 + x];
-                        require(index < entries.pages.size(), "Local cell references an absent page");
-                        const auto page = entries.pages[index];
-                        const float pageSize = localLayout.pageSize(page.level);
-                        const float cellSize = size / 16;
-                        require(std::floor((node.x + (x + 0.5F) * cellSize) / pageSize) == page.x &&
-                                std::floor((node.z + (z + 0.5F) * cellSize) / pageSize) == page.z,
-                                "Local lookup reconstructed a different page origin");
-                        require(node.x + x * cellSize >= page.x * pageSize &&
-                                node.z + z * cellSize >= page.z * pageSize &&
-                                node.x + (x + 1) * cellSize <= (page.x + 1) * pageSize &&
-                                node.z + (z + 1) * cellSize <= (page.z + 1) * pageSize,
-                                "Local mapping did not cover the complete grid cell");
+            }
+            return;
+        }
+        const LandscapePoint minimum{x - (left & 1U) * cellSize, z - (bottom & 1U) * cellSize};
+        for (uint32_t level = desired; level <= layout.rootLevel(); ++level) {
+            const float pageSize = layout.pageSize(level);
+            const VTPageAddress page{level, static_cast<uint32_t>(std::floor(minimum.x / pageSize + 1e-7F)), static_cast<uint32_t>(std::floor(minimum.z / pageSize + 1e-7F))};
+            if (x + size > (page.x + 1.0F) * pageSize + pageSize * 1e-7F || z + size > (page.z + 1.0F) * pageSize + pageSize * 1e-7F) {
+                continue;
+            }
+            const auto found = std::find_if(result.pages.begin(), result.pages.end(), [page](const auto &entry) {
+                return entry.key() == page.key();
+            });
+            const auto index = static_cast<uint8_t>(found - result.pages.begin());
+            if (found == result.pages.end()) {
+                result.pages.push_back(page);
+            }
+            for (uint32_t row = bottom; row < bottom + side; ++row) {
+                std::fill_n(result.cells.begin() + row * 16 + left, side, index);
+            }
+            return;
+        }
+        require(false, "Reference coverage escaped its sector");
+    };
+    for (uint32_t z = 0; z < 16; z += 8) {
+        for (uint32_t x = 0; x < 16; x += 8) {
+            visit(visit, x, z, 8);
+        }
+    }
+    return result;
+}
+
+void testStitchedPageBounds() {
+    auto data = cacheData(8, 2, 3);
+    data.sectorSize = 4096;
+    const VTPageLayout layout(data.sectorSize);
+    const auto horizontalMapping = layout.buildGridMapping(data, {0, 0, 0}, 0, 0, {1, 0, 0});
+    const auto safe = horizontalMapping.pages[horizontalMapping.cells[1]];
+    require(safe.level == 1 && safe.x == 0 && safe.z == 0, "Near-camera stitching escaped its explicitly planned VT page");
+    const auto verticalMapping = layout.buildGridMapping(data, {0, 256, 256}, 0, 0, {4096, 0, 4097});
+    const auto vertical = verticalMapping.pages[verticalMapping.cells[16]];
+    require(vertical.level == 1 && vertical.x == 2048 && vertical.z == 2048, "Vertical/cross-sector stitch coverage differs from horizontal coverage");
+    for (const float sectorSize : {0.125F, 1.0F, 128.0F, 2048.0F, 4096.0F, 134217728.0F}) {
+        data.sectorSize = sectorSize;
+        const VTPageLayout localLayout(sectorSize);
+        for (uint32_t lod = 0; lod <= data.maxTileLevel; ++lod) {
+            const uint32_t side = data.nodesPerSectorSide(lod);
+            for (const NodeAddress address : {NodeAddress{lod, 0, 0}, NodeAddress{lod, side, side}, NodeAddress{lod, side * 2 - 1, side * 3 - 1}}) {
+                const auto region = data.nodeRegion(address);
+                for (const float distance : {0.0F, 1.0F, 10.0F, 100.0F, 10000.0F}) {
+                    const cc::Vec3 camera{region.x, distance, region.z};
+                    const auto entries = localLayout.buildGridMapping(data, address, 0, 10, camera);
+                    const auto reference = referenceGridMapping(localLayout, region, 0, 10, camera);
+                    require(entries.cells == reference.cells && entries.pages.size() == reference.pages.size(), "Distance subdivision or page indexing changed");
+                    for (size_t i = 0; i < entries.pages.size(); ++i) {
+                        require(entries.pages[i].key() == reference.pages[i].key(), "Selected pages or their insertion order changed");
+                    }
+                    std::unordered_set<uint64_t> unique;
+                    for (const auto page : entries.pages) {
+                        require(unique.insert(page.key()).second, "Local mapping contains duplicate page addresses");
+                    }
+                    for (uint32_t z = 0; z < 16; ++z) {
+                        for (uint32_t x = 0; x < 16; ++x) {
+                            const auto index = entries.cells[z * 16 + x];
+                            require(index < entries.pages.size(), "Local cell references an absent page");
+                            const auto page = entries.pages[index];
+                            const float pageSize = localLayout.pageSize(page.level);
+                            const float cellSize = region.size / 16;
+                            require(std::floor((region.x + (x + 0.5F) * cellSize) / pageSize) == page.x && std::floor((region.z + (z + 0.5F) * cellSize) / pageSize) == page.z, "Shader reconstructed a different page origin");
+                            for (uint32_t vz = z; vz <= z + 1; ++vz) {
+                                for (uint32_t vx = x; vx <= x + 1; ++vx) {
+                                    for (const float amount : {0.0F, 0.5F, 1.0F}) {
+                                        const float px = region.x + (vx - (vx & 1U) * amount) * cellSize;
+                                        const float pz = region.z + (vz - (vz & 1U) * amount) * cellSize;
+                                        require(px >= page.x * pageSize && px <= (page.x + 1) * pageSize && pz >= page.z * pageSize && pz <= (page.z + 1) * pageSize, "Morph vertex escaped its mapped page");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    std::cout << "PASS: local grid mappings preserve cell coverage, stitched bounds and shader page origins\n";
+    std::cout << "PASS: mapping equivalence, page order, shader origins and complete morph coverage\n";
 }
 
 void testMaterialPublication() {
@@ -1345,30 +1404,22 @@ void testCameraRotation() {
 }
 
 void testCoordinateLayouts() {
-    const auto invalid = NodeIndexLayout::INVALID_INDEX;
-    require(NodeIndexLayout{}.nodeCount() == 0, "Default layout must be empty");
-    require(NodeIndexLayout{}.globalNodeIndex(0, 0, 0) == invalid, "Empty layout must reject addresses");
     for (uint32_t root = 0; root < config::MAX_LOD_LEVELS; ++root) {
         LandscapeData data;
         data.sectorsX = 2;
         data.sectorsZ = 3;
         data.maxTileLevel = root;
-        data.sectorSize = 1000;
-        const NodeIndexLayout layout(data);
-        size_t expected = 0;
-        // Independently enumerate the serialized storage order. Every address
-        // must map exactly once, and local/global addressing must agree.
+        data.sectorSize = 1024;
+        // Enumerate every sector-local node and verify its global address.
         for (uint32_t sz = 0; sz < 3; ++sz) {
             for (uint32_t sx = 0; sx < 2; ++sx) {
                 uint32_t side = 1U << root;
                 for (uint32_t level = 0; level <= root; ++level, side /= 2U) {
                     require(data.nodesPerSectorSide(level) == side, "Wrong geometry level dimensions");
-                    require(data.nodeSize(level) * side == 1000, "Node sizes do not cover the sector");
+                    require(data.nodeSize(level) * side == 1024, "Node sizes do not cover the sector");
                     for (uint32_t z = 0; z < side; ++z) {
                         for (uint32_t x = 0; x < side; ++x) {
                             const NodeAddress address{level, sx * side + x, sz * side + z};
-                            require(layout.sectorNodeIndex(sx, sz, level, x, z) == expected, "Sector storage order changed");
-                            require(layout.globalNodeIndex(level, address.x, address.z) == expected++, "Global storage order changed");
                             const auto decoded = NodeAddress::fromKey(address.key());
                             require(decoded.level == level && decoded.x == address.x && decoded.z == address.z, "Node key round trip failed");
                             const auto ancestor = address.ancestor(root);
@@ -1378,21 +1429,15 @@ void testCoordinateLayouts() {
                             require(data.nodeAtClamped(level, center).key() == address.key(), "Node/position round trip failed");
                         }
                     }
-                    require(layout.sectorNodeIndex(sx, sz, level, side, 0) == invalid, "Local X overflow accepted");
-                    require(layout.sectorNodeIndex(sx, sz, level, 0, side) == invalid, "Local Z overflow accepted");
                 }
             }
         }
-        require(layout.nodeCount() == expected, "Flat storage contains holes");
-        require(layout.globalNodeIndex(root + 1, 0, 0) == invalid, "Invalid level accepted");
-        require(layout.globalNodeIndex(root, 2, 0) == invalid, "Global X overflow accepted");
-        require(layout.globalNodeIndex(root, 0, 3) == invalid, "Global Z overflow accepted");
         require(data.nodeSize(root + 1) == 0, "Invalid node level must have zero size");
         const LandscapePoint nearCorner{0, 0};
         const LandscapePoint farCorner{data.width(), data.depth()};
-        require(farCorner.x == 2000 && farCorner.z == 3000, "Non-square landscape dimensions failed");
+        require(farCorner.x == 2048 && farCorner.z == 3072, "Non-square landscape dimensions failed");
         require(data.contains(nearCorner) && data.contains(farCorner), "Outer edge must be sampleable");
-        require(!data.contains({-0.001F, 0}) && !data.contains({2000.001F, 0}), "Outside sample accepted");
+        require(!data.contains({-0.001F, 0}) && !data.contains({2048.001F, 0}), "Outside sample accepted");
         const auto last = data.nodeAtClamped(0, farCorner);
         require(last.x == data.nodesX(0) - 1 && last.z == data.nodesZ(0) - 1, "Far edge must select the last tile");
         require(data.nodeAtClamped(0, {-1, -1}).key() == NodeAddress{0, 0, 0}.key(), "Gutter probe must clamp");
@@ -1409,19 +1454,14 @@ void testCoordinateLayouts() {
                     "Float position at/after sector edge selected the previous sector");
         }
         data.maxTileLevel = config::MAX_LOD_LEVELS;
-        require(NodeIndexLayout(data).nodeCount() == 0, "Invalid LOD must produce an empty layout");
-        require(layout.nodeCount() == expected, "Layout must own its dimension snapshot");
+        require(data.nodesPerSectorSide(0) == 0, "Invalid LOD must have zero dimensions");
     }
-    const VTPageLayout fractional(1000);
-    require(fractional.rootLevel() == 9 && fractional.pageSize(0) == 1.953125F, "Non-power-of-two VT layout changed");
-    require(fractional.pageSize(10) == 0, "Invalid VT level must not underflow a shift");
-    for (uint32_t level = 0; level <= fractional.rootLevel(); ++level) {
-        const float size = fractional.pageSize(level);
-        const LandscapePoint min{2000.0F - size, 3000.0F - size};
-        const auto page = fractional.coveringPage(level, min, {2000.0F, 3000.0F});
-        require(page.level == level && page.x * size == min.x && page.z * size == min.z,
-                "Float VT page at a distant sector edge changed coverage");
-    }
+    auto invalid = cacheData(8);
+    invalid.sectorSize = 1000;
+    require(!invalid.valid(), "Non-power-of-two sector size accepted");
+    const VTPageLayout layout(1024);
+    require(layout.rootLevel() == 10 && layout.pageSize(0) == 1, "Power-of-two VT layout changed");
+    require(layout.pageSize(11) == 0, "Invalid VT level must not underflow a shift");
     std::cout << "PASS: coordinate layouts, all geometry levels, non-square sectors and boundary round trips\n";
 }
 
@@ -1506,16 +1546,18 @@ void testCliffCulling() {
     data.sectorSize = 128.0F;
     VTResidencyFixture pages;
     require(pages.initPages(data), "Initialize cliff culling metadata");
-    std::fill(pages.slopes.begin(), pages.slopes.end(), 1.0F);
-    const NodeIndexLayout index(data);
-    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
-        pages.slopes[index.globalNodeIndex(level, 8U >> level, 2U >> level)] = 0.4F;
+    for (auto &ranges : pages.ranges) {
+        std::fill(ranges.begin(), ranges.end(), HeightRange{100.0F, 100.0F});
     }
-    require(pages.selectSources({3, 0, 0}, true, true).projections.empty(), "Ordinary pages must use the XZ shader even when triplanar is enabled");
-    require(pages.selectSources({0, 128, 32}, true, true).projections.size() == 9, "Fine cliff page must use triplanar");
-    require(pages.selectSources({4, 7, 2}, true, true).projections.size() == 9, "Cross-sector gutter must retain its cliff");
-    require(pages.selectSources({7, 1, 0}, true, true).projections.size() == 9, "Coarse pages must retain narrow cliffs");
-    require(pages.selectSources({7, 1, 0}, true, false).projections.empty(), "Disabling triplanar must bypass cliffs");
+    // The same height span becomes gentle when averaged over a coarse region.
+    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
+        pages.ranges[level][static_cast<size_t>(2U >> level) * data.nodesX(level) + (8U >> level)] = HeightRange{100.0F, 164.0F};
+    }
+    require(!pages.selectSources({3, 0, 0}, true, true).triplanar, "Ordinary pages must use the XZ shader even when triplanar is enabled");
+    require(pages.selectSources({0, 128, 32}, true, true).triplanar, "Fine cliff page must use triplanar");
+    require(pages.selectSources({4, 7, 2}, true, true).triplanar, "Cross-sector gutter must retain its cliff");
+    require(!pages.selectSources({7, 1, 0}, true, true).triplanar, "Coarse regions use average relief rather than local cliff slopes");
+    require(!pages.selectSources({7, 1, 0}, true, false).triplanar, "Disabling triplanar must bypass cliffs");
 }
 
 void testCompositionSources() {
@@ -1525,7 +1567,7 @@ void testCompositionSources() {
     VTResidencyFixture pages;
     require(pages.initPages(data), "Initialize source selection without a source data manager");
     const auto interior = pages.selectSources({8, 2, 2}, true, false);
-    require(interior.projections.empty(), "XZ projection must not reserve height gutters");
+    require(!interior.triplanar, "XZ projection must not reserve height gutters");
     require(interior.splat.key() == NodeAddress{4, 2, 2}.key(), "Splat source must cover the entire page");
     for (uint32_t row = 0; row < 2; ++row) {
         for (uint32_t col = 0; col < 2; ++col) {
@@ -1582,16 +1624,18 @@ void testCompositionSources() {
             for (const uint32_t z : {0U, last / 2, last}) {
                 for (const bool detailed : {false, true}) {
                     const auto inputs = pages.selectSources({level, x, z}, detailed, true);
-                    require(inputs.projections.size() == 9 && inputs.projections[4].key() == inputs.splat.key(), "Projection must use page-resolution heights and all gutter owners");
+                    require(inputs.triplanar, "Cliff pages must use triplanar");
+                    const auto heightRegion = data.nodeRegion(inputs.splat);
+                    const float heightPadding = heightRegion.size * config::SOURCE_HEIGHT_BORDER / (config::SOURCE_TILE_RESOLUTION - 1);
+                    sources.clear();
+                    inputs.appendTo(sources);
+                    require(sources.size() <= 5, "Triplanar must not add neighboring height sources");
                     for (const float u : samples) {
                         for (const float v : samples) {
-                            const uint32_t heightCol = u < 0.0F ? 0U : (u < 1.0F ? 1U : 2U);
-                            const uint32_t heightRow = v < 0.0F ? 0U : (v < 1.0F ? 1U : 2U);
-                            const auto heightRegion = data.nodeRegion(inputs.projections[heightRow * 3 + heightCol]);
-                            const float heightX = std::clamp((x + u) * size, 0.0F, data.width());
-                            const float heightZ = std::clamp((z + v) * size, 0.0F, data.depth());
-                            require(heightX >= heightRegion.x && heightX <= heightRegion.x + heightRegion.size && heightZ >= heightRegion.z && heightZ <= heightRegion.z + heightRegion.size,
-                                    "Height projection clamped an interior/sector-edge sample to the wrong tile");
+                            const float heightX = (x + u) * size;
+                            const float heightZ = (z + v) * size;
+                            require(heightX >= heightRegion.x - heightPadding && heightX <= heightRegion.x + heightRegion.size + heightPadding && heightZ >= heightRegion.z - heightPadding && heightZ <= heightRegion.z + heightRegion.size + heightPadding,
+                                    "Padded height must cover page interiors and all gutter edges and corners");
                             const auto col = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(u * 2)), 0, 1));
                             const auto row = static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(v * 2)), 0, 1));
                             const auto region = data.nodeRegion(inputs.normals[row * 2 + col]);
@@ -1653,7 +1697,7 @@ void testPageTableUpdatesAndReuse() {
 }
 
 void testVTDistanceThresholds() {
-    for (const float sectorSize : {0.125F, 1.0F, 1.5F, 3.0F, 129.0F, 1000.25F, 16384.0F}) {
+    for (const float sectorSize : {0.125F, 1.0F, 2.0F, 128.0F, 1024.0F, 16384.0F}) {
         const VTPageLayout layout(sectorSize);
         require(layout.levelForDistance(0.0F) == 0, "Zero distance must select the finest page");
         for (uint32_t level = 0; level <= layout.rootLevel(); ++level) {
@@ -1829,35 +1873,41 @@ std::string pagingParityTrace() {
                 trace << parityAddress({page.address.level, page.address.x, page.address.z}) << ':' << static_cast<int>(page.state) << ':' << pages.resolve(page.address) << ',';
             }
             trace << '\n';
-        } else if (command == "cover") {
-            float sectorSize;
-            uint32_t desired;
-            LandscapePoint minimum;
-            LandscapePoint maximum;
-            row >> sectorSize >> desired >> minimum.x >> minimum.z >> maximum.x >> maximum.z;
-            const auto page = VTPageLayout(sectorSize).coveringPage(desired, minimum, maximum);
+        } else if (command == "map") {
+            auto data = cacheData(8, 2, 3);
+            NodeAddress address;
+            uint32_t x;
+            uint32_t z;
+            float height;
+            row >> data.sectorSize >> address.x >> address.z >> x >> z >> height;
+            const auto region = data.nodeRegion(address);
+            const float cell = region.size / 16;
+            const auto mapping = VTPageLayout(data.sectorSize).buildGridMapping(data, address, 0, 0, {region.x + x * cell, height, region.z + z * cell});
+            const auto page = mapping.pages[mapping.cells[z * 16 + x]];
             trace << "page " << parityAddress({page.level, page.x, page.z}) << '\n';
         } else if (command == "morph") {
             float sectorSize;
             uint32_t maxLod;
             row >> sectorSize >> maxLod;
             const VTPageLayout layout(sectorSize);
+            auto data = cacheData(8);
+            data.sectorSize = sectorSize;
             uint32_t checked = 0;
-            // The shader moves odd grid vertices toward their even parent. Test
-            // both extremes and the midpoint against the actual selected VT page.
+            // Check shader trajectories against actual distance-selected mappings.
             for (uint32_t lod = 0; lod <= maxLod; ++lod) {
-                const float cell = sectorSize / 4096.0F * static_cast<float>(1U << lod);
-                for (uint32_t z = 0; z < 16; ++z) {
-                    for (uint32_t x = 0; x < 16; ++x) {
-                        for (uint32_t desired = 0; desired <= layout.rootLevel(); ++desired) {
-                            const auto page = layout.coveringPage(desired, {(x - (x & 1U)) * cell, (z - (z & 1U)) * cell}, {(x + 1) * cell, (z + 1) * cell});
+                const float cell = data.nodeSize(lod) / 16;
+                for (uint32_t desired = 0; desired <= layout.rootLevel(); ++desired) {
+                    const auto mapping = layout.buildGridMapping(data, {lod, 0, 0}, 0, 0, {0, layout.pageSize(desired) * 2, 0});
+                    for (uint32_t z = 0; z < 16; ++z) {
+                        for (uint32_t x = 0; x < 16; ++x) {
+                            const auto page = mapping.pages[mapping.cells[z * 16 + x]];
                             const float size = layout.pageSize(page.level);
                             for (uint32_t vz = z; vz <= z + 1; ++vz) {
                                 for (uint32_t vx = x; vx <= x + 1; ++vx) {
                                     for (const float amount : {0.0F, 0.5F, 1.0F}) {
                                         const float px = (vx - (vx & 1U) * amount) * cell;
                                         const float pz = (vz - (vz & 1U) * amount) * cell;
-                                        require(px >= page.x * size && px <= (page.x + 1) * size && pz >= page.z * size && pz <= (page.z + 1) * size, "Morph vertex escaped its selected page");
+                                        require(px >= page.x * size && px <= (page.x + 1) * size && pz >= page.z * size && pz <= (page.z + 1) * size, "Morph vertex escaped its mapped page");
                                         ++checked;
                                     }
                                 }
@@ -1925,51 +1975,5 @@ int main(int argc, char **argv) {
     require(pageLayout.levelForDistance(1.5F) == 0, "Near view must request maximum material precision");
     require(pageLayout.levelForDistance(8.0F) == 2, "Material precision must fall independently with distance");
 
-    const auto fine = pageLayout.coveringPage(0, {17, 29}, {18, 30});
-    require(fine.level == 0 && fine.x == 17 && fine.z == 29, "An unmorphed meter cell must use one fine page");
-    const auto morph = pageLayout.coveringPage(0, {16, 28}, {18, 30});
-    require(morph.level == 1 && morph.x == 8 && morph.z == 14, "A morphing odd cell must use its containing parent");
-    const auto coarse = pageLayout.coveringPage(4, {17, 29}, {18, 30});
-    require(coarse.level == 4 && coarse.x == 1 && coarse.z == 1, "One geometry cell must also support a coarser VT page");
-
-    uint64_t checked = 0;
-    // Verify actual shader vertex trajectories against the chosen page. A page
-    // is convex, so containment of all three vertices proves containment of
-    // every fragment, including independently morphed vertices and diagonals.
-    for (uint32_t lod = 0; lod < 9; ++lod) {
-        const float cell = static_cast<float>(1U << lod);
-        for (uint32_t cells : {1U, 2U, 4U, 8U}) {
-            for (uint32_t z = 0; z < 16; z += cells) {
-                for (uint32_t x = 0; x < 16; x += cells) {
-                    for (uint32_t desired = 0; desired <= root; ++desired) {
-                        for (float sectorOrigin : {0.0F, sectorSize * 3.0F}) {
-                            const auto page = pageLayout.coveringPage(desired,
-                                {sectorOrigin + (x - (x & 1U)) * cell, sectorOrigin + (z - (z & 1U)) * cell},
-                                {sectorOrigin + (x + cells) * cell, sectorOrigin + (z + cells) * cell});
-                            const float size = pageLayout.pageSize(page.level);
-                            for (uint32_t vz = z; vz <= z + cells; ++vz) {
-                                for (uint32_t vx = x; vx <= x + cells; ++vx) {
-                                    for (float amount : {0.0F, 1.0F}) {
-                                        const float px = sectorOrigin + (vx - (vx & 1U) * amount) * cell;
-                                        const float pz = sectorOrigin + (vz - (vz & 1U) * amount) * cell;
-                                        require(px >= page.x * size && px <= (page.x + 1) * size &&
-                                                    pz >= page.z * size && pz <= (page.z + 1) * size,
-                                                "A morphed triangle escaped its physical VT page");
-                                        ++checked;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Non-power-of-two sectors retain a dyadic hierarchy without exceeding the
-    // requested density. Pages must still line up at distant sector boundaries.
-    const VTPageLayout oddLayout(1000.0F);
-    require(config::VT_PAGE_INTERIOR / oddLayout.pageSize(0) <= 256.0F, "Finest page must not exceed 256 texels/m");
-    const auto boundary = pageLayout.coveringPage(root, {8191, 4095}, {8192, 4096});
-    require(boundary.x == 1 && boundary.z == 0, "Boundary must remain in its own permanent sector root");
-    std::cout << "PASS: VT density, independent levels, page boundaries and " << checked << " stitch samples\n";
+    std::cout << "PASS: VT density, independent levels and page boundaries\n";
 }

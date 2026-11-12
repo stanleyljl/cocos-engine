@@ -1,9 +1,8 @@
 'use strict';
 
-// Patches an existing landscape manifest with per-node height bounds
-// (levels[].heightRange.{min,max}) computed from the already-generated height
-// tiles. Use this when tiles were produced by an older heightmap-tiles.js that
-// did not emit heightRange, so you don't need the original source PNG.
+// Recomputes per-node height bounds (levels[].heightRange[index] = [min, max])
+// from generated height tiles. Levels finer than minTileLevel retain the bounds
+// exported from the source heightmap because they have no tiles on disk.
 //
 //   node scripts/landscape/patch-height-range.js --manifest <path-to>.json
 //
@@ -62,7 +61,7 @@ function stringifyManifest (manifest) {
             inlineValues.push(`{${fields.join(', ')}}`);
             return `@@INLINE_${inlineValues.length - 1}@@`;
         }
-        if ((key === 'min' || key === 'max') && Array.isArray(value)) {
+        if (key === 'heightRange' && Array.isArray(value)) {
             inlineValues.push(JSON.stringify(value));
             return `@@INLINE_${inlineValues.length - 1}@@`;
         }
@@ -70,8 +69,10 @@ function stringifyManifest (manifest) {
     }, 2).replace(/"@@INLINE_(\d+)@@"/g, (_, i) => inlineValues[Number(i)]) + '\n';
 }
 
-// Returns { minValue, maxValue } over a height tile's samples (channel 0).
+// Bounds cover only the 129x129 interior; neighboring padding belongs to other nodes.
+const HEIGHT_BORDER = 4;
 function tileBounds (filePath, tileSize) {
+    const resolution = tileSize + 2 * HEIGHT_BORDER;
     let png;
     try {
         png = PNG.sync.read(fs.readFileSync(filePath), { skipRescale: true });
@@ -79,8 +80,8 @@ function tileBounds (filePath, tileSize) {
         fail(`Unable to read or parse tile ${filePath}: ${error.message}`);
     }
     if (!png || png.depth !== 16 || png.colorType !== 0 || !Number.isSafeInteger(png.width) || !Number.isSafeInteger(png.height)
-        || png.width !== tileSize || png.height !== tileSize) {
-        fail(`Tile ${filePath} must be a 16-bit grayscale PNG of ${tileSize}x${tileSize}`);
+        || png.width !== resolution || png.height !== resolution) {
+        fail(`Tile ${filePath} must be a 16-bit grayscale PNG of ${resolution}x${resolution}`);
     }
     const sampleCount = safeProduct(png.width, png.height, `Tile dimensions for ${filePath}`);
     const channels = png.data.length / sampleCount;
@@ -89,10 +90,12 @@ function tileBounds (filePath, tileSize) {
     }
     let minValue = HEIGHT_MAX;
     let maxValue = 0;
-    for (let i = 0; i < sampleCount; ++i) {
-        const value = png.data[i * channels];
-        if (value < minValue) minValue = value;
-        if (value > maxValue) maxValue = value;
+    for (let z = 0; z < tileSize; ++z) {
+        for (let x = 0; x < tileSize; ++x) {
+            const value = png.data[((z + HEIGHT_BORDER) * resolution + x + HEIGHT_BORDER) * channels];
+            minValue = Math.min(minValue, value);
+            maxValue = Math.max(maxValue, value);
+        }
     }
     return { minValue, maxValue };
 }
@@ -162,12 +165,14 @@ function main () {
             // so the bottom-up merge below can refine the coarser levels.
             const existing = levelEntries.get(level);
             const expectedCount = safeProduct(nx, nz, `Level L${level} bounds`);
-            if (existing && existing.heightRange
-                && Array.isArray(existing.heightRange.min) && Array.isArray(existing.heightRange.max)
-                && existing.heightRange.min.length === expectedCount && existing.heightRange.max.length === expectedCount) {
+            if (existing && Array.isArray(existing.heightRange) && existing.heightRange.length === expectedCount) {
                 for (let i = 0; i < expectedCount; ++i) {
-                    const minValue = existing.heightRange.min[i];
-                    const maxValue = existing.heightRange.max[i];
+                    const range = existing.heightRange[i];
+                    if (!Array.isArray(range) || range.length !== 2) {
+                        fail(`Level L${level} has invalid heightRange at index ${i}`);
+                    }
+                    const minValue = range[0];
+                    const maxValue = range[1];
                     if (!Number.isSafeInteger(minValue) || !Number.isSafeInteger(maxValue)
                         || minValue < 0 || minValue > HEIGHT_MAX || maxValue < 0 || maxValue > HEIGHT_MAX
                         || minValue > maxValue) {
@@ -212,7 +217,7 @@ function main () {
     if (!Array.isArray(manifest.levels) || manifest.levels.length !== maxTileLevel + 1) fail('Manifest requires maxTileLevel + 1 levels');
     for (const [level, lv] of manifest.levels.entries()) {
         if (level < 0 || level > maxTileLevel) fail(`Unexpected level ${level}`);
-        lv.heightRange = { min: bounds[level].min, max: bounds[level].max };
+        lv.heightRange = bounds[level].min.map((min, index) => [min, bounds[level].max[index]]);
     }
     fs.writeFileSync(manifestPath, stringifyManifest(manifest));
     // Report the world-space span of the root so the effect is easy to verify.

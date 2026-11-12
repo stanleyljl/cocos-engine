@@ -171,7 +171,7 @@ export class LandscapeSchedule {
             if (!node.ready && request.level === data.maxTileLevel) {
                 pending.material.pages = [new VTPageAddress(layout.rootLevel(), request.x, request.z)];
             } else {
-                pending.material = layout.buildGridMapping(data.nodeRegion(request), node.geometry.minY, node.geometry.maxY, this._quadtree.localCameraPosition());
+                pending.material = layout.buildGridMapping(data, request, node.geometry.minY, node.geometry.maxY, this._quadtree.localCameraPosition());
             }
             if (node.ready && sameMapping(node.material, pending.material)) {
                 continue;

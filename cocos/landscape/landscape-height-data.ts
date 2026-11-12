@@ -2,10 +2,11 @@
 import downloader from '../asset/asset-manager/downloader';
 import zlib from '../../external/compression/zlib.min';
 import { JSB } from 'internal:constants';
+import { SOURCE_HEIGHT_BORDER, SOURCE_TILE_RESOLUTION } from './Config';
 
 declare const jsb: any;
 
-export const LANDSCAPE_TILE_RESOLUTION = 129;
+export const LANDSCAPE_TILE_RESOLUTION = SOURCE_TILE_RESOLUTION;
 // Total X * Z sectors; must match native Config.h and the importer.
 const MAX_SECTOR_COUNT = 64;
 
@@ -83,12 +84,12 @@ export class LandscapeHeightGrid {
 }
 
 export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayout {
-    const { sectorCount, maxTileLevel, minTileLevel, sectorSizeMeters, heightScale, heightBias, files } = manifest;
+    const { sectorCount, maxTileLevel, minTileLevel, sectorSize, heightScale, heightBias, files } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2
         || !sectorCount.every((v: number) => Number.isInteger(v) && v > 0)
         || !Number.isInteger(maxTileLevel) || maxTileLevel < 0 || maxTileLevel > 8
         || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxTileLevel
-        || typeof sectorSizeMeters !== 'number' || sectorSizeMeters <= 0
+        || typeof sectorSize !== 'number' || sectorSize <= 0
         || typeof heightScale !== 'number' || heightScale <= 0 || typeof heightBias !== 'number'
         || !files || typeof files !== 'object') {
         throw new Error('Invalid Landscape height manifest');
@@ -101,7 +102,7 @@ export function parseLandscapeHeightLayout (manifest: any): LandscapeHeightLayou
     if (tilesX * tilesZ > 1000000) {
         throw new Error('Landscape tile count exceeds limit');
     }
-    return { resolution: LANDSCAPE_TILE_RESOLUTION, tilesX, tilesZ, tileSize: sectorSizeMeters / side,
+    return { resolution: LANDSCAPE_TILE_RESOLUTION, tilesX, tilesZ, tileSize: sectorSize / side,
         heightScale, heightBias, level: minTileLevel, files };
 }
 
@@ -182,7 +183,14 @@ export class LandscapeHeightLoader {
     }
 
     public async loadTile (url: string, layout: LandscapeHeightLayout, x: number, z: number): Promise<Uint16Array> {
-        return this._loadSamples(url, layout, x, z, 'h');
+        const padded = await this._loadSamples(url, layout, x, z, 'h');
+        const stride = layout.resolution + 2 * SOURCE_HEIGHT_BORDER;
+        const samples = new Uint16Array(layout.resolution ** 2);
+        for (let row = 0; row < layout.resolution; ++row) {
+            const start = (row + SOURCE_HEIGHT_BORDER) * stride + SOURCE_HEIGHT_BORDER;
+            samples.set(padded.subarray(start, start + layout.resolution), row * layout.resolution);
+        }
+        return samples;
     }
 
     public async loadHoles (url: string, layout: LandscapeHeightLayout, x: number, z: number): Promise<Uint8Array> {
@@ -208,13 +216,14 @@ export class LandscapeHeightLoader {
         const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
             downloader._downloadArrayBuffer(tileURL, {}, (err, data) => err ? reject(err) : resolve(data));
         });
+        const resolution = kind === 'h' ? layout.resolution + 2 * SOURCE_HEIGHT_BORDER : layout.resolution;
         if (JSB) {
             // File reading remains asynchronous. Use native PNG decoding instead
             // of doing inflate and per-pixel filter reconstruction in JavaScript.
-            const samples = jsb.LandscapeAsset.decodeSamples(new Uint8Array(bytes), layout.resolution) as Uint16Array;
-            if (samples.length !== layout.resolution ** 2) throw new Error('Invalid Landscape physics PNG');
+            const samples = jsb.LandscapeAsset.decodeSamples(new Uint8Array(bytes), resolution) as Uint16Array;
+            if (samples.length !== resolution ** 2) throw new Error('Invalid Landscape physics PNG');
             return samples;
         }
-        return decodeLandscapeHeight(bytes, layout.resolution);
+        return decodeLandscapeHeight(bytes, resolution);
     }
 }

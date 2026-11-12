@@ -41,6 +41,9 @@ constexpr int VERTS_PER_NODE_SIDE = 17;
 constexpr float LOD_DISTANCE_RATIO = 2.0F;
 constexpr float MORPH_START_RATIO = 0.70F;
 constexpr uint32_t SOURCE_TILE_RESOLUTION = 129;
+// Real neighboring heights cover the full VT filtering gutter.
+constexpr uint32_t SOURCE_HEIGHT_BORDER = 4;
+constexpr uint32_t SOURCE_HEIGHT_RESOLUTION = SOURCE_TILE_RESOLUTION + 2 * SOURCE_HEIGHT_BORDER;
 // Normal interiors share the height grid; real neighboring samples cover VT gutters.
 constexpr uint32_t SOURCE_NORMAL_BORDER = 8;
 constexpr uint32_t SOURCE_NORMAL_RESOLUTION = SOURCE_TILE_RESOLUTION + 2 * SOURCE_NORMAL_BORDER;
@@ -67,8 +70,6 @@ static_assert(DECAL_INSTANCE_MAX % 2 == 0, "Decal index pairs must fill RGBA8 te
 // 256 usable texels per logical unit at the finest page. Up to 16 x 16 physical slots.
 constexpr uint32_t VT_PAGE_INTERIOR = 256;
 constexpr uint32_t VT_NORMAL_SOURCE_COUNT = 4; // 2x2 interiors; padded sources also cover filtering gutters.
-constexpr uint32_t VT_PROJECTION_SOURCE_COUNT = 9; // Interior and eight gutter regions; height sources have no padding.
-constexpr uint32_t VT_SOURCE_COUNT = VT_NORMAL_SOURCE_COUNT + VT_PROJECTION_SOURCE_COUNT;
 // Fade side projections from 55 to 60 degrees; CPU culling uses the same start angle.
 constexpr float TRIPLANAR_START_NORMAL_Y = 0.573576436351046F;
 constexpr float TRIPLANAR_FULL_NORMAL_Y = 0.5F;
@@ -87,6 +88,8 @@ constexpr uint32_t VT_PAGE_UPDATE_BUDGET = 8;
 constexpr uint32_t VT_PAGES_PER_SIDE = VT_ATLAS_SIZE / VT_PAGE_RES;
 constexpr uint32_t VT_PAGE_COUNT = VT_PAGES_PER_SIDE * VT_PAGES_PER_SIDE;
 static_assert(VT_PAGE_COUNT <= 256, "RG8 mappings store an 8-bit physical slot");
+static_assert(SOURCE_HEIGHT_BORDER * VT_PAGE_INTERIOR >= (SOURCE_TILE_RESOLUTION - 1) * VT_PAGE_BORDER,
+              "Padded heights must cover VT gutters at page source precision");
 static_assert(SOURCE_NORMAL_BORDER * VT_PAGE_INTERIOR >= 2 * (SOURCE_TILE_RESOLUTION - 1) * VT_PAGE_BORDER,
               "Padded normals must cover VT gutters at half-page source precision");
 static_assert(MAX_SECTOR_COUNT <= VT_PAGE_COUNT, "VT must hold every sector root");

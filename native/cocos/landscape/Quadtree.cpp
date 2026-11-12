@@ -35,7 +35,6 @@ namespace cc::landscape {
 // Main flow: initialize, update the view and target, then publish ready resources and select draws.
 void Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
     _data = asset.data();
-    _nodeIndexLayout = NodeIndexLayout(_data);
     _heightRanges = asset.heightRanges();
     _root = std::make_unique<Node>();
     _renderNodeKeys.clear();
@@ -514,7 +513,7 @@ HeightRange Quadtree::heightRange(NodeAddress address) const {
         const auto &bounds = find(address)->geometry;
         return {bounds.minY, bounds.maxY};
     }
-    return _heightRanges[_nodeIndexLayout.globalNodeIndex(address.level, address.x, address.z)];
+    return _heightRanges[address.level][static_cast<size_t>(address.z) * _data.nodesX(address.level) + address.x];
 }
 
 QuadNode Quadtree::geometry(NodeAddress address) const {

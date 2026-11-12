@@ -80,7 +80,7 @@ public:
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
     // Reports initial streaming completion; ready nodes render independently.
-    bool isReady() const;
+    bool isReady() const { return _ready; }
 
     uint32_t addDecal(float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
@@ -99,7 +99,7 @@ public:
 private:
     struct GridDraw {
         // GPU ownership only. Geometry/material decisions live in Quadtree.
-        int mapping{-1};
+        int mapping{-1}; // VTPageTable slot for this node's 16x16 cell-to-page mapping; -1 means unallocated.
         IntrusivePtr<scene::Model> model;
     };
 

@@ -426,6 +426,12 @@ export class WebGL2Device extends Device {
             Format.DEPTH_STENCIL,
         ], false);
 
+        if (exts.EXT_texture_norm16) {
+            formatFeatures[Format.R16_UNORM] = FormatFeatureBit.SAMPLED_TEXTURE
+                | FormatFeatureBit.LINEAR_FILTER | FormatFeatureBit.RENDER_TARGET;
+            textureExclusive[Format.R16_UNORM] = false;
+        }
+
         if (exts.EXT_color_buffer_float) {
             formatFeatures[Format.R32F] |= FormatFeatureBit.RENDER_TARGET;
             formatFeatures[Format.RG32F] |= FormatFeatureBit.RENDER_TARGET;

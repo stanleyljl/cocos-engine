@@ -1,6 +1,8 @@
-import { deflateSync } from 'zlib';
 import { decodeLandscapeHeight, parseLandscapeHeightLayout, LandscapeHeightGrid, LandscapeHeightLoader } from '../../cocos/landscape/landscape-height-data';
 import downloader from '../../cocos/asset/asset-manager/downloader';
+
+declare const require: (name: string) => any;
+const { deflateSync } = require('zlib');
 
 test('height grid keeps world rectangles, local origins and tile indices distinct', () => {
     const grid = new LandscapeHeightGrid({ resolution: 3, tilesX: 4, tilesZ: 2, tileSize: 2,
@@ -28,25 +30,30 @@ test('height grid keeps world rectangles, local origins and tile indices distinc
 });
 
 function png (filter: number, expected = [0, 1, 255, 256, 32767, 32768, 40000, 65534, 65535]) {
-    const resolution = 3;
-    const pixels = Buffer.alloc(18); expected.forEach((v, i) => pixels.writeUInt16BE(v, i * 2));
-    const scan = Buffer.alloc(21);
-    for (let row = 0; row < 3; ++row) {
-        scan[row * 7] = filter;
-        for (let col = 0; col < 6; ++col) {
-            const at = row * 6 + col;
+    const resolution = Math.sqrt(expected.length);
+    const stride = resolution * 2;
+    const pixels = Buffer.alloc(resolution * stride);
+    expected.forEach((v, i) => pixels.writeUInt16BE(v, i * 2));
+    const scan = Buffer.alloc((stride + 1) * resolution);
+    for (let row = 0; row < resolution; ++row) {
+        scan[row * (stride + 1)] = filter;
+        for (let col = 0; col < stride; ++col) {
+            const at = row * stride + col;
             const a = col >= 2 ? pixels[at - 2] : 0;
-            const b = row ? pixels[at - 6] : 0;
-            const c = row && col >= 2 ? pixels[at - 8] : 0;
+            const b = row ? pixels[at - stride] : 0;
+            const c = row && col >= 2 ? pixels[at - stride - 2] : 0;
             const p = a + b - c; const distances = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)];
             const pred = filter === 1 ? a : filter === 2 ? b : filter === 3 ? Math.floor((a + b) / 2)
                 : filter === 4 ? [a, b, c][distances.indexOf(Math.min(...distances))] : 0;
-            scan[row * 7 + col + 1] = (pixels[at] - pred) & 255;
+            scan[row * (stride + 1) + col + 1] = (pixels[at] - pred) & 255;
         }
     }
-    function chunk (name: string, data: Buffer) {
-        const result = Buffer.alloc(data.length + 12); result.writeUInt32BE(data.length);
-        result.write(name, 4); data.copy(result, 8); return result;
+    function chunk (name: string, data: Uint8Array) {
+        const result = Buffer.alloc(data.length + 12);
+        result.writeUInt32BE(data.length);
+        result.write(name, 4);
+        result.set(data, 8);
+        return result;
     }
     const header = Buffer.alloc(13); header.writeUInt32BE(resolution); header.writeUInt32BE(resolution, 4); header[8] = 16;
     const packed = deflateSync(scan); const split = Math.floor(packed.length / 2);
@@ -64,23 +71,31 @@ test.each([0, 1, 2, 3, 4])('16-bit PNG filter %i preserves low bits and signed-b
 
 test('finest tile layout and imported URLs retain content hash and query', async () => {
     const manifest = { sectorCount: [2, 2], maxTileLevel: 7, minTileLevel: 3,
-        sectorSizeMeters: 2048, heightScale: 3000, heightBias: 0, files: { 'nodes/L3/h_0_0.png': '.lsraw000042' } };
+        sectorSize: 2048, heightScale: 3000, heightBias: 0, files: { 'nodes/L3/h_0_0.png': '.lsraw000042' } };
     const layout = parseLandscapeHeightLayout(manifest);
     expect([layout.tilesX, layout.tilesZ, layout.tileSize, layout.resolution]).toEqual([32, 32, 128, 129]);
-    const fixture = png(4); layout.resolution = 3;
+    layout.resolution = 3;
+    const expected = png(4).expected;
+    const padded = Array(11 * 11).fill(12345);
+    for (let z = 0; z < 3; ++z) {
+        for (let x = 0; x < 3; ++x) {
+            padded[(z + 4) * 11 + x + 4] = expected[z * 3 + x];
+        }
+    }
+    const fixture = png(4, padded);
     const load = jest.spyOn(downloader, '_downloadArrayBuffer').mockImplementation((url, options, done) => {
         done(null, fixture.buffer); return null as any;
     });
     try {
         const samples = await new LandscapeHeightLoader().loadTile('/assets/aa/uuid.hash.lsmanifest?v=1', layout, 0, 0);
-        expect([...samples]).toEqual(fixture.expected);
+        expect([...samples]).toEqual(expected);
         expect(load.mock.calls[0][0]).toBe('/assets/aa/uuid.hash.lsraw000042?v=1');
     } finally { load.mockRestore(); }
     expect(() => parseLandscapeHeightLayout({ ...manifest, heightScale: 0 })).toThrow();
 });
 
 test('sector limit applies to the total, including narrow landscapes', () => {
-    const manifest = { maxTileLevel: 0, minTileLevel: 0, sectorSizeMeters: 128, heightScale: 1, heightBias: 0, files: {} };
+    const manifest = { maxTileLevel: 0, minTileLevel: 0, sectorSize: 128, heightScale: 1, heightBias: 0, files: {} };
     for (const sectorCount of [[8, 8], [64, 1], [1, 64]]) {
         expect(() => parseLandscapeHeightLayout({ ...manifest, sectorCount })).not.toThrow();
     }

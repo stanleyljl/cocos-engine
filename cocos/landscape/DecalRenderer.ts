@@ -88,14 +88,14 @@ export class DecalRenderer {
     private _receiveShadow = true;
     private _regionsDirty = true;
 
-    public init (node: Node, scene: RenderScene): boolean {
+    public init (node: Node, scene: RenderScene, heightUnorm: boolean): boolean {
         this._node = node;
         this._scene = scene;
         const createMaterial = (wireframe: boolean): Material => {
             const material = new Material();
             material.initialize({
                 effectName: 'landscape/builtin-landscape-decal',
-                defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: false, LANDSCAPE_WIREFRAME: wireframe },
+                defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
                 states: wireframe ? { rasterizerState: { cullMode: CullMode.NONE } } : undefined,
             });
             return material;

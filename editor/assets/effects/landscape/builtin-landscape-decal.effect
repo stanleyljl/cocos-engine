@@ -59,6 +59,9 @@ CCProgram landscape-uniforms %{
   #define LANDSCAPE_MAX_LOD_LEVELS 9
   // Must match config::SOURCE_TILE_RESOLUTION.
   #define LANDSCAPE_TILE_RESOLUTION 129
+  // Must match config::SOURCE_HEIGHT_BORDER; height interiors keep the same grid.
+  #define LANDSCAPE_HEIGHT_BORDER 4
+  #define LANDSCAPE_HEIGHT_RESOLUTION (LANDSCAPE_TILE_RESOLUTION + 2 * LANDSCAPE_HEIGHT_BORDER)
   uniform Constants {
     vec4 mainColor;
     vec4 terrainParams; // height scale/bias, LOD color flag, range flag

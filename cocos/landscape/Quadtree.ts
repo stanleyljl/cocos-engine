@@ -3,7 +3,7 @@ import { Vec3, Vec4 } from '../core/math';
 import type { Frustum } from '../core/geometry';
 import { log, warn } from '../core/platform/debug';
 import * as config from './Config';
-import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeIndexLayout, NodeKey, QuadNode, VTGridMapping } from './Data';
+import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, QuadNode, VTGridMapping } from './Data';
 
 export interface MorphRange {
     start: number;
@@ -27,15 +27,14 @@ interface Pass {
 
 interface HeightData {
     data(): LandscapeData;
-    heightRanges(): readonly HeightRange[];
+    heightRanges(): readonly (readonly HeightRange[])[];
 }
 
 // Target hierarchy, published mappings and balanced render selection. Schedule
 // supplies completed resources; Renderer consumes selected nodes and changes.
 export class Quadtree {
     private _data!: LandscapeData;
-    private _nodeIndexLayout!: NodeIndexLayout;
-    private _heightRanges: readonly HeightRange[] = [];
+    private _heightRanges: readonly (readonly HeightRange[])[] = [];
     private _root = new QuadtreeNode();
     private _renderNodeKeys = new Set<NodeKey>();
     private _renderSelectionChanged = false;
@@ -51,7 +50,6 @@ export class Quadtree {
 
     public init (asset: HeightData, lodQualityScale = 1): void {
         this._data = asset.data();
-        this._nodeIndexLayout = new NodeIndexLayout(this._data);
         this._heightRanges = asset.heightRanges();
         this._root = new QuadtreeNode();
         this._renderNodeKeys.clear();
@@ -449,7 +447,7 @@ export class Quadtree {
             const bounds = this.find(address)!.geometry;
             return { minY: bounds.minY, maxY: bounds.maxY };
         }
-        return this._heightRanges[this._nodeIndexLayout.globalNodeIndex(address.level, address.x, address.z)];
+        return this._heightRanges[address.level][address.z * this._data.nodesX(address.level) + address.x];
     }
 
     private geometry (address: NodeAddress): QuadNode {

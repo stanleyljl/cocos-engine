@@ -28,7 +28,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <limits>
 
 #include "base/std/container/vector.h"
 #include "landscape/Config.h"
@@ -60,7 +59,7 @@ struct LandscapeGridParams {
     Vec4 mapping; // Local table slot, packed 2-bit neighbor relations per edge, unused ZW.
 };
 
-// Node bounds in landscape-local height units, indexed by NodeIndexLayout.
+// Node bounds in landscape-local height units. Stored per level in global Z/X order.
 struct HeightRange {
     float minY{0.0F};
     float maxY{0.0F};
@@ -99,27 +98,24 @@ struct QuadNode {
     uint32_t iz{0};
     float minY{0.0F};
     float maxY{0.0F};
-    NodeAddress address() const {
-        return {level, ix, iz};
-    }
+    NodeAddress address() const { return {level, ix, iz}; }
 };
 
 // Material coordinates are independent of the geometry quadtree. Level zero
-// covers at least one logical unit; increasing the level doubles the covered area side.
+// is the finest page; increasing the level doubles the covered area side.
 struct VTPageAddress {
     uint32_t level{0};
     uint32_t x{0};
     uint32_t z{0};
 
-    uint64_t key() const {
-        return makeNodeKey(level, x, z);
-    }
+    uint64_t key() const { return makeNodeKey(level, x, z); }
 };
 
 // A node owns unique page addresses and a compact index for each grid cell.
 // Residency and physical-slot lookup visit pages once, not all 256 cells.
 struct VTGridMapping {
-    static constexpr uint32_t SIDE = 16;
+    static constexpr uint32_t SIDE_BITS = 4;
+    static constexpr uint32_t SIDE = 1U << SIDE_BITS;
     static constexpr uint32_t CELL_COUNT = SIDE * SIDE;
     std::array<uint8_t, CELL_COUNT> cells{};
     ccstd::vector<VTPageAddress> pages;
@@ -131,8 +127,8 @@ struct VTPageSources {
     // 2x2 lookup: base precision repeats one tile; far detail uses up to four.
     // Each source includes its own real-neighbor border for the VT gutters.
     std::array<NodeAddress, config::VT_NORMAL_SOURCE_COUNT> normals;
-    // Empty for XZ projection; otherwise a 3x3 lookup covering the page and its gutters.
-    ccstd::vector<NodeAddress> projections;
+    // Side projections sample the padded height data of the splat source.
+    bool triplanar{false};
     // Append unique addresses in sampling order, preserving existing entries.
     void appendTo(ccstd::vector<NodeAddress> &output) const;
 };
@@ -157,7 +153,7 @@ struct LandscapeData {
     uint32_t sectorsZ{0};
     uint32_t maxTileLevel{0}; // Coarsest source tile level; also the sector root level.
     uint32_t minTileLevel{0}; // Finest source tile level; finer geometry nodes sample ancestor tiles.
-    float sectorSize{0.0F};
+    float sectorSize{0.0F}; // Positive power of two.
     float heightScale{0.0F};
     float heightBias{0.0F};
 
@@ -181,66 +177,28 @@ struct LandscapeData {
     LandscapeRegion nodeRegion(NodeAddress address) const;
 };
 
-// Index layout for flat node metadata storage: sectors in row-major (Z, X) order, then
-// levels from L0 to the root, then nodes in row-major (Z, X) order per level.
-// Owns a snapshot of the dimensions and offsets; callers cannot mix layouts.
-class NodeIndexLayout {
-public:
-    static constexpr size_t INVALID_INDEX = std::numeric_limits<size_t>::max();
-
-    NodeIndexLayout() = default;
-    // Zero/excess sectors or an invalid maxTileLevel produce an empty layout.
-    explicit NodeIndexLayout(const LandscapeData &data);
-
-    size_t nodeCount() const { return static_cast<size_t>(_sectorsX) * _sectorsZ * _nodesPerSector; }
-
-    // Both queries return an index into the same flat storage, or INVALID_INDEX.
-    // localX/localZ are relative to the given sector at the requested level.
-    size_t sectorNodeIndex(uint32_t sectorX, uint32_t sectorZ, uint32_t level, uint32_t localX, uint32_t localZ) const;
-    // globalX/globalZ span all sectors at the requested level.
-    size_t globalNodeIndex(uint32_t level, uint32_t globalX, uint32_t globalZ) const;
-
-private:
-    struct Level {
-        uint32_t nodesPerSide{0};
-        size_t offset{0};
-    };
-    std::array<Level, config::MAX_LOD_LEVELS> _levels{};
-    uint32_t _levelCount{0};
-    uint32_t _sectorsX{0};
-    uint32_t _sectorsZ{0};
-    size_t _nodesPerSector{0};
-};
-
 // Material-page dimensions are derived together; a geometry maxTileLevel cannot
 // accidentally be supplied as the VT root. This class does not own atlas slots.
 class VTPageLayout {
 public:
     explicit VTPageLayout(float sectorSize = 1.0F);
 
-    uint32_t rootLevel() const {
-        return _rootLevel;
-    }
-    float pageSize(uint32_t level) const {
-        return level <= _rootLevel ? _sectorSize / static_cast<float>(1U << (_rootLevel - level)) : 0.0F;
-    }
-    // Distance-based material resolution, independent of geometry LOD.
-    uint32_t levelForDistance(float distance) const;
+    uint32_t rootLevel() const { return _rootLevel; }
+    float pageSize(uint32_t level) const { return level <= _rootLevel ? _sectorSize / static_cast<float>(1U << (_rootLevel - level)) : 0.0F; }
     LandscapeRegion pageRegion(VTPageAddress page) const {
         const float size = pageSize(page.level);
         return {page.x * size, page.z * size, size};
     }
-
-    // Subdivide aligned grid regions according to distance, independently of
-    // geometry LOD, and map each cell to a page covering its stitched footprint.
-    VTGridMapping buildGridMapping(LandscapeRegion region, float minY, float maxY, const Vec3 &camera) const;
-
-    // Local bounds must stay within one sector.
-    // Include the complete stitched footprint, not just the original grid cell.
-    VTPageAddress coveringPage(uint32_t desiredLevel, LandscapePoint min, LandscapePoint max) const;
+    // Distance-based material resolution, independent of geometry LOD.
+    uint32_t levelForDistance(float distance) const;
+    // Subdivide a geometry node by distance; integer cell coordinates determine
+    // the containing page, including the complete morph/stitch trajectory.
+    VTGridMapping buildGridMapping(const LandscapeData &data, NodeAddress node, float minY, float maxY, const Vec3 &camera) const;
 
 private:
-    void mapCells(const LandscapeRegion &firstCell, const Vec3 &camera, float heightDistance, uint32_t left, uint32_t bottom, uint32_t side, VTGridMapping &mapping) const;
+    struct GridMappingContext;
+    void mapGridBlock(const GridMappingContext &context, uint32_t left, uint32_t bottom, uint32_t blockLevel, VTGridMapping &result) const;
+
     float _sectorSize;
     uint32_t _rootLevel{0};
 };

@@ -355,24 +355,13 @@ VTPageSources VTRenderer::selectSources(VTPageAddress page, bool refineFarDetail
             result.normals[row * 2 + col] = {level, columns[col], rows[row]};
         }
     }
-    if (triplanar && hasCliff(region(page))) {
-        // A page fits inside one height tile at this level. Unlike normal
-        // tiles, height tiles have no border: reserve actual gutter owners.
-        const float border = static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
-        const float offsets[] = {-border, 0.5F, 1.0F + border};
-        result.projections.reserve(config::VT_PROJECTION_SOURCE_COUNT);
-        for (const float row : offsets) {
-            for (const float col : offsets) {
-                result.projections.push_back(_data.nodeAtClamped(result.splat.level, {(page.x + col) * size, (page.z + row) * size}));
-            }
-        }
-    }
+    result.triplanar = triplanar && hasCliff(region(page));
     return result;
 }
 
 bool VTRenderer::hasCliff(LandscapeRegion region) const {
-    // Include the entire filtering gutter. Choose a metadata level that
-    // covers this footprint with at most 3x3 cells, including sector edges.
+    // Estimate slope from each region's height span and size, including gutters.
+    // This coarse classification can miss cliffs narrower than the region.
     const float border = region.size * config::VT_PAGE_BORDER / config::VT_PAGE_INTERIOR;
     uint32_t level = 0;
     while (level < _data.maxTileLevel && _data.nodeSize(level) < region.size + 2 * border) {
@@ -380,9 +369,11 @@ bool VTRenderer::hasCliff(LandscapeRegion region) const {
     }
     const auto first = _data.nodeAtClamped(level, {region.x - border, region.z - border});
     const auto last = _data.nodeAtClamped(level, {region.x + region.size + border, region.z + region.size + border});
+    const float heightThreshold = _data.nodeSize(level) * std::sqrt(1.0F / (config::TRIPLANAR_START_NORMAL_Y * config::TRIPLANAR_START_NORMAL_Y) - 1.0F);
     for (uint32_t z = first.z; z <= last.z; ++z) {
         for (uint32_t x = first.x; x <= last.x; ++x) {
-            if ((*_minimumNormalY)[_nodeIndexLayout.globalNodeIndex(level, x, z)] < config::TRIPLANAR_START_NORMAL_Y) {
+            const auto &range = (*_heightRanges)[level][static_cast<size_t>(z) * _data.nodesX(level) + x];
+            if (range.maxY - range.minY > heightThreshold) {
                 return true;
             }
         }
@@ -487,7 +478,7 @@ gfx::Texture *VTRenderer::normalRoughness() const {
     return _compressor ? _compressor->normalRoughness() : _composer->target()->getWindow()->getColorTexture(1);
 }
 
-bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<float> &minimumNormalY, uint32_t capacity) {
+bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity) {
     if (capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
         return false;
     }
@@ -496,8 +487,7 @@ bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<float>
     _lookup.clear();
     _reservation = 0;
     _data = data;
-    _nodeIndexLayout = NodeIndexLayout(data);
-    _minimumNormalY = &minimumNormalY;
+    _heightRanges = &heightRanges;
     _layout = VTPageLayout(data.sectorSize);
     _pages.resize(capacity);
     return true;
@@ -513,7 +503,7 @@ bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &
     _composer = std::make_unique<VTPageComposer>();
     _mipGenerator = std::make_unique<VTPageMipGenerator>();
     const uint32_t side = atlasSize / config::VT_PAGE_RES;
-    if (!initPages(asset.data(), asset.minimumNormalY(), side * side) || !_pageTable.ensureCapacity(1) ||
+    if (!initPages(asset.data(), asset.heightRanges(), side * side) || !_pageTable.ensureCapacity(1) ||
         !_composer->init(asset, residency, materials, decals, atlasSize, compressed) || !_mipGenerator->init(*_composer, compressed)) {
         return false;
     }

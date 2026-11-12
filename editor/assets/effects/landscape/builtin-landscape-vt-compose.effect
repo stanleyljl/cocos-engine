@@ -55,6 +55,9 @@ CCEffect %{
 CCProgram vt-compose-uniforms %{
   // Must match config::SOURCE_TILE_RESOLUTION.
   #define LANDSCAPE_TILE_RESOLUTION 129
+  // Must match config::SOURCE_HEIGHT_BORDER; height interiors keep the same grid.
+  #define LANDSCAPE_HEIGHT_BORDER 4
+  #define LANDSCAPE_HEIGHT_RESOLUTION (LANDSCAPE_TILE_RESOLUTION + 2 * LANDSCAPE_HEIGHT_BORDER)
   // Must match config::SOURCE_NORMAL_BORDER; the interior keeps the height grid.
   #define LANDSCAPE_NORMAL_BORDER 8
   uniform Constants {
@@ -321,23 +324,16 @@ CCProgram vt-compose-fs %{
   }
 
   #if LANDSCAPE_TRIPLANAR
-  vec4 projectionSource() {
-    // Height tiles have no padding. The 3x3 lookup holds the interior and
-    // actual neighboring owners for each gutter, including sector boundaries.
-    vec2 local = (v_localXZ - v_region.xy) / v_region.z;
-    ivec2 cell = ivec2(step(vec2(0.0), local) + step(vec2(1.0), local));
-    // The first four entries belong to the shading-normal quadrants.
-    return texelFetch(sourceMap, ivec2(4 + cell.y * 3 + cell.x, int(v_decalPage.x)), 0);
-  }
-
   float sampleTerrainHeight(vec4 source) {
-    vec2 pixel = clamp((v_localXZ - source.xy) / source.z, vec2(0.0), vec2(1.0)) * float(LANDSCAPE_TILE_RESOLUTION - 1);
+    // Read real neighboring samples from the base source's padding, including gutters.
+    vec2 pixel = (v_localXZ - source.xy) / source.z * float(LANDSCAPE_TILE_RESOLUTION - 1) + float(LANDSCAPE_HEIGHT_BORDER);
+    pixel = clamp(pixel, vec2(0.0), vec2(float(LANDSCAPE_HEIGHT_RESOLUTION - 1)));
     #if LANDSCAPE_HEIGHT_UNORM
-      float height = textureLod(terrainHeightMap, vec3((pixel + 0.5) / float(LANDSCAPE_TILE_RESOLUTION), source.w), 0.0).r;
+      float height = textureLod(terrainHeightMap, vec3((pixel + 0.5) / float(LANDSCAPE_HEIGHT_RESOLUTION), source.w), 0.0).r;
     #else
       // Decode the uint16 bytes before bilinear filtering, as in terrain-height.
       ivec2 p = ivec2(floor(pixel));
-      ivec2 q = min(p + ivec2(1), ivec2(LANDSCAPE_TILE_RESOLUTION - 1));
+      ivec2 q = min(p + ivec2(1), ivec2(LANDSCAPE_HEIGHT_RESOLUTION - 1));
       int layer = int(source.w);
       vec2 decode = vec2(256.0, 1.0) / 65535.0;
       float a = dot(floor(texelFetch(terrainHeightMap, ivec3(p, layer), 0).rg * 255.0 + 0.5), decode);
@@ -354,7 +350,8 @@ CCProgram vt-compose-fs %{
     // Unity Shader Graph Triplanar: normalized powers of the base surface normal.
     vec3 weights = pow(abs(normal), vec3(triplanarParams.w));
     weights /= dot(weights, vec3(1.0));
-    // Match CPU culling: gentle slopes are exactly XZ, even in a cliff page.
+    // Use the CPU classification threshold: gentle samples stay exactly XZ,
+    // even when the page's estimated slope selects triplanar composition.
     // This also makes ordinary/cliff page boundaries agree through their gutters.
     float cliff = 1.0 - smoothstep(triplanarParams.y, triplanarParams.x, abs(normal.y));
     return mix(vec3(0.0, 1.0, 0.0), weights, cliff);
@@ -450,8 +447,7 @@ CCProgram vt-compose-fs %{
   void composeMaterial(MaterialBlend blend, vec3 shadingNormal, vec3 tangent, vec3 bitangent, vec3 modulation, inout ComposedSurface surface) {
     vec3 position = vec3(v_localXZ.x, 0.0, -v_localXZ.y);
     #if LANDSCAPE_TRIPLANAR
-      vec4 source = projectionSource();
-      position.y = sampleTerrainHeight(source);
+      position.y = sampleTerrainHeight(v_source);
     #endif
     // Evaluate the surface in XZ cache space. Height derivatives compress the
     // side projections into the VT; mapping it back onto the slope restores scale.

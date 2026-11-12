@@ -11,7 +11,7 @@ highp float sampleHeightRegion(highp vec2 localXZ, highp vec4 region) {
   #if LANDSCAPE_HEIGHT_UNORM
   highp vec2 tileUv = clamp((localXZ - region.xy) / max(region.z, 1e-6), vec2(0.0), vec2(1.0));
   highp float resolution = float(LANDSCAPE_TILE_RESOLUTION);
-  tileUv = (tileUv * (resolution - 1.0) + 0.5) / resolution;
+  tileUv = (tileUv * (resolution - 1.0) + float(LANDSCAPE_HEIGHT_BORDER) + 0.5) / float(LANDSCAPE_HEIGHT_RESOLUTION);
   return textureLod(heightmap, vec3(tileUv, region.w), 0.0).r * terrainParams.x + terrainParams.y;
   #else
   // RG stores the high/low bytes of one uint16 height, not two colors.
@@ -24,6 +24,8 @@ highp float sampleHeightRegion(highp vec2 localXZ, highp vec4 region) {
   ivec2 p0 = ivec2(floor(grid));
   ivec2 p1 = min(p0 + ivec2(1), ivec2(lastTexel));
   highp vec2 weight = fract(grid);
+  p0 += ivec2(LANDSCAPE_HEIGHT_BORDER);
+  p1 += ivec2(LANDSCAPE_HEIGHT_BORDER);
   int layer = int(region.w + 0.5);
   highp float h00 = fetchHeightSample(p0, layer);
   highp float h10 = fetchHeightSample(ivec2(p1.x, p0.y), layer);

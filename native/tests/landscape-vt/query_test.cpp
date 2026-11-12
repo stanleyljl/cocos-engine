@@ -36,15 +36,16 @@ LandscapeData data() {
 }
 LandscapeQueryTile tile(uint32_t tx, uint32_t tz) {
     LandscapeQueryTile t;
-    t.height.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
+    t.height.resize(config::SOURCE_HEIGHT_RESOLUTION * config::SOURCE_HEIGHT_RESOLUTION * 2U);
     t.splat.resize(config::SOURCE_TILE_RESOLUTION * config::SOURCE_TILE_RESOLUTION * 2U);
     t.normal.resize(config::SOURCE_NORMAL_RESOLUTION * config::SOURCE_NORMAL_RESOLUTION * 3U);
     for (uint32_t z = 0; z < config::SOURCE_TILE_RESOLUTION; ++z) {
         for (uint32_t x = 0; x < config::SOURCE_TILE_RESOLUTION; ++x) {
             const uint16_t h = static_cast<uint16_t>(128 + (tx * (config::SOURCE_TILE_RESOLUTION - 1U) + x) * 2 + tz * (config::SOURCE_TILE_RESOLUTION - 1U) + z);
             const size_t i = z * config::SOURCE_TILE_RESOLUTION + x;
-            t.height[i * 2] = h >> 8;
-            t.height[i * 2 + 1] = h & 255;
+            const size_t heightIndex = (z + config::SOURCE_HEIGHT_BORDER) * config::SOURCE_HEIGHT_RESOLUTION + x + config::SOURCE_HEIGHT_BORDER;
+            t.height[heightIndex * 2] = h >> 8;
+            t.height[heightIndex * 2 + 1] = h & 255;
             const uint16_t s = 3U | (7U << 5U) | (10U << 10U);
             std::memcpy(t.splat.data() + i * 2, &s, 2);
             // Deliberately different from the height gradient: queries must use RGB.
@@ -225,8 +226,9 @@ void triangleHeight() {
     q.update();
     auto t = tile(0, 0);
     for (const auto &pair : {std::pair<size_t, uint16_t>{0, 100}, {1, 102}, {config::SOURCE_TILE_RESOLUTION, 104}, {config::SOURCE_TILE_RESOLUTION + 1U, 110}}) {
-        t.height[pair.first * 2] = pair.second >> 8;
-        t.height[pair.first * 2 + 1] = pair.second & 255;
+        const size_t heightIndex = (pair.first / config::SOURCE_TILE_RESOLUTION + config::SOURCE_HEIGHT_BORDER) * config::SOURCE_HEIGHT_RESOLUTION + pair.first % config::SOURCE_TILE_RESOLUTION + config::SOURCE_HEIGHT_BORDER;
+        t.height[heightIndex * 2] = pair.second >> 8;
+        t.height[heightIndex * 2 + 1] = pair.second & 255;
     }
     loading.jobs.front().complete(std::move(t), true);
     loading.jobs.pop_front();

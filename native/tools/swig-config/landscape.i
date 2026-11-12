@@ -39,7 +39,6 @@ using namespace cc;
 %ignore cc::landscape::VTPageSources;
 %ignore cc::landscape::VTPageLayout;
 %ignore cc::landscape::LandscapeData;
-%ignore cc::landscape::NodeIndexLayout;
 %ignore cc::landscape::LandscapeInstance::preparePasses;
 %ignore cc::landscape::LandscapeInstance::getPassModels;
 %ignore cc::landscape::LandscapeInstance::onGlobalPipelineStateChanged;

@@ -8,6 +8,7 @@ const DEFAULT_SECTOR_SIZE = 4096;
 // Total X * Y sectors; must match native Config.h.
 const MAX_SECTOR_COUNT = 64;
 const DEFAULT_TILE_SIZE = 129;
+const HEIGHT_BORDER = 4;
 const DEFAULT_MAX_TILE_LEVEL = 5;
 const DEFAULT_MIN_TILE_LEVEL = 0;
 const DEFAULT_HEIGHT_SCALE = 2000;
@@ -28,7 +29,7 @@ function stringifyManifest (manifest) {
             inlineValues.push(`{${fields.join(', ')}}`);
             return `@@INLINE_${inlineValues.length - 1}@@`;
         }
-        if ((key === 'min' || key === 'max') && Array.isArray(value)) {
+        if (key === 'heightRange' && Array.isArray(value)) {
             inlineValues.push(JSON.stringify(value));
             return `@@INLINE_${inlineValues.length - 1}@@`;
         }
@@ -156,7 +157,7 @@ Layout options:
   --height-scale <m>  Physical height range represented by uint16 (default: 2000)
   --height-bias <m>   Physical height at encoded value 0 (default: 0)
 
-The output uses 129x129 16-bit grayscale PNG tiles (PNG color type 0, bit depth 16).
+The output uses 137x137 16-bit grayscale PNG tiles: a 129x129 interior plus 4 neighboring samples per side.
 After decoding, each sample is an R16UI uint16 height value in [0, 65535].
 Node coordinates are global per level.
 `);
@@ -206,21 +207,24 @@ function writeHeightTile (filePath, tileSize, sampleAt) {
     // heightmap. After decoding, each sample is an R16UI uint16 height value.
     // Returns the tile's [min,max] quantized height values so the manifest can
     // carry a tight per-node vertical bound for culling / LOD.
-    const values = new Uint16Array(tileSize * tileSize);
+    const resolution = tileSize + 2 * HEIGHT_BORDER;
+    const values = new Uint16Array(resolution * resolution);
     let minValue = HEIGHT_MAX;
     let maxValue = 0;
-    for (let y = 0; y < tileSize; ++y) {
-        for (let x = 0; x < tileSize; ++x) {
-            const value = Math.round(clamp01(sampleAt(x, y)) * HEIGHT_MAX);
-            if (value < minValue) minValue = value;
-            if (value > maxValue) maxValue = value;
-            values[y * tileSize + x] = value;
+    for (let y = 0; y < resolution; ++y) {
+        for (let x = 0; x < resolution; ++x) {
+            const value = Math.round(clamp01(sampleAt(x - HEIGHT_BORDER, y - HEIGHT_BORDER)) * HEIGHT_MAX);
+            if (x >= HEIGHT_BORDER && x < HEIGHT_BORDER + tileSize && y >= HEIGHT_BORDER && y < HEIGHT_BORDER + tileSize) {
+                minValue = Math.min(minValue, value);
+                maxValue = Math.max(maxValue, value);
+            }
+            values[y * resolution + x] = value;
         }
     }
 
     const encoded = PNG.sync.write({
-        width: tileSize,
-        height: tileSize,
+        width: resolution,
+        height: resolution,
         data: Buffer.from(values.buffer),
     }, {
         colorType: 0,
@@ -286,15 +290,12 @@ function makeManifest (options) {
         levels.push({
             // Per-node quantized height bounds, row-major iz*nx+ix (global coords).
             // Runtime builds a tight node AABB: y = heightBias + (v/65535)*heightScale.
-            heightRange: {
-                min: bounds[level].min,
-                max: bounds[level].max,
-            },
+            heightRange: bounds[level].min.map((min, index) => [min, bounds[level].max[index]]),
         });
     }
 
     return {
-        sectorSizeMeters: sectorSize,
+        sectorSize,
         sectorCount: [sectorsX, sectorsY],
         maxTileLevel,
         minTileLevel,
@@ -326,6 +327,9 @@ function generate (rawOptions) {
         fail(`Landscape sector count must not exceed ${MAX_SECTOR_COUNT}`);
     }
     const sectorSize = intOption(options, 'sectorSize', DEFAULT_SECTOR_SIZE);
+    if (2 ** Math.floor(Math.log2(sectorSize)) !== sectorSize) {
+        fail('--sector-size must be a power of two');
+    }
     const tileSize = DEFAULT_TILE_SIZE;
     const maxTileLevel = intOption(options, 'maxTileLevel', DEFAULT_MAX_TILE_LEVEL, 0);
     if (maxTileLevel > 8) {
@@ -371,9 +375,14 @@ function generate (rawOptions) {
         }
     }
 
-    const heightAt = (x, y) => source.type === 'procedural'
-        ? proceduralSample(x, y, sourceWidth, sourceHeight)
-        : source.sampleAt(x, y);
+    // Only the landscape's outer edge is clamped; tile and sector borders read real neighbors.
+    const heightAt = (x, y) => {
+        const sx = Math.max(0, Math.min(sourceWidth - 1, x));
+        const sy = Math.max(0, Math.min(sourceHeight - 1, y));
+        return source.type === 'procedural'
+            ? proceduralSample(sx, sy, sourceWidth, sourceHeight)
+            : source.sampleAt(sx, sy);
+    };
     if (options.force) {
         removeExistingHeightTiles(assetDir);
     }

@@ -92,12 +92,8 @@ public:
         VTPageAddress address;
         PageState state{PageState::EMPTY};
         uint64_t lastReserved{0};
-        bool needsComposition() const {
-            return state == PageState::UNCOMPOSED || state == PageState::OUTDATED;
-        }
-        bool drawable() const {
-            return state == PageState::READY || state == PageState::OUTDATED;
-        }
+        bool needsComposition() const { return state == PageState::UNCOMPOSED || state == PageState::OUTDATED; }
+        bool drawable() const { return state == PageState::READY || state == PageState::OUTDATED; }
     };
     // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
@@ -130,7 +126,7 @@ public:
 
 protected:
     // CPU residency operations; runtime callers use init() and renderPages().
-    bool initPages(const LandscapeData &data, const ccstd::vector<float> &minimumNormalY, uint32_t capacity = config::VT_PAGE_COUNT);
+    bool initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity = config::VT_PAGE_COUNT);
     // Mark composition complete only after its GPU commands have been submitted.
     void publish(uint32_t slot);
 
@@ -141,8 +137,7 @@ private:
     int allocate(VTPageAddress address);
     LandscapeData _data;
     VTPageLayout _layout;
-    NodeIndexLayout _nodeIndexLayout;
-    const ccstd::vector<float> *_minimumNormalY{nullptr}; // Borrowed immutable asset metadata.
+    const ccstd::vector<ccstd::vector<HeightRange>> *_heightRanges{nullptr}; // Borrowed immutable asset metadata.
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _reservedSlots;

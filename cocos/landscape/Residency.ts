@@ -20,6 +20,7 @@ export class LandscapeResidency {
     private _asset!: LandscapeAsset;
     private _data!: LandscapeData;
     private _capacity = 0;
+    private _heightUnorm = false;
     private _heightArray: Texture | null = null;
     private _splatArray: Texture | null = null;
     private _normalArray: Texture | null = null;
@@ -29,9 +30,9 @@ export class LandscapeResidency {
     private _working: readonly NodeAddress[] = [];
     private readonly _inFlight = new Set<NodeKey>();
 
-    public init (device: Device, asset: LandscapeAsset, layerCount: number): boolean {
+    public init (device: Device, asset: LandscapeAsset, layerCount: number, heightUnorm: boolean): boolean {
         const data = asset.data();
-        if (layerCount < data.sectorsX * data.sectorsZ || layerCount === 0 || layerCount > device.capabilities.maxArrayTextureLayers) {
+        if (layerCount < data.sectorsX * data.sectorsZ || layerCount === 0) {
             return false;
         }
         const filtered = FormatFeatureBit.SAMPLED_TEXTURE | FormatFeatureBit.LINEAR_FILTER;
@@ -43,10 +44,13 @@ export class LandscapeResidency {
         this._asset = asset;
         this._data = data;
         this._capacity = layerCount;
-        const info = new TextureInfo(TextureType.TEX2D_ARRAY, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RG8, config.SOURCE_TILE_RESOLUTION, config.SOURCE_TILE_RESOLUTION);
+        this._heightUnorm = heightUnorm;
+        const info = new TextureInfo(TextureType.TEX2D_ARRAY, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, heightUnorm ? Format.R16_UNORM : Format.RG8, config.SOURCE_HEIGHT_RESOLUTION, config.SOURCE_HEIGHT_RESOLUTION);
         info.layerCount = layerCount;
         this._heightArray = device.createTexture(info);
         info.format = Format.R16UI;
+        info.width = config.SOURCE_TILE_RESOLUTION;
+        info.height = config.SOURCE_TILE_RESOLUTION;
         this._splatArray = device.createTexture(info);
         info.format = Format.RG8;
         info.width = config.SOURCE_NORMAL_RESOLUTION;
@@ -100,6 +104,7 @@ export class LandscapeResidency {
         this._splatArray = null;
         this._normalArray = null;
         this._capacity = 0;
+        this._heightUnorm = false;
         this._slots.clear();
         this._working = [];
         this._inFlight.clear();
@@ -148,6 +153,7 @@ export class LandscapeResidency {
 
     public loadReserved (): boolean {
         const MAX_IN_FLIGHT = 8;
+        const heightFormat = this._heightUnorm ? Format.R16UI : Format.RG8;
         if (this._asset.loadingFailed()) {
             return false;
         }
@@ -159,7 +165,7 @@ export class LandscapeResidency {
             if (this._inFlight.size >= MAX_IN_FLIGHT) {
                 break;
             }
-            if (!this._asset.requestTile(source.level, source.x, source.z)) {
+            if (!this._asset.requestTile(source.level, source.x, source.z, heightFormat)) {
                 return false;
             }
             this._inFlight.add(key);

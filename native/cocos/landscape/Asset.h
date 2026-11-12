@@ -96,24 +96,22 @@ public:
     // Completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQueryCompletion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const;
-    // Decodes 129x129 uint16 height/splat as RG8/R16UI, or padded 145x145 normals as RGB8.
-    static bool loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data);
+    // Validate the supplied dimensions: heights 137x137, splats 129x129, normals 145x145.
+    // Decode grayscale16 as RG8/R16UI, or RGB8 normals.
+    static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t resolution, ccstd::vector<uint8_t> &data);
     // Native libpng decode for physics after its asynchronous file read.
     // Avoid JS inflate/unfilter loops; returns source uint16 values in host order.
     static Uint16Array decodeSamples(const Uint8Array &png, uint32_t resolution);
 
     const ccstd::vector<DecalLayer> &decalLayers() const { return _decalLayers; }
-    float maxDecalHeight() const {
-        return _maxDecalHeight;
-    }
+    float maxDecalHeight() const { return _maxDecalHeight; }
     const ccstd::vector<Decal> &decals() const { return _decals; }
     float decalNearDistance() const { return _decalNearDistance; }
     float decalFarDistance() const { return _decalFarDistance; }
     uint32_t decalResolution() const { return _decalResolution; }
     const LandscapeData &data() const { return _data; }
-    // Immutable asset metadata, indexed with NodeIndexLayout; shared by VT source selection.
-    const ccstd::vector<float> &minimumNormalY() const { return _minimumNormalY; }
-    const ccstd::vector<HeightRange> &heightRanges() const { return _heightRanges; }
+    // Immutable bounds: [level][z * nodesX(level) + x], spanning all sectors.
+    const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges() const { return _heightRanges; }
     const ccstd::vector<MaterialLayer> &materialLayers() const { return _materialLayers; }
     uint32_t materialResolution() const { return _materialResolution; }
 
@@ -141,9 +139,7 @@ private:
     uint32_t _decalResolution{1};
     float _decalNearDistance{12.0F};
     float _decalFarDistance{40.0F};
-    NodeIndexLayout _nodeIndexLayout;
-    ccstd::vector<HeightRange> _heightRanges;
-    ccstd::vector<float> _minimumNormalY;
+    ccstd::vector<ccstd::vector<HeightRange>> _heightRanges;
     std::shared_ptr<AsyncState> _async;
 };
 

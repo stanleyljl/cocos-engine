@@ -17,7 +17,8 @@
 - Prefer SSH when connecting to remote Git repositories. For HTTPS-configured remotes, use a per-command SSH URL rewrite without changing the remote configuration.
 - When adding native `.cpp` or `.h` files, register them in the owning CMake target/source list and regenerate the Visual Studio project so they appear in the project and filters. Do not rely only on an include directive or edit generated project files as the lasting fix.
 - Keep small, closely related helpers in existing files when practical instead of introducing a separate file.
-- Always put each statement on its own line. Never combine multiple statements on one line, including in short functions, branches, or lambdas.
+- In bodies containing multiple statements, put each statement on its own line. Never combine multiple statements on one line, including in short functions, branches, or lambdas.
+- For C++ class/struct member functions implemented in `.h` files whose body is a single simple statement, put the signature, braces and statement on one line. Implementations in `.cpp` files are not required to use this one-line format. This rule does not apply to TypeScript; follow the established style of other engine TypeScript modules.
 - Declare each class or struct data member separately on its own line. Never combine multiple members in one declaration, including members of nested or implementation-local structs.
 - Keep Landscape global function and member function signatures on one line in both declarations and definitions; do not wrap parameter lists.
 - Whenever code changes, review the related comments and update or remove any outdated comments in the same change so they accurately describe the current implementation.

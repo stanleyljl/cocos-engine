@@ -299,6 +299,8 @@ try {
     'precision highp float;precision highp sampler2DArray;',
     '#define USE_INSTANCING 1',
     '#define LANDSCAPE_TILE_RESOLUTION 129',
+    '#define LANDSCAPE_HEIGHT_BORDER 4',
+    '#define LANDSCAPE_HEIGHT_RESOLUTION 137',
     '#define LANDSCAPE_SHADOW_PASS 0','#define LANDSCAPE_WIREFRAME 0','#define LANDSCAPE_HEIGHT_UNORM 0',
     '#define CCGetWorldMatrix(m) m = mat4(1.0)',
     'uniform vec4 holeParams,terrainParams,morphCameraPos,decalControl,lodMorph[9];',
@@ -315,14 +317,14 @@ try {
   const outBuffer=gl.createBuffer();gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER,outBuffer);gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER,16,gl.DYNAMIC_READ);gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER,0,outBuffer);
   const terrainTexture=gl.createTexture();gl.activeTexture(gl.TEXTURE7);gl.bindTexture(gl.TEXTURE_2D_ARRAY,terrainTexture);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-  const heights=new Uint8Array(129*129*4);
-  for (let z = 0; z < 129; ++z) {
-    for (let x = 0; x < 129; ++x) {
-      const h = Math.round((.2 + .1 * Math.sin(x * .1) * Math.cos(z * .05)) * 65535);
-      heights.set([h >> 8, h & 255, 0, 255], (z * 129 + x) * 4);
+  const heights=new Uint8Array(137*137*4);
+  for (let z = 0; z < 137; ++z) {
+    for (let x = 0; x < 137; ++x) {
+      const h = Math.round((.2 + .1 * Math.sin(Math.max(0, Math.min(128, x - 4)) * .1) * Math.cos(Math.max(0, Math.min(128, z - 4)) * .05)) * 65535);
+      heights.set([h >> 8, h & 255, 0, 255], (z * 137 + x) * 4);
     }
   }
-  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,129,129,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,137,137,1,0,gl.RGBA,gl.UNSIGNED_BYTE,heights);
   gl.activeTexture(gl.TEXTURE8);gl.bindTexture(gl.TEXTURE_2D_ARRAY,gl.createTexture());gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D_ARRAY,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texImage3D(gl.TEXTURE_2D_ARRAY,0,gl.RGBA8,1,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,0,0,255]));
   const probe=(uv,{decal=1,scale=0,enabled=1,camera=[-2,4,-2],range=[2,12],mapping=[0,0,0,0],grid=[0,0,8,8],nodeSize=16,nodeOrigin=[0,0],fade=1}={})=>{
     const p=probePrograms[decal];gl.useProgram(p);

@@ -6,6 +6,8 @@ const { PNG } = require('pngjs');
 
 // Keep these dimensions in sync with Config.h and the asset importer.
 const TILE_RESOLUTION = 129;
+const HEIGHT_BORDER = 4;
+const HEIGHT_RESOLUTION = TILE_RESOLUTION + 2 * HEIGHT_BORDER;
 const NORMAL_BORDER = 8;
 const NORMAL_RESOLUTION = TILE_RESOLUTION + 2 * NORMAL_BORDER;
 
@@ -86,7 +88,7 @@ function generateNormalTiles(manifestPath, output) {
     const original = fs.readFileSync(manifestPath, 'utf8');
     const manifest = JSON.parse(original);
     const root = path.dirname(manifestPath);
-    const { sectorSizeMeters: sectorSize, sectorCount, maxTileLevel, minTileLevel, heightScale } = manifest;
+    const { sectorSize, sectorCount, maxTileLevel, minTileLevel, heightScale } = manifest;
     if (!Array.isArray(sectorCount) || sectorCount.length !== 2 || sectorCount.some(v => !Number.isInteger(v) || v < 1)
         || !Number.isInteger(maxTileLevel) || maxTileLevel < 0 || maxTileLevel > 8 || !Number.isInteger(minTileLevel) || minTileLevel < 0 || minTileLevel > maxTileLevel
         || typeof sectorSize !== 'number' || sectorSize <= 0 || typeof heightScale !== 'number' || heightScale <= 0) {
@@ -106,14 +108,14 @@ function generateNormalTiles(manifestPath, output) {
     for (let z = 0; z < nz; ++z) {
         for (let x = 0; x < nx; ++x) {
             const png = PNG.sync.read(fs.readFileSync(path.join(root, `nodes/L${minTileLevel}/h_${x}_${z}.png`)), { skipRescale: true });
-            if (png.width !== resolution || png.height !== resolution || png.depth !== 16 || png.colorType !== 0) {
+            if (png.width !== HEIGHT_RESOLUTION || png.height !== HEIGHT_RESOLUTION || png.depth !== 16 || png.colorType !== 0) {
                 throw new Error('Expected uint16 height PNG');
             }
-            const channels = png.data.length / (resolution * resolution);
+            const channels = png.data.length / (HEIGHT_RESOLUTION * HEIGHT_RESOLUTION);
             for (let j = 0; j < resolution; ++j) {
                 for (let i = 0; i < resolution; ++i) {
                     const at = (z * edge + j) * width + x * edge + i;
-                    const h = png.data[(j * resolution + i) * channels];
+                    const h = png.data[((j + HEIGHT_BORDER) * HEIGHT_RESOLUTION + i + HEIGHT_BORDER) * channels];
                     if (((x > 0 && i === 0) || (z > 0 && j === 0)) && heights[at] !== h) {
                         throw new Error('Height border mismatch');
                     }

@@ -1,6 +1,6 @@
 import { Vec3 } from '../../cocos/core/math';
 import { LandscapeAsset } from '../../cocos/landscape/Asset';
-import { LandscapeData, NodeAddress, NodeIndexLayout, VTPageAddress, VTPageSources } from '../../cocos/landscape/Data';
+import { LandscapeData, NodeAddress, VTPageAddress, VTPageSources } from '../../cocos/landscape/Data';
 import { Quadtree } from '../../cocos/landscape/Quadtree';
 import { LandscapeResidency } from '../../cocos/landscape/Residency';
 import { LandscapeSchedule } from '../../cocos/landscape/Schedule';
@@ -54,8 +54,8 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
     let loaded = new Map<string, boolean>();
     let composed = new Map<string, boolean>();
     const data = Object.assign(new LandscapeData(), { sectorsX: 2, sectorsZ: 1, maxTileLevel: 2, sectorSize: 4, heightScale: 1 });
-    const ranges = Array.from({ length: new NodeIndexLayout(data).nodeCount() }, () => ({ minY: 0, maxY: 1 }));
-    const asset = { data: () => data, heightRanges: () => ranges, loadingFailed: () => false } as LandscapeAsset;
+    const ranges = Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: 1 })));
+    const asset = { data: () => data, heightRanges: () => ranges, loadingFailed: () => false } as unknown as LandscapeAsset;
     const residency = {
         canReserve: (sources: NodeAddress[]): boolean => sources.length <= sourceCapacity,
         reserve: (sources: NodeAddress[]): boolean => {
@@ -112,7 +112,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
             }
             return count;
         },
-    } as VTRenderer;
+    } as unknown as VTRenderer;
     const tree = new Quadtree();
     tree.init(asset);
     const schedule = new LandscapeSchedule(asset, residency, pages, tree);

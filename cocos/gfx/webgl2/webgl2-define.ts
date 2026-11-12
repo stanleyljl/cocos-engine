@@ -26,6 +26,8 @@ import { WebGL2Device } from './webgl2-device';
 
 // Extensions
 export enum WebGL2EXT {
+    R16_EXT = 0x822A,
+
     COMPRESSED_RGB_S3TC_DXT1_EXT = 0x83F0,
     COMPRESSED_RGBA_S3TC_DXT1_EXT = 0x83F1,
     COMPRESSED_RGBA_S3TC_DXT3_EXT = 0x83F2,
@@ -90,6 +92,7 @@ export interface IWebGL2Extensions {
     EXT_texture_filter_anisotropic: EXT_texture_filter_anisotropic | null;
     EXT_color_buffer_half_float: EXT_color_buffer_half_float | null;
     EXT_color_buffer_float: EXT_color_buffer_float | null;
+    EXT_texture_norm16: EXT_texture_norm16 | null;
     WEBGL_multi_draw: WEBGL_multi_draw | null;
     WEBGL_compressed_texture_etc1: WEBGL_compressed_texture_etc1 | null;
     WEBGL_compressed_texture_etc: WEBGL_compressed_texture_etc | null;

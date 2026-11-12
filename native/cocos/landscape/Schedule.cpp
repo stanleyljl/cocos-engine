@@ -230,7 +230,7 @@ void LandscapeSchedule::admitNodes(Resources &resources, uint32_t mappingCount, 
             // Reserve full coarse coverage before admitting finer requests.
             pending.material.pages = {{layout.rootLevel(), request.x, request.z}};
         } else {
-            pending.material = layout.buildGridMapping(data.nodeRegion(request), node.geometry.minY, node.geometry.maxY, _quadtree.localCameraPosition());
+            pending.material = layout.buildGridMapping(data, request, node.geometry.minY, node.geometry.maxY, _quadtree.localCameraPosition());
         }
         if (node.ready && sameMapping(node.material, pending.material)) {
             continue;

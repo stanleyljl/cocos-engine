@@ -142,7 +142,7 @@ describe('Landscape runtime query parity', () => {
     function tile (tx: number, tz: number): LandscapeQueryTile {
         const side = config.SOURCE_TILE_RESOLUTION;
         const result: LandscapeQueryTile = {
-            height: new Uint8Array(side * side * 2),
+            height: new Uint8Array(config.SOURCE_HEIGHT_RESOLUTION * config.SOURCE_HEIGHT_RESOLUTION * 2),
             splat: new Uint16Array(side * side),
             normal: new Uint8Array(config.SOURCE_NORMAL_RESOLUTION ** 2 * 3),
         };
@@ -150,8 +150,9 @@ describe('Landscape runtime query parity', () => {
             for (let x = 0; x < side; ++x) {
                 const height = 128 + (tx * (side - 1) + x) * 2 + tz * (side - 1) + z;
                 const index = z * side + x;
-                result.height[index * 2] = height >> 8;
-                result.height[index * 2 + 1] = height & 255;
+                const heightIndex = (z + config.SOURCE_HEIGHT_BORDER) * config.SOURCE_HEIGHT_RESOLUTION + x + config.SOURCE_HEIGHT_BORDER;
+                result.height[heightIndex * 2] = height >> 8;
+                result.height[heightIndex * 2 + 1] = height & 255;
                 result.splat[index] = 3 | (7 << 5) | (10 << 10);
                 const normal = ((z + config.SOURCE_NORMAL_BORDER) * config.SOURCE_NORMAL_RESOLUTION + x + config.SOURCE_NORMAL_BORDER) * 3;
                 result.normal.set([64, 220, 160], normal);

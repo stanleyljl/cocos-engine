@@ -20,7 +20,7 @@ try {
             + shader.defines.map(d => '#define ' + d.name + ' ' + (defines[d.name] ?? d.default ?? d.range?.[0] ?? 0)).join('\n') + '\n';
         gl.deleteProgram(link(prefix + shader.glsl3.vert, prefix + shader.glsl3.frag)); variants++;
     }
-    const common = 'precision highp float;precision highp int;precision highp sampler2DArray;\n#define LANDSCAPE_TILE_RESOLUTION 129\nuniform vec4 holeParams;\n';
+    const common = 'precision highp float;precision highp int;precision highp sampler2DArray;\n#define LANDSCAPE_TILE_RESOLUTION 129\n#define LANDSCAPE_HEIGHT_BORDER 4\n#define LANDSCAPE_HEIGHT_RESOLUTION 137\nuniform vec4 holeParams;\n';
     const vertex = common + '#define USE_INSTANCING 1\n#define LANDSCAPE_SHADOW_PASS 0\n#define LANDSCAPE_WIREFRAME 0\n#define LANDSCAPE_HEIGHT_UNORM 0\n#define CCGetWorldMatrix(m) m = mat4(1.0)\n'
         + 'uniform vec4 terrainParams,morphCameraPos,decalControl,lodMorph[9];\n'
         + 'struct SurfacesStandardVertexIntermediate {vec3 position;vec3 normal;vec4 tangent;vec2 texCoord;};\n'
@@ -45,10 +45,11 @@ try {
     const texture = (name, unit, format, type, channels, data) => {
         gl.activeTexture(gl.TEXTURE0 + unit); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
         gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, format, 129,129,1,0,channels,type,data);
+        const resolution = name === 'heightmap' ? 137 : 129;
+        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, format, resolution,resolution,1,0,channels,type,data);
         gl.uniform1i(gl.getUniformLocation(p, name), unit); return t;
     };
-    texture('heightmap', 0, gl.RG8, gl.UNSIGNED_BYTE, gl.RG, new Uint8Array(129*129*2));
+    texture('heightmap', 0, gl.RG8, gl.UNSIGNED_BYTE, gl.RG, new Uint8Array(137*137*2));
     const mask = new Uint16Array(129*129).fill(31 | (30<<5) | (31<<10));
     const holes = texture('holeSplatmap', 1, gl.R16UI, gl.UNSIGNED_SHORT, gl.RED_INTEGER, mask);
     const draw = mode => {

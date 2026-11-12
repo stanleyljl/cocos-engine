@@ -65,9 +65,7 @@ struct LandscapeAsset::Manifest {
     const rapidjson::Document &document;
     const ccstd::string &manifestPath;
     LandscapeData parsed;
-    NodeIndexLayout nodeIndexLayout;
-    ccstd::vector<HeightRange> ranges;
-    ccstd::vector<float> minimumNormalY;
+    ccstd::vector<ccstd::vector<HeightRange>> ranges;
     ccstd::string assetDir;
     bool imported{false};
     ccstd::unordered_map<ccstd::string, ccstd::string> files;
@@ -108,7 +106,7 @@ bool LandscapeAsset::Manifest::readDimensions() {
     }
     const auto &sectorCount = document["sectorCount"];
     if (!sectorCount.IsArray() || sectorCount.Size() != 2U || !sectorCount[0].IsUint() ||
-        !sectorCount[1].IsUint() || !readFloat(document, "sectorSizeMeters", parsed.sectorSize) ||
+        !sectorCount[1].IsUint() || !readFloat(document, "sectorSize", parsed.sectorSize) ||
         !readUnsigned(document, "maxTileLevel", parsed.maxTileLevel) ||
         !readUnsigned(document, "minTileLevel", parsed.minTileLevel) ||
         !readFloat(document, "heightScale", parsed.heightScale) ||
@@ -132,10 +130,7 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
         return false;
     }
 
-    nodeIndexLayout = NodeIndexLayout(parsed);
-    minimumNormalY.resize(nodeIndexLayout.nodeCount());
-    ranges.assign(nodeIndexLayout.nodeCount(),
-                  HeightRange{parsed.minHeight(), parsed.maxHeight()});
+    ranges.resize(parsed.maxTileLevel + 1U);
 
     for (uint32_t level = 0; level <= parsed.maxTileLevel; ++level) {
         if (!readHeightRangeLevel(level, levels[level])) {
@@ -146,47 +141,26 @@ bool LandscapeAsset::Manifest::readHeightRanges() {
 }
 
 bool LandscapeAsset::Manifest::readHeightRangeLevel(uint32_t level, const rapidjson::Value &levelValue) {
-    if (!levelValue.IsObject() || !levelValue.HasMember("heightRange") || !levelValue["heightRange"].IsObject()) {
+    if (!levelValue.IsObject() || !levelValue.HasMember("heightRange") || !levelValue["heightRange"].IsArray()) {
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has no height range", level);
         return false;
     }
-    if (!levelValue.HasMember("minimumNormalY") || !levelValue["minimumNormalY"].IsArray()) {
-        CC_LOG_WARNING("[Landscape] manifest level L%u has no slope statistics", level);
-        return false;
-    }
-    const auto &slopes = levelValue["minimumNormalY"];
-    const auto &range = levelValue["heightRange"];
-    if (!range.HasMember("min") || !range.HasMember("max")) {
-        CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has incomplete height range", level);
-        return false;
-    }
-    const auto &mins = range["min"];
-    const auto &maxs = range["max"];
-    const uint32_t side = parsed.nodesPerSectorSide(level);
-    const size_t expected = static_cast<size_t>(parsed.sectorsX) * parsed.sectorsZ * side * side;
-    if (!mins.IsArray() || !maxs.IsArray() || mins.Size() != expected || maxs.Size() != expected || slopes.Size() != expected) {
+    const auto &values = levelValue["heightRange"];
+    const size_t expected = static_cast<size_t>(parsed.nodesX(level)) * parsed.nodesZ(level);
+    if (values.Size() != expected) {
         CC_LOG_WARNING("[Landscape] heightmap manifest level L%u has invalid height range size", level);
         return false;
     }
     // Both height tiles and range metadata use the complete uint16 domain.
     const float scale = parsed.heightScale / 65535.0F;
-    const uint32_t globalSide = parsed.sectorsX * side;
-    for (uint32_t globalZ = 0; globalZ < parsed.sectorsZ * side; ++globalZ) {
-        for (uint32_t globalX = 0; globalX < globalSide; ++globalX) {
-            const size_t index = static_cast<size_t>(globalZ) * globalSide + globalX;
-            if (!mins[index].IsNumber() || !maxs[index].IsNumber()) {
-                CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
-                return false;
-            }
-            if (!slopes[index].IsNumber() || slopes[index].GetFloat() < 0.0F || slopes[index].GetFloat() > 1.0F) {
-                CC_LOG_WARNING("[Landscape] manifest level L%u has invalid minimum normal Y", level);
-                return false;
-            }
-            const size_t dst = nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
-            minimumNormalY[dst] = slopes[index].GetFloat();
-            ranges[dst] = HeightRange{parsed.heightBias + mins[index].GetFloat() * scale,
-                                      parsed.heightBias + maxs[index].GetFloat() * scale};
+    auto &output = ranges[level];
+    output.reserve(expected);
+    for (const auto &value : values.GetArray()) {
+        if (!value.IsArray() || value.Size() != 2U || !value[0].IsNumber() || !value[1].IsNumber()) {
+            CC_LOG_WARNING("[Landscape] heightmap manifest level L%u contains invalid ranges", level);
+            return false;
         }
+        output.push_back({parsed.heightBias + value[0].GetFloat() * scale, parsed.heightBias + value[1].GetFloat() * scale});
     }
     return true;
 }
@@ -384,9 +358,7 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
     _decalResolution = manifest.decalResolution;
     _decalNearDistance = manifest.decalNearDistance;
     _decalFarDistance = manifest.decalFarDistance;
-    _nodeIndexLayout = manifest.nodeIndexLayout;
     _heightRanges = std::move(manifest.ranges);
-    _minimumNormalY = std::move(manifest.minimumNormalY);
 
     return true;
 }
@@ -394,9 +366,9 @@ bool LandscapeAsset::load(const ccstd::string &manifestPath) {
 bool LandscapeAsset::decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath, gfx::Format heightFormat, TileData &tile) {
     // R16_UNORM uploads consume the decoded host-order uint16 values directly.
     // Only the RG8 fallback needs high/low-byte packing; queries request it separately.
-    const bool valid = loadTile(heightPath, heightFormat, tile.height) &&
-                       loadTile(splatPath, gfx::Format::R16UI, tile.splat) &&
-                       loadTile(normalPath, gfx::Format::RGB8, tile.normal);
+    const bool valid = loadTile(heightPath, heightFormat, config::SOURCE_HEIGHT_RESOLUTION, tile.height) &&
+                       loadTile(splatPath, gfx::Format::R16UI, config::SOURCE_TILE_RESOLUTION, tile.splat) &&
+                       loadTile(normalPath, gfx::Format::RGB8, config::SOURCE_NORMAL_RESOLUTION, tile.normal);
     if (!valid) {
         CC_LOG_ERROR("[Landscape] failed to load height/splat/normal tiles: %s, %s, %s",
                        heightPath.c_str(), splatPath.c_str(), normalPath.c_str());
@@ -491,17 +463,18 @@ void LandscapeAsset::requestQueryTile(uint32_t x, uint32_t z, LandscapeQueryComp
     if (!_async) {
         _async = std::make_shared<AsyncState>();
     }
-    const auto lifetime = _async;
+    const auto async = _async;
     LegacyThreadPool::getDefaultThreadPool()->pushTask(
-        [height, normal, splat, lifetime, completion = std::move(completion)](int) {
-            if (lifetime && lifetime->cancelled.load()) {
+        [height, normal, splat, async, completion = std::move(completion)](int) {
+            if (async && async->cancelled.load()) {
                 return;
             }
             LandscapeQueryTile tile;
-            const bool ok = loadTile(height, gfx::Format::RG8, tile.height) &&
-                            loadTile(normal, gfx::Format::RGB8, tile.normal) &&
-                            loadTile(splat, gfx::Format::R16UI, tile.splat);
-            if (lifetime && lifetime->cancelled.load()) {
+            // CPU queries require high/low height bytes, independent of GPU texture format.
+            const bool ok = loadTile(height, gfx::Format::RG8, config::SOURCE_HEIGHT_RESOLUTION, tile.height) &&
+                            loadTile(normal, gfx::Format::RGB8, config::SOURCE_NORMAL_RESOLUTION, tile.normal) &&
+                            loadTile(splat, gfx::Format::R16UI, config::SOURCE_TILE_RESOLUTION, tile.splat);
+            if (async && async->cancelled.load()) {
                 return;
             }
             completion(std::move(tile), ok);
@@ -523,15 +496,12 @@ bool LandscapeAsset::takeReadyTile(TileData &tile) {
 }
 
 bool LandscapeAsset::getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const {
-    if (level > _data.maxTileLevel) {
+    if (level >= _heightRanges.size() || globalX >= _data.nodesX(level) || globalZ >= _data.nodesZ(level)) {
         return false;
     }
-    const size_t offset = _nodeIndexLayout.globalNodeIndex(level, globalX, globalZ);
-    if (offset >= _heightRanges.size()) {
-        return false;
-    }
-    minY = _heightRanges[offset].minY;
-    maxY = _heightRanges[offset].maxY;
+    const auto &range = _heightRanges[level][static_cast<size_t>(globalZ) * _data.nodesX(level) + globalX];
+    minY = range.minY;
+    maxY = range.maxY;
     return true;
 }
 
@@ -549,7 +519,7 @@ Uint16Array LandscapeAsset::decodeSamples(const Uint8Array &png, uint32_t resolu
     return samples;
 }
 
-bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, ccstd::vector<uint8_t> &data) {
+bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, uint32_t resolution, ccstd::vector<uint8_t> &data) {
     if (format != gfx::Format::RG8 && format != gfx::Format::R16UI && format != gfx::Format::RGB8) {
         return false;
     }
@@ -559,7 +529,6 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, ccs
     }
     IntrusivePtr<Image> image = ccnew Image();
     const bool packHeight = format == gfx::Format::RG8;
-    const uint32_t resolution = format == gfx::Format::RGB8 ? config::SOURCE_NORMAL_RESOLUTION : config::SOURCE_TILE_RESOLUTION;
     if (!image->initWithImageData(file.getBytes(), file.getSize()) ||
         image->getRenderFormat() != (format == gfx::Format::RGB8 ? gfx::Format::RGB8 : gfx::Format::R16UI) ||
         static_cast<uint32_t>(image->getWidth()) != resolution ||
@@ -573,7 +542,7 @@ bool LandscapeAsset::loadTile(const ccstd::string &path, gfx::Format format, ccs
     }
     if (packHeight) {
         // Pack each source uint16 as high byte, low byte into an RG8 page.
-        // The shader reconstructs the original 16-bit value after sampling.
+        // Shaders and CPU queries reconstruct the original 16-bit value from these bytes.
         const auto *source = reinterpret_cast<const uint16_t *>(image->getData());
         data.resize(sampleCount * 2U);
         for (size_t i = 0; i < sampleCount; ++i) {

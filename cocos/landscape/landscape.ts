@@ -292,8 +292,8 @@ export class Landscape extends Component {
     @serializable
     private _queryCacheCapacity = 64;
 
-    /** Independent CPU tile budget, set before enabling terrain. At 129x129,
-     * 64 tiles hold about 7.1 MiB of height/RGB normals/splat data, excluding
+    /** Independent CPU tile budget, set before enabling terrain. With padded height and normal tiles,
+     * 64 tiles hold about 8.2 MiB of height/RGB normals/splat data, excluding
      * worker decode memory. Tiles are released with their last source. No GPU allocation.
      */
     @editable

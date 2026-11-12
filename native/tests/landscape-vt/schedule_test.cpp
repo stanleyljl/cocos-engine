@@ -199,7 +199,11 @@ int main(int argc, char **argv) {
     data.maxTileLevel = 2;
     data.sectorSize = 4;
     data.heightScale = 1;
-    const_cast<ccstd::vector<HeightRange> &>(asset.heightRanges()).assign(NodeIndexLayout(data).nodeCount(), {0, 1});
+    auto &ranges = const_cast<ccstd::vector<ccstd::vector<HeightRange>> &>(asset.heightRanges());
+    ranges.resize(data.maxTileLevel + 1U);
+    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
+        ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), {0, 1});
+    }
     Quadtree tree;
     tree.init(asset);
     LandscapeResidency residency;
