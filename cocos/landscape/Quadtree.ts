@@ -1,28 +1,31 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-import { Vec3, Vec4 } from '../core/math';
-import type { Frustum } from '../core/geometry';
-import { log, warn } from '../core/platform/debug';
+import { Vec3 } from '../core/math';
 import * as config from './Config';
-import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, QuadNode, VTGridMapping } from './Data';
+import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, QuadNode, ReadonlyVTGridMapping, VTGridMapping } from './Data';
 
 export interface MorphRange {
     start: number;
     end: number;
 }
 
-export class QuadtreeNode {
+export interface QuadtreeNode {
+    readonly geometry: Readonly<QuadNode>;
+    readonly material: ReadonlyVTGridMapping;
+    readonly children: readonly QuadtreeNode[] | null;
+    readonly refined: boolean;
+    readonly ready: boolean;
+    readonly renderable: boolean;
+    readonly edgeMask: number;
+}
+
+class MutableQuadtreeNode implements QuadtreeNode {
     public geometry = new QuadNode();
     public material = new VTGridMapping();
-    public children: QuadtreeNode[] | null = null;
-    public loaded = false;
+    public children: MutableQuadtreeNode[] | null = null;
+    public refined = false; // Target subdivision; committed children remain until render selection replaces them.
     public ready = false;
     public renderable = false;
     public edgeMask = 0;
-}
-
-interface Pass {
-    planes: Vec4[];
-    includeNearby: boolean;
 }
 
 interface HeightData {
@@ -30,12 +33,12 @@ interface HeightData {
     heightRanges(): readonly (readonly HeightRange[])[];
 }
 
-// Target hierarchy, published mappings and balanced render selection. Schedule
-// supplies completed resources; Renderer consumes selected nodes and changes.
+// Target hierarchy, published mappings and balanced render selection.
+// Schedule supplies completed resources and consumes selection changes.
 export class Quadtree {
     private _data!: LandscapeData;
     private _heightRanges: readonly (readonly HeightRange[])[] = [];
-    private _root = new QuadtreeNode();
+    private _root = new MutableQuadtreeNode();
     private _renderNodeKeys = new Set<NodeKey>();
     private _renderSelectionChanged = false;
     private _needsRenderSelection = true;
@@ -43,22 +46,16 @@ export class Quadtree {
     private _lodMorphRanges: MorphRange[] = [];
     private readonly _localCameraPosition = new Vec3();
     private readonly _worldOrigin = new Vec3();
-    private readonly _passes: Pass[] = [];
-    private _activePassCount = 0;
     private _viewChanged = true;
-    private _lastMorphRangeWarning = false;
 
     public init (asset: HeightData, lodQualityScale = 1): void {
         this._data = asset.data();
         this._heightRanges = asset.heightRanges();
-        this._root = new QuadtreeNode();
+        this._root = new MutableQuadtreeNode();
         this._renderNodeKeys.clear();
         this._renderSelectionChanged = false;
         this._needsRenderSelection = true;
         this._changedNodes.clear();
-        this._passes.length = 0;
-        this._activePassCount = 0;
-        this._lastMorphRangeWarning = false;
         let rootLevel = this._data.maxTileLevel;
         for (let side = 1; side < Math.max(this._data.sectorsX, this._data.sectorsZ); side *= 2) {
             ++rootLevel;
@@ -87,40 +84,18 @@ export class Quadtree {
         }
     }
 
-    public beginUpdate (camera: Readonly<Vec3>, origin: Readonly<Vec3>): void {
+    public updateTarget (camera: Readonly<Vec3>, origin: Readonly<Vec3>): void {
         const position = Vec3.subtract(new Vec3(), camera, origin);
         this._viewChanged = !Vec3.strictEquals(position, this._localCameraPosition) || !Vec3.strictEquals(origin, this._worldOrigin);
         this._localCameraPosition.set(position);
         this._worldOrigin.set(origin);
-        this._activePassCount = 0;
-    }
-
-    public addPass (frustum: Readonly<Frustum>, includeNearby: boolean): void {
-        if (this._activePassCount === this._passes.length) {
-            this._passes.push({ planes: Array.from({ length: 6 }, () => new Vec4()), includeNearby: false });
-            this._viewChanged = true;
-        }
-        const pass = this._passes[this._activePassCount++];
-        this._viewChanged = this._viewChanged || pass.includeNearby !== includeNearby;
-        pass.includeNearby = includeNearby;
-        for (let i = 0; i < 6; ++i) {
-            const plane = frustum.planes[i];
-            const saved = pass.planes[i];
-            this._viewChanged = this._viewChanged || saved.x !== plane.n.x || saved.y !== plane.n.y || saved.z !== plane.n.z || saved.w !== plane.d;
-            saved.set(plane.n.x, plane.n.y, plane.n.z, plane.d);
-        }
-    }
-
-    public updateTarget (): void {
-        this._viewChanged = this._viewChanged || this._activePassCount !== this._passes.length;
-        this._passes.length = this._activePassCount;
-        if (this._viewChanged) {
+        if (this._viewChanged || this._needsRenderSelection) {
             this.updateTargetNode(this._root);
             this._needsRenderSelection = true;
         }
     }
 
-    private updateTargetNode (node: QuadtreeNode): void {
+    private updateTargetNode (node: MutableQuadtreeNode): void {
         const address = node.geometry.address();
         if (!this.contains(address)) {
             return;
@@ -135,13 +110,13 @@ export class Quadtree {
                 }
             }
         }
+        node.refined = refine;
         if (!refine) {
-            node.children = null;
             return;
         }
         if (!node.children) {
             node.children = Array.from({ length: 4 }, (_, q) => {
-                const child = new QuadtreeNode();
+                const child = new MutableQuadtreeNode();
                 child.geometry = this.geometry(Quadtree.child(address, q));
                 return child;
             });
@@ -163,10 +138,10 @@ export class Quadtree {
                 missing.push(address);
                 return false;
             }
-            if (node.renderable || !node.children) {
+            if (node.renderable || !node.refined) {
                 refresh.push(address);
             }
-            return true;
+            return node.refined;
         });
         // Native keys sort by level, X, Z. String keys must not sort lexically.
         const priority = (a: NodeAddress, b: NodeAddress): number => a.level - b.level || a.x - b.x || a.z - b.z;
@@ -176,8 +151,11 @@ export class Quadtree {
     }
 
     public publish (address: NodeAddress, material: VTGridMapping): boolean {
-        const node = this.find(address);
-        if (!node || address.level > this._data.maxTileLevel || material.pages.length === 0) {
+        if (!this.isTarget(address)) {
+            return false;
+        }
+        const node = this.findNode(address)!;
+        if (address.level > this._data.maxTileLevel || material.pages.length === 0) {
             return false;
         }
         if (address.level < this._data.maxTileLevel && !this.find(address.ancestor(address.level + 1))!.ready) {
@@ -185,7 +163,6 @@ export class Quadtree {
         }
         this._needsRenderSelection = this._needsRenderSelection || !node.ready;
         node.material = material;
-        node.loaded = true;
         node.ready = true;
         if (node.renderable) {
             this._changedNodes.add(address.key());
@@ -201,8 +178,8 @@ export class Quadtree {
         if (!this.sectorRootsReady()) {
             return false;
         }
-        let current: QuadtreeNode[] = [];
-        this.forEachNode((node) => {
+        let current: MutableQuadtreeNode[] = [];
+        this.visitNodes(this._root, (node) => {
             node.renderable = node.geometry.level === this._data.maxTileLevel;
             if (node.renderable) {
                 current.push(node);
@@ -210,16 +187,16 @@ export class Quadtree {
             return true;
         });
         while (current.length) {
-            const next: QuadtreeNode[] = [];
+            const next: MutableQuadtreeNode[] = [];
             for (const node of current) {
-                if (!node.children || !node.children.every((child) => child.ready)) {
+                if (!node.refined || !node.children!.every((child) => child.ready)) {
                     continue;
                 }
                 if ((this.computeEdgeMask(node.geometry.address()) & 0x55) !== 0) {
                     continue;
                 }
                 node.renderable = false;
-                for (const child of node.children) {
+                for (const child of node.children!) {
                     child.renderable = true;
                     next.push(child);
                 }
@@ -228,8 +205,7 @@ export class Quadtree {
         }
         const previous = this._renderNodeKeys;
         this._renderNodeKeys = new Set<NodeKey>();
-        let morphRangeWarning = false;
-        this.forEachNode((node) => {
+        this.visitNodes(this._root, (node) => {
             if (!node.renderable) {
                 return true;
             }
@@ -242,24 +218,19 @@ export class Quadtree {
                 this._renderSelectionChanged = true;
             }
             node.edgeMask = edges;
-            if (config.LANDSCAPE_DEBUG && !morphRangeWarning) {
-                morphRangeWarning = this.morphRangeTooSmall(node);
-            }
             return false;
         });
         for (const removed of previous) {
             this._changedNodes.add(removed);
             this._renderSelectionChanged = true;
         }
-        this._needsRenderSelection = false;
-        if (config.LANDSCAPE_DEBUG && morphRangeWarning !== this._lastMorphRangeWarning) {
-            if (morphRangeWarning) {
-                warn('[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition');
-            } else {
-                log('[Landscape] CDLOD granularity check: OK');
+        this.visitNodes(this._root, (node) => {
+            if (!node.refined) {
+                node.children = null;
             }
-            this._lastMorphRangeWarning = morphRangeWarning;
-        }
+            return node.refined;
+        });
+        this._needsRenderSelection = false;
         return true;
     }
 
@@ -272,7 +243,10 @@ export class Quadtree {
     public localCameraPosition (): Readonly<Vec3> {
         return this._localCameraPosition;
     }
-    public lodMorphRanges (): readonly MorphRange[] {
+    public worldOrigin (): Readonly<Vec3> {
+        return this._worldOrigin;
+    }
+    public lodMorphRanges (): readonly Readonly<MorphRange>[] {
         return this._lodMorphRanges;
     }
     public changedNodes (): ReadonlySet<NodeKey> {
@@ -305,7 +279,7 @@ export class Quadtree {
         });
     }
 
-    private visitNodes (node: QuadtreeNode, visit: (node: QuadtreeNode) => boolean): void {
+    private visitNodes (node: MutableQuadtreeNode, visit: (node: MutableQuadtreeNode) => boolean): void {
         if (!this.contains(node.geometry.address()) || !visit(node) || !node.children) {
             return;
         }
@@ -343,36 +317,7 @@ export class Quadtree {
         return edges;
     }
 
-    private morphRangeTooSmall (node: QuadtreeNode): boolean {
-        const address = node.geometry.address();
-        if (address.level === this._data.maxTileLevel) {
-            return false;
-        }
-        const area = this.region(address);
-        const camera = this._localCameraPosition;
-        const x = Math.max(Math.abs(area.x - camera.x), Math.abs(area.x + area.size - camera.x));
-        const y = Math.max(Math.abs(node.geometry.minY - camera.y), Math.abs(node.geometry.maxY - camera.y));
-        const z = Math.max(Math.abs(area.z - camera.z), Math.abs(area.z + area.size - camera.z));
-        const start = this._lodMorphRanges[address.level + 1].start;
-        if (x * x + y * y + z * z <= start * start) {
-            return false;
-        }
-        const distance = this.distanceSquared(address);
-        const range = this._lodMorphRanges[address.level].end;
-        if (distance > range * range) {
-            return false;
-        }
-        const bounds = this.heightRange(address);
-        const center = new Vec3(area.x + area.size * 0.5 + this._worldOrigin.x, (bounds.minY + bounds.maxY) * 0.5 + this._worldOrigin.y, area.z + area.size * 0.5 + this._worldOrigin.z);
-        const extent = new Vec3(area.size * 0.5, (bounds.maxY - bounds.minY) * 0.5, area.size * 0.5);
-        const nearby = this._lodMorphRanges[Math.min(1, this._data.maxTileLevel)].end;
-        return this._passes.some((pass) => (pass.includeNearby && distance <= nearby * nearby) || pass.planes.every((plane) => {
-            const radius = extent.x * Math.abs(plane.x) + extent.y * Math.abs(plane.y) + extent.z * Math.abs(plane.z);
-            return center.x * plane.x + center.y * plane.y + center.z * plane.z + radius >= plane.w;
-        }));
-    }
-
-    private buildRoot (node: QuadtreeNode, address: NodeAddress): void {
+    private buildRoot (node: MutableQuadtreeNode, address: NodeAddress): void {
         node.geometry = new QuadNode(address.level, address.x, address.z);
         if (!this.contains(address)) {
             return;
@@ -381,7 +326,8 @@ export class Quadtree {
             node.geometry = this.geometry(address);
             return;
         }
-        node.children = Array.from({ length: 4 }, () => new QuadtreeNode());
+        node.refined = true;
+        node.children = Array.from({ length: 4 }, () => new MutableQuadtreeNode());
         let minY = Number.MAX_VALUE;
         let maxY = -Number.MAX_VALUE;
         for (let q = 0; q < 4; ++q) {
@@ -417,6 +363,10 @@ export class Quadtree {
     }
 
     public find (address: NodeAddress): QuadtreeNode | null {
+        return this.findNode(address);
+    }
+
+    private findNode (address: NodeAddress): MutableQuadtreeNode | null {
         if (!this.contains(address) || address.level > this._root.geometry.level) {
             return null;
         }
@@ -435,6 +385,19 @@ export class Quadtree {
     public findRenderable (address: NodeAddress): QuadtreeNode | null {
         const node = this.find(address);
         return node && node.renderable ? node : null;
+    }
+
+    public isTarget (address: NodeAddress): boolean {
+        if (!this.find(address)) {
+            return false;
+        }
+        while (address.level < this._root.geometry.level) {
+            address = address.ancestor(address.level + 1);
+            if (!this.find(address)!.refined) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public region (address: NodeAddress): LandscapeRegion {

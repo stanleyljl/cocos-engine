@@ -23,7 +23,6 @@
 ****************************************************************************/
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -32,17 +31,12 @@
 #include "landscape/Config.h"
 #include "landscape/Data.h"
 #include "math/Vec3.h"
-#include "math/Vec4.h"
-
-namespace cc::geometry {
-class Frustum;
-}
 
 namespace cc::landscape {
 class LandscapeAsset;
 
 // Owns the target hierarchy, published node mappings and balanced render selection.
-// Schedule supplies completed resources; Renderer consumes selected nodes and changes.
+// Schedule supplies completed resources and consumes selection changes.
 class Quadtree {
 public:
     struct MorphRange {
@@ -52,8 +46,8 @@ public:
     struct Node {
         QuadNode geometry;
         VTGridMapping material;
-        std::unique_ptr<Node[]> children; // Target structure: zero or four children.
-        bool loaded{false}; // Schedule has loaded and reserved the node's source tile.
+        std::unique_ptr<Node[]> _children;
+        bool refined{false}; // Target subdivision; committed children remain until render selection replaces them.
         bool ready{false}; // Complete mapping published; resource-owning ancestors are ready.
         bool renderable{false}; // Selected in the complete, balanced render set.
         uint8_t edgeMask{0};// Valid when renderable; Left, right, bottom, top: two bits each, 00 same/boundary, 01 coarser, 10 finer.
@@ -61,15 +55,13 @@ public:
 
     // Landscape validates LOD quality and loads the asset before initialization.
     void init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
-    void beginUpdate(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
-    void addPass(const geometry::Frustum &frustum, bool includeNearby);
     // Stage 1: update only the distance target. Selection follows resource preparation.
-    void updateTarget();
+    void updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
     // Missing nodes whose parents are ready, then displayed/target-leaf refreshes.
     // Each group is ordered by ascending LOD, with node keys breaking ties.
     ccstd::vector<NodeAddress> requests() const;
     // Called only after the complete source/mapping reservation is drawable;
-    // publication establishes both loaded and ready, including shared source tiles.
+    // publication commits the mapping and marks the node ready.
     bool publish(NodeAddress address, VTGridMapping material);
     // Stage 3: select a complete, balanced render set and report draw changes.
     bool selectRenderables();
@@ -79,11 +71,12 @@ public:
     bool renderSelectionChanged() const { return _renderSelectionChanged; }
     bool sectorRootsReady() const;
     const Vec3 &localCameraPosition() const { return _localCameraPosition; }
+    const Vec3 &worldOrigin() const { return _worldOrigin; }
     const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
     // Includes management levels above sector roots, unlike source-tile sizing.
     LandscapeRegion region(NodeAddress address) const;
     const Node *find(NodeAddress address) const;
-    Node *find(NodeAddress address);
+    bool isTarget(NodeAddress address) const;
     const Node *findRenderable(NodeAddress address) const;
     const ccstd::unordered_set<uint64_t> &changedNodes() const { return _changedNodes; }
     void clearChangedNodes() { _changedNodes.clear(); }
@@ -94,12 +87,8 @@ public:
     void forEachRenderable(const std::function<void(const Node &)> &visit) const;
 
 private:
-    struct Pass {
-        std::array<Vec4, 6> planes;
-        bool includeNearby{false}; // Include near-camera nodes in morph diagnostics.
-    };
-
     // Target hierarchy and traversal.
+    Node *findNode(NodeAddress address);
     void initLodMorphRanges(float lodQualityScale);
     void buildRoot(Node &node, NodeAddress address);
     void updateTarget(Node &node);
@@ -115,10 +104,6 @@ private:
     // Morph helpers; edge sampling requires a balanced render set.
     NodeAddress renderableAt(uint32_t x, uint32_t z) const;
     uint8_t computeEdgeMask(NodeAddress address) const;
-#if CC_LANDSCAPE_DEBUG
-    // Diagnostics only; never changes selection, morph ranges or edge constraints.
-    bool morphRangeTooSmall(const Node &node) const;
-#endif
 
     // Immutable metadata copied from the validated asset.
     LandscapeData _data;
@@ -131,18 +116,13 @@ private:
     bool _renderSelectionChanged{false};
     // Reuse the selected cut until target or readiness changes.
     bool _needsRenderSelection{true};
-    // Renderer consumes these keys, including mapping-only updates and removals.
+    // Schedule consumes these keys, including mapping-only updates and removals.
     ccstd::unordered_set<uint64_t> _changedNodes;
     // Fixed LOD transition ranges derived during initialization.
     ccstd::vector<MorphRange> _lodMorphRanges;
 
     Vec3 _localCameraPosition;
     Vec3 _worldOrigin;
-    ccstd::vector<Pass> _passes;
-    size_t _activePassCount{0};
     bool _viewChanged{true};
-#if CC_LANDSCAPE_DEBUG
-    bool _lastMorphRangeWarning{false}; // Log only diagnostic state transitions.
-#endif
 };
 } // namespace cc::landscape

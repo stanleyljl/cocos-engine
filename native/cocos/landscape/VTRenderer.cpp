@@ -39,7 +39,6 @@
 #include "renderer/gfx-base/GFXCommandBuffer.h"
 #include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
-#include "renderer/gfx-base/GFXQueue.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "scene/Pass.h"
 #include "scene/RenderWindow.h"
@@ -49,19 +48,32 @@ VTPageTable::VTPageTable() = default;
 
 VTPageTable::~VTPageTable() = default;
 
-bool VTPageTable::ensureCapacity(uint32_t count) {
+uint32_t VTPageTable::requiredSize(uint32_t count) const {
     constexpr uint32_t ENTRIES = VTGridMapping::CELL_COUNT;
     uint32_t size = std::max(256U, _size);
     auto *device = Root::getInstance()->getDevice();
     while (static_cast<uint64_t>(size) * size < static_cast<uint64_t>(count) * ENTRIES) {
         size *= 2;
         if (size > device->getCapabilities().maxTextureSize) {
-            return false;
+            return 0;
         }
+    }
+    return size <= device->getCapabilities().maxTextureSize ? size : 0;
+}
+
+bool VTPageTable::canFit(uint32_t count) const {
+    return requiredSize(count) != 0;
+}
+
+bool VTPageTable::ensureCapacity(uint32_t count) {
+    const uint32_t size = requiredSize(count);
+    if (size == 0) {
+        return false;
     }
     if (size == _size) {
         return true;
     }
+    auto *device = Root::getInstance()->getDevice();
     gfx::TextureInfo info;
     info.type = gfx::TextureType::TEX2D;
     info.usage = gfx::TextureUsageBit::SAMPLED | gfx::TextureUsageBit::TRANSFER_DST;
@@ -194,7 +206,6 @@ bool VTRenderer::init(const LandscapeAsset &asset, LandscapeResidency &residency
 }
 
 void VTRenderer::destroy() {
-    _commands = nullptr;
     _compressor.reset();
     _mipGenerator.reset();
     _composer.reset();
@@ -238,17 +249,17 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
     }
     _composer->uploadInputs();
 
-    _commands->begin();
+    auto &commands = *Root::getInstance()->getDevice()->getCommandBuffer();
     if (_compressor) {
-        _compressor->begin(*_commands, _needsClear);
+        _compressor->begin(commands, _needsClear);
         // Finish composition, mips and compression before reusing the scratch page.
         for (const auto &instance : _batch) {
-            _composer->record(*_commands, &instance, 1, _needsClear);
-            _mipGenerator->record(*_commands, *_composer, 1, _needsClear);
+            _composer->record(commands, &instance, 1, _needsClear);
+            _mipGenerator->record(commands, *_composer, 1, _needsClear);
             _needsClear = false;
-            _compressor->record(*_commands, instance.physicalSlot());
+            _compressor->record(commands, instance.physicalSlot());
         }
-        _compressor->end(*_commands);
+        _compressor->end(commands);
     } else {
         // Group whole pages by shader. Each group keeps the instance buffer alive
         // through its mip draws before the next group overwrites it.
@@ -262,18 +273,11 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
             if (count == 0) {
                 continue;
             }
-            _composer->record(*_commands, _batch.data() + offsets[i], count, _needsClear);
-            _mipGenerator->record(*_commands, *_composer, count, _needsClear);
+            _composer->record(commands, _batch.data() + offsets[i], count, _needsClear);
+            _mipGenerator->record(commands, *_composer, count, _needsClear);
             _needsClear = false;
         }
     }
-    _commands->end();
-
-    // Submit every stage on the same queue before making these pages drawable.
-    auto *device = Root::getInstance()->getDevice();
-    gfx::CommandBuffer *command = _commands.get();
-    device->flushCommands(&command, 1);
-    device->getQueue()->submit(&command, 1);
     for (const auto &instance : _batch) {
         publish(instance.physicalSlot());
     }
@@ -519,8 +523,7 @@ bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &
     sampler.maxAnisotropy = config::VT_MAX_ANISOTROPY;
     sampler.addressU = sampler.addressV = sampler.addressW = gfx::Address::CLAMP;
     _sampler = device->getSampler(sampler);
-    _commands = device->createCommandBuffer({device->getQueue(), gfx::CommandBufferType::PRIMARY});
-    return _commands != nullptr;
+    return true;
 }
 
 uint32_t VTRenderer::sourceLevel(float size) const {

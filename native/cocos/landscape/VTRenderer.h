@@ -46,6 +46,7 @@ public:
     VTPageTable();
     ~VTPageTable();
     gfx::Texture *texture() const { return _texture.get(); }
+    bool canFit(uint32_t count) const;
     bool ensureCapacity(uint32_t count);
     uint32_t allocate();
     void release(uint32_t slot);
@@ -58,6 +59,7 @@ protected:
     void resizeEntries(size_t count);
 
 private:
+    uint32_t requiredSize(uint32_t count) const;
     struct Entry {
         uint8_t physicalSlot{0};
         uint8_t level{0};
@@ -70,8 +72,6 @@ private:
     uint32_t _count{0};
 };
 
-// Owns page residency and the complete VT update sequence. LandscapeSchedule
-// admits resource demands; only this coordinator submits work and publishes pages.
 class VTRenderer {
 public:
     VTRenderer();
@@ -127,7 +127,6 @@ public:
 protected:
     // CPU residency operations; runtime callers use init() and renderPages().
     bool initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity = config::VT_PAGE_COUNT);
-    // Mark composition complete only after its GPU commands have been submitted.
     void publish(uint32_t slot);
 
 private:
@@ -148,7 +147,6 @@ private:
     std::unique_ptr<VTPageMipGenerator> _mipGenerator;
     std::unique_ptr<VTPageCompressor> _compressor;
     ccstd::vector<VTPageInstance> _batch;
-    IntrusivePtr<gfx::CommandBuffer> _commands;
     gfx::Sampler *_sampler{nullptr}; // device-owned
     bool _needsClear{true};
     bool _refineFarDetail{true};

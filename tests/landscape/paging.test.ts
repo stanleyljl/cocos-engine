@@ -197,11 +197,10 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                 for (let frame = 0; frame < frames; ++frame) {
                     const previous = tree.requests();
                     tree.clearChangedNodes();
-                    tree.beginUpdate(new Vec3(x, y, z), Vec3.ZERO);
-                    tree.updateTarget();
+                    tree.updateTarget(new Vec3(x, y, z), Vec3.ZERO);
                     let cancelled = 0;
                     for (const address of previous) {
-                        if (!tree.find(address)) {
+                        if (!tree.isTarget(address)) {
                             requireCondition(!tree.publish(address, mapping(address)), 'Retired completion resurrected a node');
                             ++cancelled;
                         }

@@ -219,30 +219,9 @@ void applyView(Quadtree &tree, const CameraView &view) {
         const auto area = tree.region(targets.front().address());
         camera.set(area.x + area.size * 0.5F, 0.5F, area.z + area.size * 0.5F);
     }
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    for (const auto *pass : {&view.geometry, &view.surface}) {
-        for (const auto &target : *pass) {
-            const auto area = tree.region(target.address());
-            cc::geometry::Frustum frustum;
-            frustum.planes[0]->n.set(1, 0, 0);
-            frustum.planes[0]->d = area.x + 0.01F;
-            frustum.planes[1]->n.set(-1, 0, 0);
-            frustum.planes[1]->d = -(area.x + area.size - 0.01F);
-            frustum.planes[2]->n.set(0, 0, 1);
-            frustum.planes[2]->d = area.z + 0.01F;
-            frustum.planes[3]->n.set(0, 0, -1);
-            frustum.planes[3]->d = -(area.z + area.size - 0.01F);
-            frustum.planes[4]->n.set(0, 1, 0);
-            frustum.planes[4]->d = -1000;
-            frustum.planes[5]->n.set(0, -1, 0);
-            frustum.planes[5]->d = -1000;
-            tree.addPass(frustum, pass == &view.surface);
-        }
-    }
-    tree.updateTarget();
+    tree.updateTarget(camera, cc::Vec3::ZERO);
     require(tree.selectRenderables(), "Select draws after updating the distance target");
-    // Target updates may delete old children. Subsequent selection must report their
-    // retired draws and changed shared edges before the renderer consumes them.
+    // Selection retires old children and reports changed shared edges before rendering.
     for (const auto &entry : previous) {
         if (!tree.findRenderable(NodeAddress::fromKey(entry.first))) {
             require(tree.changedNodes().count(entry.first) != 0, "Deleted target draw lost its retirement notification");
@@ -270,10 +249,10 @@ ccstd::unordered_set<uint64_t> renderableKeys(const Quadtree &tree) {
 ccstd::unordered_set<uint64_t> targetKeys(const Quadtree &tree) {
     ccstd::unordered_set<uint64_t> result;
     tree.forEachNode([&](const Quadtree::Node &node) {
-        if (!node.children) {
+        if (!node.refined) {
             result.insert(node.geometry.address().key());
         }
-        return true;
+        return node.refined;
     });
     return result;
 }
@@ -611,7 +590,7 @@ void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = f
     for (const auto key : keys) {
         const auto address = NodeAddress::fromKey(key);
         const auto &node = *selection.find(address);
-        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
+        if (!node._children || !std::all_of(node._children.get(), node._children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
             continue;
         }
         const uint32_t x = address.x << address.level;
@@ -751,7 +730,6 @@ public:
             if (!node.ready) {
                 return true;
             }
-            require(node.loaded, "Ready node must retain its loaded source data");
             const auto address = node.geometry.address();
             if (address.level < data.maxTileLevel) {
                 require(tree.find(address.ancestor(address.level + 1))->ready, "Ready ancestor invariant violated");
@@ -872,13 +850,13 @@ void testSingleRoot() {
         tree.init(d);
         const auto childMask = [&](NodeAddress address) {
             const auto *node = tree.find(address);
-            require(node && node->children, "Management node must own four children");
+            require(node && node->_children, "Management node must own four children");
             uint8_t mask = 0;
             for (uint32_t q = 0; q < 4; ++q) {
-                if (tree.find(node->children[q].geometry.address())) {
+                if (tree.find(node->_children[q].geometry.address())) {
                     mask |= static_cast<uint8_t>(1U << q);
                 } else {
-                    require(!node->children[q].children && !node->children[q].ready, "Empty sector must not allocate descendants or load resources");
+                    require(!node->_children[q]._children && !node->_children[q].ready, "Empty sector must not allocate descendants or load resources");
                 }
             }
             return mask;
@@ -942,18 +920,17 @@ void testReadySelection() {
     require(!tree.publish({0, 7, 0}, testMapping({0, 7, 0})), "Child became ready before its ancestor");
     auto &sector = *tree.find({3, 0, 0});
     for (uint32_t q = 0; q < 4; ++q) {
-        require(!sector.children[q].loaded && !sector.children[q].ready, "New target nodes must start unloaded");
-        sector.children[q].loaded = true;
+        require(!sector._children[q].ready, "New target nodes must start unready");
     }
     selectAndCheckChanges(tree);
-    require(renderableKeys(tree) == roots, "Loaded data without composition must not replace the parent");
+    require(renderableKeys(tree) == roots, "Unpublished children must not replace the parent");
     for (uint32_t q = 0; q < 3; ++q) {
-        const auto address = sector.children[q].geometry.address();
+        const auto address = sector._children[q].geometry.address();
         require(tree.publish(address, testMapping(address)), "Publish partial sibling resources");
     }
     selectAndCheckChanges(tree);
     require(renderableKeys(tree) == roots, "Three ready children must not replace their parent");
-    const auto fourth = sector.children[3].geometry.address();
+    const auto fourth = sector._children[3].geometry.address();
     require(tree.publish(fourth, testMapping(fourth)), "Publish last sibling");
     selectAndCheckChanges(tree);
     require(sector.ready && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
@@ -979,7 +956,7 @@ void testReadySelection() {
     require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
     applyView(tree, {});
     selectAndCheckChanges(tree);
-    require(renderableKeys(tree) == roots && !sector.children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
+    require(renderableKeys(tree) == roots && !sector._children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
     applyView(tree, near);
     const NodeAddress pending{2, 0, 0};
     require(tree.find(pending) && !tree.find(pending)->ready, "Prepare moving-view load");
@@ -997,8 +974,7 @@ void testUpdateStages() {
     const auto data = cacheData(3, 3, 3);
     TreeFixture tree;
     tree.init(data, false);
-    tree.beginUpdate({7.5F, 0.5F, 7.5F}, cc::Vec3::ZERO);
-    tree.updateTarget();
+    tree.updateTarget({7.5F, 0.5F, 7.5F}, cc::Vec3::ZERO);
     require(!tree.sectorRootsReady() && renderableKeys(tree).size() == 0, "Target stage published unready draws");
     require(targetKeys(tree).size() > data.sectorsX * data.sectorsZ, "Target stage waited for resources");
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
@@ -1024,8 +1000,7 @@ void testUpdateStages() {
     checkStitchedEdges(tree, data);
     const auto old = renderableKeys(tree);
     tree.clearChangedNodes();
-    tree.beginUpdate({0, tree.lodMorphRanges().back().end * 4, 0}, cc::Vec3::ZERO);
-    tree.updateTarget();
+    tree.updateTarget({0, tree.lodMorphRanges().back().end * 4, 0}, cc::Vec3::ZERO);
     require(tree.changedNodes().empty(), "Target update performed render synchronization");
     require(tree.selectRenderables(), "Select coarse coverage after target deletion");
     for (const auto key : old) {
@@ -1225,67 +1200,29 @@ void testMaterialPublication() {
     }
     auto expectedRefresh = before;
     tree.forEachNode([&](const Quadtree::Node &entry) {
-        if (!entry.children) {
+        if (!entry._children) {
             expectedRefresh.insert(entry.geometry.address().key());
         }
         return true;
     });
     require(refresh == expectedRefresh, "Material refresh must include displayed nodes and ready target leaves");
     applyView(tree, testView({{0, 7, 7, 0, 1}}));
-    require(tree.viewChanged(), "Changed pass must invalidate scheduling");
+    require(tree.viewChanged(), "Camera translation must invalidate scheduling");
     selectAndCheckChanges(tree);
     checkCut(tree, data);
     std::cout << "PASS: atomic material publication, retained mappings, stable views and refresh requests\n";
 }
 
-void testDistanceAndPasses() {
+void testDistanceTargets() {
     const auto data = cacheData(3, 3, 3);
     TreeFixture tree;
     tree.init(data);
-    cc::geometry::Frustum hidden;
-    for (auto *plane : hidden.planes) {
-        plane->n.set(1, 0, 0);
-        plane->d = 100000.0F;
-    }
     const cc::Vec3 camera{0.5F, 0.5F, 0.5F};
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.addPass(hidden, false);
-    tree.updateTarget();
+    tree.updateTarget(camera, cc::Vec3::ZERO);
     require(tree.selectRenderables(), "Select draws after updating the distance target");
-    auto requests = tree.requests();
-    const auto hiddenRequests = requests;
-    const auto target = targetKeys(tree);
-    require(std::any_of(requests.begin(), requests.end(), [&](const auto &c) { return !tree.find(c)->ready; }), "Hidden terrain lost distance-required subdivision");
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.addPass(hidden, true);
-    tree.updateTarget();
-    require(tree.selectRenderables(), "Select draws after updating the distance target");
-    requests = tree.requests();
-    require(requests.size() == hiddenRequests.size() && std::equal(requests.begin(), requests.end(), hiddenRequests.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Main pass changed LOD request order");
-    require(targetKeys(tree) == target, "Main pass changed target topology");
-    cc::geometry::Frustum visible;
-    for (auto *plane : visible.planes) {
-        plane->n.set(1, 0, 0);
-        plane->d = -100000.0F;
-    }
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.addPass(visible, false);
-    tree.updateTarget();
-    require(tree.selectRenderables(), "Select draws after updating the distance target");
-    require(tree.viewChanged(), "Pass change without translation must invalidate scheduling");
-    require(targetKeys(tree) == target, "Shadow visibility changed target topology");
-    requests = tree.requests();
-    require(requests.size() == hiddenRequests.size() && std::equal(requests.begin(), requests.end(), hiddenRequests.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Shadow visibility changed LOD request order");
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.addPass(visible, false);
-    tree.updateTarget();
-    require(tree.selectRenderables(), "Select draws after updating the distance target");
-    require(!tree.viewChanged(), "Stable pass repeated scheduling");
     // Compare requested children to an independent distance-to-child oracle.
     for (const float height : {0.5F, 2.0F, 5.0F, 10.0F, 100.0F}) {
-        tree.beginUpdate({12, height, 12}, cc::Vec3::ZERO);
-        tree.addPass(visible, false);
-        tree.updateTarget();
+        tree.updateTarget({12, height, 12}, cc::Vec3::ZERO);
         require(tree.selectRenderables(), "Select draws after updating the distance target");
         ccstd::unordered_set<uint64_t> splits;
         for (const auto &candidate : tree.requests()) {
@@ -1305,102 +1242,22 @@ void testDistanceAndPasses() {
                 refine |= std::sqrt(dx * dx + dy * dy + dz * dz) <= tree.lodMorphRanges()[child.level].end;
             }
             require(!refine || splits.count(node.key()) != 0, "Target omitted distance-required subdivision");
-            require((splits.count(node.key()) != 0) == static_cast<bool>(renderable.children), "Candidates differ from the balanced target");
+            require((splits.count(node.key()) != 0) == static_cast<bool>(renderable._children), "Candidates differ from the balanced target");
         });
     }
-    // A translation of the entire terrain and pass must preserve local requests.
-    tree.beginUpdate(camera, cc::Vec3::ZERO);
-    tree.addPass(visible, false);
-    tree.updateTarget();
+    // A translation of the entire terrain and camera must preserve local requests.
+    tree.updateTarget(camera, cc::Vec3::ZERO);
     require(tree.selectRenderables(), "Select draws after updating the distance target");
     const auto before = tree.requests();
     const cc::Vec3 offset{137, 29, -81};
-    for (auto *plane : visible.planes) {
-        plane->d += offset.x;
-    }
-    tree.beginUpdate(camera + offset, offset);
-    tree.addPass(visible, false);
-    tree.updateTarget();
+    tree.updateTarget(camera + offset, offset);
     require(tree.selectRenderables(), "Select draws after updating the distance target");
     const auto after = tree.requests();
     require(before.size() == after.size(), "World translation changed local subdivision");
     for (size_t i = 0; i < before.size(); ++i) {
         require(before[i].key() == after[i].key(), "Translated candidate ordering changed");
     }
-    std::cout << "PASS: distance oracle, pass-independent targets and requests, stable views and world translation\n";
-}
-
-void testCameraRotation() {
-    const auto data = cacheData(3, 3, 3);
-    TreeFixture tree;
-    tree.init(data);
-    const cc::Vec3 camera{7.5F, 0.5F, 7.5F};
-    const auto update = [&](uint32_t direction, bool shadow) {
-        cc::geometry::Frustum frustum;
-        for (auto *plane : frustum.planes) {
-            plane->n.set(0, 1, 0);
-            plane->d = -1000;
-        }
-        // Rotate a 90-degree horizontal view around the same camera position.
-        const float angle = static_cast<float>(direction) * 0.785398163F;
-        for (uint32_t side = 0; side < 2; ++side) {
-            const float normal = angle + (side == 0 ? -0.785398163F : 0.785398163F);
-            auto &plane = *frustum.planes[side];
-            plane.n.set(std::cos(normal), 0, std::sin(normal));
-            plane.d = camera.x * plane.n.x + camera.z * plane.n.z;
-        }
-        tree.beginUpdate(camera, cc::Vec3::ZERO);
-        tree.addPass(frustum, true);
-        if (shadow) {
-            tree.addPass(frustum, false);
-        }
-        tree.updateTarget();
-        require(tree.selectRenderables(), "Select draws after updating the distance target");
-    };
-    update(0, false);
-    // Repeat with no fine data, incomplete siblings, and fully loaded detail.
-    for (uint32_t phase = 0; phase < 3; ++phase) {
-        if (phase == 1) {
-            auto &sector = *tree.find({data.maxTileLevel, 0, 0});
-            for (uint32_t q = 0; q < 3; ++q) {
-                const auto address = sector.children[q].geometry.address();
-                require(tree.publish(address, testMapping(address)), "Rotation setup could not publish partial siblings");
-            }
-            selectAndCheckChanges(tree);
-        } else if (phase == 2) {
-            completeTarget(tree, data);
-        }
-        const auto target = targetKeys(tree);
-        const auto draws = renderableKeys(tree);
-        ccstd::unordered_map<uint64_t, const Quadtree::Node *> nodes;
-        ccstd::unordered_set<uint64_t> ready;
-        tree.forEachNode([&](const Quadtree::Node &node) {
-            const auto key = node.geometry.address().key();
-            nodes.emplace(key, &node);
-            if (node.ready) {
-                ready.insert(key);
-            }
-            return true;
-        });
-        tree.clearChangedNodes();
-        for (uint32_t direction = 0; direction <= 8; ++direction) {
-            update(direction, direction % 2 != 0);
-            require(targetKeys(tree) == target, "Camera rotation or shadow pass changed the distance target");
-            require(renderableKeys(tree) == draws, "Camera rotation coarsened ready terrain");
-            require(tree.changedNodes().empty(), "Camera rotation changed draw materials or morph edges");
-            for (const auto &entry : nodes) {
-                const auto *node = tree.find(NodeAddress::fromKey(entry.first));
-                require(node == entry.second, "Camera rotation retired an existing node or pending request");
-                require(node->ready == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
-                if (node->ready) {
-                    require(node->material.pages.size() == 1 && node->material.pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
-                }
-            }
-            checkCut(tree, data);
-            checkStitchedEdges(tree, data);
-        }
-    }
-    std::cout << "PASS: full camera rotation, shadow changes, pending siblings and ready detail retention\n";
+    std::cout << "PASS: distance oracle and world translation\n";
 }
 
 void testCoordinateLayouts() {
@@ -1784,11 +1641,10 @@ std::string pagingParityTrace() {
             for (uint32_t frame = 0; frame < frames; ++frame) {
                 const auto previous = tree.requests();
                 tree.clearChangedNodes();
-                tree.beginUpdate(camera, cc::Vec3::ZERO);
-                tree.updateTarget();
+                tree.updateTarget(camera, cc::Vec3::ZERO);
                 uint32_t cancelled = 0;
                 for (const auto address : previous) {
-                    if (!tree.find(address)) {
+                    if (!tree.isTarget(address)) {
                         require(!tree.publish(address, testMapping(address)), "Retired completion resurrected a node");
                         ++cancelled;
                     }
@@ -1807,7 +1663,7 @@ std::string pagingParityTrace() {
                 std::vector<std::string> draw;
                 std::vector<std::string> changed;
                 tree.forEachNode([&](const Quadtree::Node &node) {
-                    if (!node.children) {
+                    if (!node._children) {
                         target.push_back(parityAddress(node.geometry.address()));
                     }
                     return true;
@@ -1950,8 +1806,7 @@ int main(int argc, char **argv) {
     testCommittedVisibility();
     testStitchedPageBounds();
     testMaterialPublication();
-    testDistanceAndPasses();
-    testCameraRotation();
+    testDistanceTargets();
     testAtlasFilterFootprint();
     testCoordinateLayouts();
     testPageCompositionBudget();

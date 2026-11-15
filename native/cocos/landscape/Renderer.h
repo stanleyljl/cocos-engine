@@ -62,38 +62,39 @@ class MaterialLibrary;
 class VTRenderer;
 class DecalRenderer;
 class LandscapeAsset;
-class LandscapeSchedule;
-class Quadtree;
 class LandscapeResidency;
 
-/**
- * Owns terrain models and material bindings. Landscape owns the single
- * Quadtree; LandscapeSchedule prepares its resource-backed changes.
- * Each committed node draws one shared 16 x 16 grid and selects material pages through a local mapping texture.
- */
+// Borrowed inputs are consumed synchronously; the renderer retains only GPU data.
+struct LandscapeRenderNode {
+    const QuadNode *geometry;
+    const VTGridMapping *material;
+    uint8_t edgeMask;
+};
+
 class LandscapeRenderer {
 public:
-    explicit LandscapeRenderer(Quadtree &quadtree);
+    LandscapeRenderer();
     ~LandscapeRenderer();
 
     // Runtime methods require successful initialization of all owned modules.
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
-    // Reports initial streaming completion; ready nodes render independently.
-    bool isReady() const { return _ready; }
+    LandscapeResidency &residency() const { return *_residency; }
+    VTRenderer &vtRenderer() const { return *_vtRenderer; }
+    void setLodMorphRanges(const ccstd::vector<Vec4> &ranges);
 
     uint32_t addDecal(float x, float z, float size, uint32_t layer);
     bool removeDecal(uint32_t id);
     void setDebugData(const LandscapeDebugData &data);
-    void preparePasses();
-    void collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
+    void prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
+    bool collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
     void onGlobalPipelineStateChanged();
     void setHoleMode(uint32_t mode);
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
     void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
-    void setViewPos(const Vec3 &position);
+    void setViewPosition(const Vec3 &position);
     TextureBase *getVTAtlas() const;
 
 private:
@@ -101,24 +102,22 @@ private:
         // GPU ownership only. Geometry/material decisions live in Quadtree.
         int mapping{-1}; // VTPageTable slot for this node's 16x16 cell-to-page mapping; -1 means unallocated.
         IntrusivePtr<scene::Model> model;
+        LandscapeGridParams params; // Uploaded instance data, restored after material variants change.
     };
 
     void setUnlit(bool enabled);
-    void syncRenderables(uint32_t frame, gfx::Texture *previousMappings);
-    void syncTerrainModels();
+    void syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
     void bindRuntimeTextures();
     void recycleModel(GridDraw &draw);
     IntrusivePtr<scene::Model> createModel();
     void updateMaterialProperties();
     void refreshTerrainMaterials();
     void updateMorphCameraProperty();
-    LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t mapping);
+    LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask);
     std::array<Material *, 4> surfaceMaterials() const;
     void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
 
-    // Borrowed from Landscape; it outlives this renderer and its schedule.
-    Quadtree &_quadtree;
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<RenderingSubMesh> _mesh;
@@ -129,7 +128,6 @@ private:
     std::unique_ptr<LandscapeResidency> _residency;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
-    std::unique_ptr<LandscapeSchedule> _schedule;
 
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
     ccstd::unordered_map<uint64_t, GridDraw> _draws;
@@ -142,10 +140,10 @@ private:
     LandscapeData _data;
     uint32_t _holeMode{0};
     bool _heightUnorm{false};
-    bool _ready{false}; // Latched after the first settled render selection; reset on destroy.
     Vec3 _viewPosition;
     bool _castShadow{true};
     bool _receiveShadow{true};
+    bool _materialsDirty{false};
 };
 
 } // namespace landscape

@@ -3,14 +3,14 @@ import { DEBUG } from 'internal:constants';
 import { Vec4 } from '../core/math';
 import { log } from '../core/platform/debug';
 import { Pass } from '../render-scene/core/pass';
-import { Address, BufferTextureCopy, CommandBuffer, CommandBufferInfo, Device, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
+import { Address, BufferTextureCopy, Device, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
 import { Texture2D } from '../asset/assets';
 import { LandscapeAsset } from './Asset';
 import { LandscapeResidency } from './Residency';
 import { MaterialLibrary } from './MaterialLibrary';
 import { DecalRenderer } from './DecalRenderer';
 import { VTPageComposer, VTPageInstance, VTPageMipGenerator } from './VTPageStages';
-import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
+import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
 import * as config from './Config';
 
 export class VTPageTable {
@@ -30,12 +30,21 @@ export class VTPageTable {
         return this._texture!;
     }
 
-    public ensureCapacity (count: number): boolean {
+    private requiredSize (count: number): number {
         let size = Math.max(256, this._size);
         while (size * size < count * VTGridMapping.CELL_COUNT) {
             size *= 2;
         }
-        if (size > this._device.capabilities.maxTextureSize) {
+        return size <= this._device.capabilities.maxTextureSize ? size : 0;
+    }
+
+    public canFit (count: number): boolean {
+        return this.requiredSize(count) !== 0;
+    }
+
+    public ensureCapacity (count: number): boolean {
+        const size = this.requiredSize(count);
+        if (!size) {
             return false;
         }
         if (size === this._size) {
@@ -72,7 +81,7 @@ export class VTPageTable {
         this._freeSlots.push(slot);
     }
 
-    public update (slot: number, mapping: VTGridMapping, pages: VTRenderer): boolean {
+    public update (slot: number, mapping: ReadonlyVTGridMapping, pages: VTRenderer): boolean {
         const physical = mapping.pages.map((page) => {
             const index = pages.resolve(page);
             if (index < 0) {
@@ -161,7 +170,6 @@ export class VTRenderer {
     private readonly _pageTable: VTPageTable;
     private readonly _composer: VTPageComposer;
     private readonly _mipGenerator: VTPageMipGenerator;
-    private _commands: CommandBuffer | null = null;
     private _sampler!: Sampler;
     private _needsClear = true;
     private _refineFarDetail = true;
@@ -200,7 +208,6 @@ export class VTRenderer {
         sampler.addressV = Address.CLAMP;
         sampler.addressW = Address.CLAMP;
         this._sampler = this._device.getSampler(sampler);
-        this._commands = this._device.createCommandBuffer(new CommandBufferInfo(this._device.queue));
         if (config.LANDSCAPE_DEBUG) {
             log(`[Landscape] VT atlas: ${this._atlasSize}x${this._atlasSize} RGBA8 pages=${this._pages.length}`);
         }
@@ -208,8 +215,6 @@ export class VTRenderer {
     }
 
     public destroy (): void {
-        this._commands?.destroy();
-        this._commands = null;
         this._mipGenerator.destroy();
         this._composer.destroy();
         this._pageTable.destroy();
@@ -272,8 +277,7 @@ export class VTRenderer {
             return 0;
         }
         this._composer.uploadInputs();
-        const commands = this._commands!;
-        commands.begin();
+        const commands = this._device.commandBuffer;
         for (let variant = 0; variant < 2; ++variant) {
             const group = batch.filter((entry) => entry.pageInfo.z === variant);
             if (!group.length) {
@@ -283,9 +287,6 @@ export class VTRenderer {
             this._mipGenerator.record(commands, this._composer, group, this._needsClear);
             this._needsClear = false;
         }
-        commands.end();
-        this._device.flushCommands([commands]);
-        this._device.queue.submit([commands]);
         for (const instance of batch) {
             this._pages[instance.pageInfo.x].state = PageState.READY;
         }

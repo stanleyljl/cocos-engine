@@ -57,7 +57,7 @@ namespace landscape {
 class LandscapeAsset;
 class LandscapeRenderer;
 class LandscapeQuery;
-class Quadtree;
+class LandscapeSchedule;
 
 class LandscapeInstance : public RefCounted {
 public:
@@ -68,7 +68,7 @@ public:
     // initialization succeeded and the complete runtime was added to its scene.
     bool onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
     void onDisable();
-    // Once per tick, after camera controllers: advance queries and snapshot the LOD view.
+    // Once per tick, after camera controllers: advance queries, target state and streaming.
     void update();
 
     // Render preparation only, after the pipeline has updated its light frusta; does not tick.
@@ -104,13 +104,12 @@ public:
     uint32_t getQuerySourceStatus(uint32_t id) const;
 
 private:
-    void initializeRenderer(uint32_t queryCacheCapacity);
+    void initializeRuntime(uint32_t queryCacheCapacity);
     void applyRendererSettings(LandscapeRenderer &renderer) const;
-    void logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const;
     scene::Camera *pickMainCamera() const;
     void addPass(const geometry::Frustum &frustum, bool shadow);
-    uint32_t collectShadowPasses(const pipeline::PipelineSceneData &sceneData);
-    void preparePassModels(uint32_t cascadesToDeduplicate);
+    uint32_t addShadowPasses(const pipeline::PipelineSceneData &sceneData);
+    void collectPassModels(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
     bool queryTransformValid() const;
 
@@ -121,7 +120,6 @@ private:
     };
     ccstd::vector<PassSelection> _passes;
     size_t _passCount{0};
-    Vec3 _lodViewPosition;
 
     LandscapeDebugData _debugData;
     uint32_t _holeMode{0};
@@ -134,8 +132,8 @@ private:
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
-    std::unique_ptr<Quadtree> _quadtree;
     std::unique_ptr<LandscapeRenderer> _renderer;
+    std::unique_ptr<LandscapeSchedule> _schedule;
     std::unique_ptr<LandscapeQuery> _query;
 };
 

@@ -27,8 +27,6 @@
 #include <cmath>
 #include <limits>
 #include <utility>
-#include "base/Log.h"
-#include "core/geometry/Frustum.h"
 #include "landscape/Asset.h"
 
 namespace cc::landscape {
@@ -41,11 +39,6 @@ void Quadtree::init(const LandscapeAsset &asset, float lodQualityScale) {
     _renderSelectionChanged = false;
     _needsRenderSelection = true;
     _changedNodes.clear();
-    _passes.clear();
-    _activePassCount = 0;
-#if CC_LANDSCAPE_DEBUG
-    _lastMorphRangeWarning = false;
-#endif
     uint32_t rootLevel = _data.maxTileLevel;
     for (uint32_t side = 1; side < std::max(_data.sectorsX, _data.sectorsZ); side *= 2) {
         ++rootLevel;
@@ -75,35 +68,12 @@ void Quadtree::initLodMorphRanges(float lodQualityScale) {
     }
 }
 
-void Quadtree::beginUpdate(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin) {
+void Quadtree::updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin) {
     const Vec3 localCameraPosition = worldCameraPosition - worldOrigin;
     _viewChanged = localCameraPosition != _localCameraPosition || worldOrigin != _worldOrigin;
     _localCameraPosition = localCameraPosition;
     _worldOrigin = worldOrigin;
-    _activePassCount = 0;
-}
-
-void Quadtree::addPass(const geometry::Frustum &frustum, bool includeNearby) {
-    if (_activePassCount == _passes.size()) {
-        _passes.emplace_back();
-        _viewChanged = true;
-    }
-    auto &pass = _passes[_activePassCount++];
-    _viewChanged |= pass.includeNearby != includeNearby;
-    pass.includeNearby = includeNearby;
-
-    for (size_t i = 0; i < pass.planes.size(); ++i) {
-        const auto &plane = *frustum.planes[i];
-        const Vec4 value{plane.n.x, plane.n.y, plane.n.z, plane.d};
-        _viewChanged |= pass.planes[i] != value;
-        pass.planes[i] = value;
-    }
-}
-
-void Quadtree::updateTarget() {
-    _viewChanged |= _activePassCount != _passes.size();
-    _passes.resize(_activePassCount);
-    if (_viewChanged) {
+    if (_viewChanged || _needsRenderSelection) {
         updateTarget(*_root);
         _needsRenderSelection = true;
     }
@@ -126,18 +96,18 @@ void Quadtree::updateTarget(Node &node) {
             }
         }
     }
+    node.refined = refine;
     if (!refine) {
-        node.children.reset();
         return;
     }
-    if (!node.children) {
-        node.children = std::make_unique<Node[]>(4);
+    if (!node._children) {
+        node._children = std::make_unique<Node[]>(4);
         for (uint32_t q = 0; q < 4; ++q) {
-            node.children[q].geometry = geometry(child(address, q));
+            node._children[q].geometry = geometry(child(address, q));
         }
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        updateTarget(node.children[q]);
+        updateTarget(node._children[q]);
     }
 }
 
@@ -155,10 +125,10 @@ ccstd::vector<NodeAddress> Quadtree::requests() const {
             return false;
         }
         // Retained ancestors keep their mapping; displayed and target leaves refresh.
-        if (node.renderable || !node.children) {
+        if (node.renderable || !node.refined) {
             refreshNodes.push_back(address);
         }
-        return true;
+        return node.refined;
     });
     const auto priority = [](NodeAddress a, NodeAddress b) {
         if (a.level != b.level) {
@@ -174,10 +144,10 @@ ccstd::vector<NodeAddress> Quadtree::requests() const {
 }
 
 bool Quadtree::publish(NodeAddress address, VTGridMapping material) {
-    auto *node = find(address);
-    if (!node) {
+    if (!isTarget(address)) {
         return false;
     }
+    auto *node = findNode(address);
     if (address.level > _data.maxTileLevel) {
         return false;
     }
@@ -192,7 +162,6 @@ bool Quadtree::publish(NodeAddress address, VTGridMapping material) {
     }
     _needsRenderSelection |= !node->ready;
     node->material = std::move(material);
-    node->loaded = true;
     node->ready = true;
     if (node->renderable) {
         _changedNodes.insert(address.key());
@@ -224,10 +193,10 @@ bool Quadtree::selectRenderables() {
     while (!currentLevelNodes.empty()) {
         nextLevelNodes.clear();
         for (auto *node : currentLevelNodes) {
-            if (!node->children) {
+            if (!node->refined) {
                 continue;
             }
-            const bool childrenReady = std::all_of(node->children.get(), node->children.get() + 4, [](const Node &child) {
+            const bool childrenReady = std::all_of(node->_children.get(), node->_children.get() + 4, [](const Node &child) {
                 return child.ready;
             });
             if (!childrenReady) {
@@ -239,7 +208,7 @@ bool Quadtree::selectRenderables() {
             }
             node->renderable = false;
             for (uint32_t q = 0; q < 4; ++q) {
-                auto &child = node->children[q];
+                auto &child = node->_children[q];
                 child.renderable = true;
                 nextLevelNodes.push_back(&child);
             }
@@ -250,9 +219,6 @@ bool Quadtree::selectRenderables() {
     // 3. Update node-owned morph edges and report changes against the previous render set.
     auto previousRenderKeys = std::move(_renderNodeKeys);
     _renderNodeKeys.clear();
-#if CC_LANDSCAPE_DEBUG
-    bool morphRangeWarning = false;
-#endif
     visitNodes(*_root, [&](Node &node) {
         if (!node.renderable) {
             return true;
@@ -266,28 +232,19 @@ bool Quadtree::selectRenderables() {
             _renderSelectionChanged = true;
         }
         node.edgeMask = edges;
-#if CC_LANDSCAPE_DEBUG
-        if (!morphRangeWarning) {
-            morphRangeWarning = morphRangeTooSmall(node);
-        }
-#endif
         return false;
     });
     for (const auto removed : previousRenderKeys) {
         _changedNodes.insert(removed);
         _renderSelectionChanged = true;
     }
-    _needsRenderSelection = false;
-#if CC_LANDSCAPE_DEBUG
-    if (morphRangeWarning != _lastMorphRangeWarning) {
-        if (morphRangeWarning) {
-            CC_LOG_WARNING("[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition");
-        } else {
-            CC_LOG_INFO("[Landscape] CDLOD granularity check: OK");
+    visitNodes(*_root, [](Node &node) {
+        if (!node.refined) {
+            node._children.reset();
         }
-        _lastMorphRangeWarning = morphRangeWarning;
-    }
-#endif
+        return node.refined;
+    });
+    _needsRenderSelection = false;
     return true;
 }
 
@@ -326,11 +283,11 @@ void Quadtree::visitNodes(const Node &node, const std::function<bool(const Node 
     if (!visit(node)) {
         return;
     }
-    if (!node.children) {
+    if (!node._children) {
         return;
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        visitNodes(static_cast<const Node &>(node.children[q]), visit);
+        visitNodes(static_cast<const Node &>(node._children[q]), visit);
     }
 }
 
@@ -341,15 +298,15 @@ void Quadtree::visitNodes(Node &node, const std::function<bool(Node &)> &visit) 
     if (!visit(node)) {
         return;
     }
-    if (!node.children) {
+    if (!node._children) {
         return;
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        visitNodes(node.children[q], visit);
+        visitNodes(node._children[q], visit);
     }
 }
 
-// Helpers: final morph edges and visibility diagnostics.
+// Helpers: final morph edges.
 uint8_t Quadtree::computeEdgeMask(NodeAddress address) const {
     const uint32_t width = _data.sectorsX << _data.maxTileLevel;
     const uint32_t depth = _data.sectorsZ << _data.maxTileLevel;
@@ -382,42 +339,6 @@ uint8_t Quadtree::computeEdgeMask(NodeAddress address) const {
     return edges;
 }
 
-#if CC_LANDSCAPE_DEBUG
-bool Quadtree::morphRangeTooSmall(const Node &node) const {
-    const auto address = node.geometry.address();
-    // Diagnose insufficient morph distance only for visible/nearby draws.
-    if (address.level == _data.maxTileLevel) {
-        return false;
-    }
-    const auto area = region(address);
-    const float x = std::max(std::abs(area.x - _localCameraPosition.x), std::abs(area.x + area.size - _localCameraPosition.x));
-    const float y = std::max(std::abs(node.geometry.minY - _localCameraPosition.y), std::abs(node.geometry.maxY - _localCameraPosition.y));
-    const float z = std::max(std::abs(area.z - _localCameraPosition.z), std::abs(area.z + area.size - _localCameraPosition.z));
-    const float start = _lodMorphRanges[address.level + 1].start;
-    if (x * x + y * y + z * z <= start * start) {
-        return false;
-    }
-    const float distanceSq = distanceSquared(address);
-    const float range = _lodMorphRanges[address.level].end;
-    if (distanceSq > range * range) {
-        return false;
-    }
-    const auto bounds = heightRange(address);
-    const Vec3 center{area.x + area.size * 0.5F + _worldOrigin.x, (bounds.minY + bounds.maxY) * 0.5F + _worldOrigin.y, area.z + area.size * 0.5F + _worldOrigin.z};
-    const Vec3 extent{area.size * 0.5F, (bounds.maxY - bounds.minY) * 0.5F, area.size * 0.5F};
-    const float nearbyRange = _lodMorphRanges[std::min(1U, _data.maxTileLevel)].end;
-    return std::any_of(_passes.begin(), _passes.end(), [&](const Pass &pass) {
-        if (pass.includeNearby && distanceSq <= nearbyRange * nearbyRange) {
-            return true;
-        }
-        return std::all_of(pass.planes.begin(), pass.planes.end(), [&](const Vec4 &plane) {
-            const float radius = extent.x * std::abs(plane.x) + extent.y * std::abs(plane.y) + extent.z * std::abs(plane.z);
-            return center.x * plane.x + center.y * plane.y + center.z * plane.z + radius >= plane.w;
-        });
-    });
-}
-#endif
-
 // Helpers: node ownership and lookup.
 void Quadtree::buildRoot(Node &node, NodeAddress address) {
     node.geometry = {address.level, address.x, address.z, 0.0F, 0.0F};
@@ -429,14 +350,15 @@ void Quadtree::buildRoot(Node &node, NodeAddress address) {
         return;
     }
     // Management nodes aggregate bounds but own no height or material resources.
-    node.children = std::make_unique<Node[]>(4);
+    node.refined = true;
+    node._children = std::make_unique<Node[]>(4);
     HeightRange bounds{std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
     for (uint32_t q = 0; q < 4; ++q) {
         const auto addressOfChild = child(address, q);
-        buildRoot(node.children[q], addressOfChild);
+        buildRoot(node._children[q], addressOfChild);
         if (contains(addressOfChild)) {
-            bounds.minY = std::min(bounds.minY, node.children[q].geometry.minY);
-            bounds.maxY = std::max(bounds.maxY, node.children[q].geometry.maxY);
+            bounds.minY = std::min(bounds.minY, node._children[q].geometry.minY);
+            bounds.maxY = std::max(bounds.maxY, node._children[q].geometry.maxY);
         }
     }
     node.geometry.minY = bounds.minY;
@@ -478,18 +400,31 @@ const Quadtree::Node *Quadtree::find(NodeAddress address) const {
     }
     const Node *node = _root.get();
     while (node->geometry.level > address.level) {
-        if (!node->children) {
+        if (!node->_children) {
             return nullptr;
         }
         const auto shift = node->geometry.level - 1 - address.level;
         const auto quadrant = ((address.x >> shift) & 1U) | (((address.z >> shift) & 1U) << 1U);
-        node = &node->children[quadrant];
+        node = &node->_children[quadrant];
     }
     return node;
 }
 
-Quadtree::Node *Quadtree::find(NodeAddress address) {
+Quadtree::Node *Quadtree::findNode(NodeAddress address) {
     return const_cast<Node *>(static_cast<const Quadtree &>(*this).find(address));
+}
+
+bool Quadtree::isTarget(NodeAddress address) const {
+    if (!find(address)) {
+        return false;
+    }
+    while (address.level < _root->geometry.level) {
+        address = address.ancestor(address.level + 1);
+        if (!find(address)->refined) {
+            return false;
+        }
+    }
+    return true;
 }
 
 const Quadtree::Node *Quadtree::findRenderable(NodeAddress address) const {
@@ -531,7 +466,7 @@ NodeAddress Quadtree::renderableAt(uint32_t x, uint32_t z) const {
     while (!node->renderable) {
         const auto shift = node->geometry.level - 1;
         const auto quadrant = ((x >> shift) & 1U) | (((z >> shift) & 1U) << 1U);
-        node = &node->children[quadrant];
+        node = &node->_children[quadrant];
     }
     return node->geometry.address();
 }

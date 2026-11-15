@@ -29,7 +29,6 @@
 #include <cstdio>
 
 #include "base/Log.h"
-#include "base/StringUtil.h"
 #include "base/std/container/unordered_set.h"
 #include "core/Root.h"
 #include "core/assets/Texture2D.h"
@@ -40,7 +39,7 @@
 #include "landscape/Asset.h"
 #include "landscape/Config.h"
 #include "landscape/Renderer.h"
-#include "landscape/Quadtree.h"
+#include "landscape/Schedule.h"
 #include "landscape/Query.h"
 #include "math/Mat4.h"
 #include "math/Vec3.h"
@@ -68,11 +67,11 @@ bool LandscapeInstance::onEnable(Node *node, float lodQualityScale, uint32_t que
     }
     _lodQualityScale = lodQualityScale;
     _node = node;
-    initializeRenderer(queryCacheCapacity);
+    initializeRuntime(queryCacheCapacity);
     return isInitialized();
 }
 
-void LandscapeInstance::initializeRenderer(uint32_t queryCacheCapacity) {
+void LandscapeInstance::initializeRuntime(uint32_t queryCacheCapacity) {
     if (_node == nullptr || _renderer != nullptr) {
         return;
     }
@@ -91,24 +90,21 @@ void LandscapeInstance::initializeRenderer(uint32_t queryCacheCapacity) {
     if (!asset->load(_assetPath)) {
         return;
     }
-    auto quadtree = std::make_unique<Quadtree>();
-    quadtree->init(*asset, _lodQualityScale);
-    auto renderer = std::make_unique<LandscapeRenderer>(*quadtree);
+    auto renderer = std::make_unique<LandscapeRenderer>();
     if (!renderer->init(_node.get(), _scene, asset.get())) {
         return;
     }
-    applyRendererSettings(*renderer);
-    logLodRanges(*asset, *quadtree);
-
+    auto schedule = std::make_unique<LandscapeSchedule>(*asset, *renderer, _lodQualityScale);
     // Create the empty CPU cache with the other runtime objects. Tile I/O
     // starts when addSource() registers the first reference to a tile.
     auto query = std::make_unique<LandscapeQuery>(asset->data(),
         [this](uint32_t x, uint32_t z, LandscapeQueryCompletion completion) {
             _asset->requestQueryTile(x, z, std::move(completion));
         }, queryCacheCapacity);
+    applyRendererSettings(*renderer);
 
     _asset = std::move(asset);
-    _quadtree = std::move(quadtree);
+    _schedule = std::move(schedule);
     _renderer = std::move(renderer);
     _query = std::move(query);
     _scene->addLandscape(this);
@@ -121,21 +117,6 @@ void LandscapeInstance::applyRendererSettings(LandscapeRenderer &renderer) const
     renderer.setGlobalColorStrength(_globalColorStrength);
     renderer.setCastShadow(_castShadow);
     renderer.setReceiveShadow(_receiveShadow);
-}
-
-void LandscapeInstance::logLodRanges(const LandscapeAsset &asset, const Quadtree &quadtree) const {
-#if CC_LANDSCAPE_DEBUG
-    const auto &data = asset.data();
-    ccstd::string message = "[Landscape] LOD ranges:";
-    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
-        const auto &range = quadtree.lodMorphRanges()[level];
-        message += StringUtil::format(" [LOD%u: %.1f,%.1f]", level, range.start, range.end);
-    }
-    CC_LOG_INFO("%s", message.c_str());
-#else
-    CC_UNUSED_PARAM(asset);
-    CC_UNUSED_PARAM(quadtree);
-#endif
 }
 
 void LandscapeInstance::setGlobalColorMap(Texture2D *texture) {
@@ -158,8 +139,8 @@ void LandscapeInstance::onDisable() {
     }
     _passes.clear();
     _passCount = 0;
+    _schedule = nullptr;
     _renderer = nullptr;
-    _quadtree = nullptr;
     _query = nullptr;
     _asset = nullptr;
     _scene = nullptr;
@@ -189,8 +170,7 @@ void LandscapeInstance::update() {
         return;
     }
     camera->update();
-    _lodViewPosition = camera->getPosition();
-    _renderer->setViewPos(_lodViewPosition);
+    _schedule->update(camera->getPosition(), _node->getWorldPosition());
 }
 
 void LandscapeInstance::addPass(const geometry::Frustum &frustum, bool shadow) {
@@ -201,7 +181,7 @@ void LandscapeInstance::addPass(const geometry::Frustum &frustum, bool shadow) {
     pass.frustum = &frustum;
     pass.shadow = shadow;
     pass.models.clear();
-    _quadtree->addPass(frustum, !shadow);
+    _schedule->addPass(frustum, !shadow);
 }
 
 bool LandscapeInstance::queryTransformValid() const {
@@ -274,18 +254,18 @@ void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipelin
         return;
     }
     const auto layer = _node->getLayer();
-    // UI/other cameras that hide terrain must not rebuild its models or VT plan.
+    // UI/other cameras that hide terrain must not prepare its rendering resources.
     if ((camera.getVisibility() & layer) != layer) {
         return;
     }
-    // All passes share one LOD position and the same current rendering tree.
-    _quadtree->beginUpdate(_lodViewPosition, _node->getWorldPosition());
+    _schedule->prepareRenderData(Root::getInstance()->getFrameCount());
+    _schedule->beginPasses();
     addPass(camera.getFrustum(), false);
-    const uint32_t cascadesToDeduplicate = collectShadowPasses(sceneData);
-    preparePassModels(cascadesToDeduplicate);
+    const uint32_t cascadesToDeduplicate = addShadowPasses(sceneData);
+    collectPassModels(cascadesToDeduplicate);
 }
 
-uint32_t LandscapeInstance::collectShadowPasses(const pipeline::PipelineSceneData &sceneData) {
+uint32_t LandscapeInstance::addShadowPasses(const pipeline::PipelineSceneData &sceneData) {
     uint32_t cascadesToDeduplicate = 0;
     const auto *shadows = sceneData.getShadows();
     if (_castShadow && shadows && shadows->isEnabled() && shadows->getType() == scene::ShadowType::SHADOW_MAP) {
@@ -317,14 +297,13 @@ uint32_t LandscapeInstance::collectShadowPasses(const pipeline::PipelineSceneDat
     return cascadesToDeduplicate;
 }
 
-void LandscapeInstance::preparePassModels(uint32_t cascadesToDeduplicate) {
-    // Only selected renderable nodes draw; incomplete replacements retain their parents.
-    _renderer->preparePasses();
+void LandscapeInstance::collectPassModels(uint32_t cascadesToDeduplicate) {
     for (size_t i = 0; i < _passCount; ++i) {
         auto &pass = _passes[i];
-        _renderer->collectPassModels(*pass.frustum, pass.shadow, pass.models);
+        _schedule->collectPassModels(*pass.frustum, pass.shadow, pass.models);
     }
     removeCSMDuplicates(cascadesToDeduplicate);
+    _schedule->endPasses();
 }
 
 void LandscapeInstance::removeCSMDuplicates(uint32_t cascadeCount) {
@@ -370,7 +349,7 @@ void LandscapeInstance::onGlobalPipelineStateChanged() {
 }
 
 bool LandscapeInstance::isReady() const {
-    return _renderer != nullptr && _renderer->isReady();
+    return _schedule != nullptr && _schedule->isReady();
 }
 
 
@@ -420,7 +399,7 @@ scene::Camera *LandscapeInstance::pickMainCamera() const {
 
 void LandscapeInstance::drawDebugBounds() {
 #if CC_USE_GEOMETRY_RENDERER
-    if (_scene == nullptr || _node == nullptr || !_quadtree) {
+    if (_scene == nullptr || _node == nullptr || !_schedule) {
         return;
     }
     auto *camera = pickMainCamera();
@@ -444,17 +423,7 @@ void LandscapeInstance::drawDebugBounds() {
     static_assert(sizeof(colors) / sizeof(colors[0]) == config::MAX_LOD_LEVELS,
                   "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
-    _quadtree->cull([&](const Quadtree::Node &treeNode) {
-        const auto &node = treeNode.geometry;
-        const auto region = _quadtree->region(node.address());
-        const auto &origin = _node->getWorldPosition();
-        const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + node.maxY) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z, region.size * 0.5F, (node.maxY - node.minY) * 0.5F, region.size * 0.5F};
-        if (!bounds.aabbFrustum(camera->getFrustum())) {
-            return false;
-        }
-        if (!treeNode.renderable) {
-            return true;
-        }
+    _schedule->visitDebugNodes(camera->getFrustum(), _node->getWorldPosition(), [&](const QuadNode &node, const LandscapeRegion &region) {
         const float quadrantSize = region.size * 0.5F;
         const float nodeX = region.x;
         const float nodeZ = region.z;
@@ -473,7 +442,6 @@ void LandscapeInstance::drawDebugBounds() {
             // shares an edge with the box.
             geometry->addBoundingBox(box, colors[node.level], true, false, false, true, world);
         }
-        return true;
     });
 #endif
 }

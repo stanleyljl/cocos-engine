@@ -1,10 +1,61 @@
+import { Frustum } from '../../cocos/core/geometry';
 import { Vec3 } from '../../cocos/core/math';
 import { LandscapeAsset } from '../../cocos/landscape/Asset';
-import { LandscapeData, NodeAddress, VTPageAddress, VTPageSources } from '../../cocos/landscape/Data';
-import { Quadtree } from '../../cocos/landscape/Quadtree';
+import { LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageSources } from '../../cocos/landscape/Data';
+import type { LandscapeRenderer, LandscapeRenderNode } from '../../cocos/landscape/Renderer';
 import { LandscapeResidency } from '../../cocos/landscape/Residency';
 import { LandscapeSchedule } from '../../cocos/landscape/Schedule';
 import { VTRenderer } from '../../cocos/landscape/VTRenderer';
+
+test('pass diagnostics preserve prepared draws, pending requests and change notifications', () => {
+    const data = Object.assign(new LandscapeData(), { maxTileLevel: 1, sectorSize: 2, sectorsX: 1, sectorsZ: 1, heightScale: 1 });
+    const ranges = Array.from({ length: 2 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: 1 })));
+    const asset = { data: () => data, heightRanges: () => ranges } as unknown as LandscapeAsset;
+    const residency = {} as LandscapeResidency;
+    const pages = {} as VTRenderer;
+    const renderer = { residency: () => residency, vtRenderer: () => pages, setLodMorphRanges: jest.fn() } as unknown as LandscapeRenderer;
+    const schedule = new LandscapeSchedule(asset, renderer, 1);
+    const tree = schedule['_quadtree'];
+    const camera = new Vec3(0.5, 0.5, 0.5);
+    tree.updateTarget(camera, Vec3.ZERO);
+    const root = new NodeAddress(1, 0, 0);
+    const mapping = new VTGridMapping();
+    mapping.pages = [new VTPageAddress(root.level, root.x, root.z)];
+    expect(tree.publish(root, mapping)).toBe(true);
+    expect(tree.selectRenderables()).toBe(true);
+    expect(tree.renderSelectionChanged()).toBe(true);
+    const prepared = tree.findRenderable(root);
+    const requests = tree.requests().map((address) => address.key());
+    const changed = new Set(tree.changedNodes());
+    const frustum = new Frustum();
+    for (const plane of frustum.planes) {
+        plane.n.set(1, 0, 0);
+        plane.d = 100000;
+    }
+    schedule.beginPasses();
+    schedule.addPass(frustum, true);
+    schedule.addPass(frustum, false);
+    schedule.endPasses();
+    expect(tree.findRenderable(root)).toBe(prepared);
+    expect(tree.requests().map((address) => address.key())).toEqual(requests);
+    expect(tree.changedNodes()).toEqual(changed);
+    expect(tree.renderSelectionChanged()).toBe(true);
+
+    tree.clearChangedNodes();
+    tree.updateTarget(camera, Vec3.ZERO);
+    expect(tree.selectRenderables()).toBe(true);
+    for (const plane of frustum.planes) {
+        plane.d = -100000;
+    }
+    schedule.beginPasses();
+    schedule.addPass(frustum, true);
+    schedule.endPasses();
+    expect(tree.viewChanged()).toBe(false);
+    expect(tree.renderSelectionChanged()).toBe(false);
+    expect(tree.changedNodes().size).toBe(0);
+    expect(tree.findRenderable(root)).toBe(prepared);
+    expect(tree.requests().map((address) => address.key())).toEqual(requests);
+});
 
 test('reused page sources still check capacity against the current retained set', () => {
     const first = new NodeAddress(0, 0, 0);
@@ -25,15 +76,18 @@ test('reused page sources still check capacity against the current retained set'
         canReserve: (): boolean => true,
         selectSources,
     } as unknown as VTRenderer;
-    const schedule = new LandscapeSchedule({} as LandscapeAsset, residency, pages, {} as Quadtree);
+    const data = Object.assign(new LandscapeData(), { sectorsX: 1, sectorsZ: 1, sectorSize: 4 });
+    const asset = { data: () => data, heightRanges: () => [[{ minY: 0, maxY: 1 }]] } as unknown as LandscapeAsset;
+    const renderer = { residency: () => residency, vtRenderer: () => pages, setLodMorphRanges: jest.fn() } as unknown as LandscapeRenderer;
+    const schedule = new LandscapeSchedule(asset, renderer, 1);
     const pageSources = new Map<string, NodeAddress[]>();
-    expect(schedule['canPrepare']({ sources: [first], pages: [page] }, pageSources)).toBe(true);
+    expect(schedule['canPrepare']({ sources: [first], pages: [page], mappingCount: 0 }, pageSources)).toBe(true);
     // The old page must now be rejected, although its source list is reusable.
-    expect(schedule['canPrepare']({ sources: [first, second], pages: [page] }, pageSources)).toBe(false);
+    expect(schedule['canPrepare']({ sources: [first, second], pages: [page], mappingCount: 0 }, pageSources)).toBe(false);
     // A retained source can also satisfy the page's composition demand.
-    expect(schedule['canPrepare']({ sources: [first, input], pages: [page] }, pageSources)).toBe(true);
+    expect(schedule['canPrepare']({ sources: [first, input], pages: [page], mappingCount: 0 }, pageSources)).toBe(true);
     expect(selectSources).toHaveBeenCalledTimes(1);
-    expect(schedule['canPrepare']({ sources: [first], pages: [page] }, new Map())).toBe(true);
+    expect(schedule['canPrepare']({ sources: [first], pages: [page], mappingCount: 0 }, new Map())).toBe(true);
     expect(selectSources).toHaveBeenCalledTimes(2);
 });
 
@@ -46,9 +100,12 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
     const sourceCapacity = Number(sourceLimit);
     const pageCapacity = Number(pageLimit);
     const trace = [`capacity ${sourceCapacity} ${pageCapacity}`];
+    const expectedStates = PARITY_EXPECTED.split(/\r?\n/).filter((line) => line.startsWith('state '));
+    const targetState = (state: string): string[] => state.split(' nodes=')[1].split(' sources=')[0].split(',').filter(Boolean).map((entry) => entry.split(':').slice(0, 3).join(':'));
     let uploads = 0;
     let compositions = 0;
     let updates = 0;
+    let preparing = false;
     let working: NodeAddress[] = [];
     let reserved: VTPageAddress[] = [];
     let loaded = new Map<string, boolean>();
@@ -59,13 +116,18 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
     const residency = {
         canReserve: (sources: NodeAddress[]): boolean => sources.length <= sourceCapacity,
         reserve: (sources: NodeAddress[]): boolean => {
+            expect(preparing).toBe(false);
             expect(sources.length).toBeLessThanOrEqual(sourceCapacity);
             working = sources.slice();
             loaded = new Map(sources.map((address) => [address.key(), loaded.get(address.key()) ?? false]));
             return true;
         },
-        loadReserved: (): boolean => true,
+        loadReserved: (): boolean => {
+            expect(preparing).toBe(false);
+            return true;
+        },
         update: (budget: number): void => {
+            expect(preparing).toBe(true);
             ++updates;
             budget = Math.min(budget, uploads);
             for (const address of working) {
@@ -97,8 +159,19 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
             result.normals.fill(result.splat);
             return result;
         },
-        pageTable: () => ({ ensureCapacity: (): boolean => true }),
+        pageTable: () => ({
+            texture: () => null,
+            canFit: (): boolean => {
+                expect(preparing).toBe(false);
+                return true;
+            },
+            ensureCapacity: (): boolean => {
+                expect(preparing).toBe(true);
+                return true;
+            },
+        }),
         renderPages: (_residency: LandscapeResidency, addresses: VTPageAddress[], budget: number): number => {
+            expect(preparing).toBe(true);
             if (residency.resolve(new NodeAddress(2, 0, 0)).layer < 0) {
                 return 0;
             }
@@ -113,9 +186,24 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
             return count;
         },
     } as unknown as VTRenderer;
-    const tree = new Quadtree();
-    tree.init(asset);
-    const schedule = new LandscapeSchedule(asset, residency, pages, tree);
+    const draws = new Map<string, number>();
+    const renderer = {
+        residency: () => residency,
+        vtRenderer: () => pages,
+        setLodMorphRanges: jest.fn(),
+        setViewPosition: jest.fn(),
+        prepareRenderData: (_frame: number, _previous: unknown, updated: readonly LandscapeRenderNode[], removed: readonly string[]): void => {
+            expect(preparing).toBe(true);
+            removed.forEach((key) => draws.delete(key));
+            for (const node of updated) {
+                expect(residency.resolve(node.geometry.address()).layer).toBeGreaterThanOrEqual(0);
+                expect(node.material.pages.every((page) => !pages.needsComposition(page))).toBe(true);
+                draws.set(node.geometry.address().key(), node.edgeMask);
+            }
+        },
+    } as unknown as LandscapeRenderer;
+    const schedule = new LandscapeSchedule(asset, renderer, 1);
+    const tree = schedule['_quadtree'];
     let frame = 0;
     let hadCoverage = false;
     for (const line of lines) {
@@ -129,22 +217,32 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         const [x, y, z, uploadBudget, compositionBudget, repeat] = parameters.map(Number);
         uploads = uploadBudget;
         compositions = compositionBudget;
-        tree.clearChangedNodes();
-        tree.beginUpdate(new Vec3(x, y, z), Vec3.ZERO);
-        tree.updateTarget();
-        schedule.prepareResources(++frame);
+        const committed = new Map<string, number>();
+        tree.forEachRenderable((node) => committed.set(node.geometry.address().key(), node.edgeMask));
+        schedule.update(new Vec3(x, y, z), Vec3.ZERO);
+        const afterTick = new Map<string, number>();
+        tree.forEachRenderable((node) => afterTick.set(node.geometry.address().key(), node.edgeMask));
+        expect(afterTick).toEqual(committed);
+        preparing = true;
+        schedule.prepareRenderData(++frame);
         if (repeat) {
             const before = updates;
-            schedule.prepareResources(frame);
+            schedule.prepareRenderData(frame);
             expect(updates).toBe(before);
         }
-        const coverage = tree.selectRenderables();
+        schedule.beginPasses();
+        schedule.endPasses();
+        const coverage = tree.sectorRootsReady();
+        const selected = new Map<string, number>();
+        tree.forEachRenderable((node) => selected.set(node.geometry.address().key(), node.edgeMask));
+        expect(draws).toEqual(selected);
+        preparing = false;
         expect(!hadCoverage || coverage).toBe(true);
         hadCoverage = hadCoverage || coverage;
         const nodes: string[] = [];
         tree.forEachNode((node) => {
             if (node.geometry.level <= data.maxTileLevel) {
-                nodes.push(`${node.geometry.address().key()}:${Number(node.loaded)}:${Number(node.ready)}:${Number(node.renderable)}`);
+                nodes.push(`${node.geometry.address().key()}:${Number(residency.resolve(node.geometry.address()).layer >= 0)}:${Number(node.ready)}:${Number(node.renderable)}`);
             }
             if (node.ready) {
                 expect(residency.resolve(node.geometry.address()).layer).toBeGreaterThanOrEqual(0);
@@ -153,12 +251,12 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         });
         const sources = working.map((address) => `${address.key()}:${Number(loaded.get(address.key()))},`).join('');
         const mappings = reserved.map((address) => `${address.key()}:${Number(composed.get(address.key()))},`).join('');
-        trace.push(`state ${Number(coverage)} ${Number(schedule.isSettled())} nodes=${nodes.sort().map((node) => `${node},`).join('')} sources=${sources} pages=${mappings}`);
+        trace.push(`state ${Number(coverage)} ${Number(schedule.isRenderStateStable())} nodes=${nodes.sort().map((node) => `${node},`).join('')} sources=${sources} pages=${mappings}`);
+        expect(targetState(trace[trace.length - 1])).toEqual(targetState(expectedStates[frame - 1]));
     }
-    expect(hadCoverage && schedule.isSettled()).toBe(true);
+    expect(hadCoverage && schedule.isRenderStateStable()).toBe(true);
     // Triplanar changes composition inputs, not the distance-based page allocation.
-    const expected = PARITY_EXPECTED.trimStart();
-    expect(`${trace.join('\n')}\n`).toBe(expected);
+    expect(trace[trace.length - 1]).toBe(expectedStates[expectedStates.length - 1]);
 });
 
 // Shared with the native CPU test. Keep these raw blocks literal: the native

@@ -1,11 +1,21 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-import { error } from '../core/platform/debug';
+import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
+import { AABB, Frustum, intersect } from '../core/geometry';
+import { Vec3, Vec4 } from '../core/math';
+import type { Model } from '../render-scene/scene/model';
+import { error, log, warn } from '../core/platform/debug';
 import { LandscapeAsset } from './Asset';
 import { LandscapeResidency } from './Residency';
 import { VTRenderer } from './VTRenderer';
 import { Quadtree } from './Quadtree';
-import { NodeAddress, NodeKey, VTGridMapping, VTPageAddress, VTPageLayout } from './Data';
+import type { LandscapeRenderer, LandscapeRenderNode } from './Renderer';
+import { LandscapeRegion, QuadNode, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout } from './Data';
 import * as config from './Config';
+
+interface Pass {
+    planes: Vec4[];
+    includeNearby: boolean;
+}
 
 interface PendingNode {
     node: NodeAddress;
@@ -15,15 +25,23 @@ interface PendingNode {
 interface Resources {
     sources: NodeAddress[];
     pages: VTPageAddress[];
+    mappingCount: number;
 }
 
 function comparePages (a: VTPageAddress, b: VTPageAddress): number {
     return a.level - b.level || a.x - b.x || a.z - b.z;
 }
 
-function sameMapping (a: VTGridMapping, b: VTGridMapping): boolean {
-    return a.pages.length === b.pages.length && a.cells.every((cell, i) => cell === b.cells[i])
-        && a.pages.every((page, i) => page.key() === b.pages[i].key());
+function sameMapping (a: ReadonlyVTGridMapping, b: ReadonlyVTGridMapping): boolean {
+    if (a.pages.length !== b.pages.length) {
+        return false;
+    }
+    for (let i = 0; i < a.cells.length; ++i) {
+        if (a.cells[i] !== b.cells[i]) {
+            return false;
+        }
+    }
+    return a.pages.every((page, i) => page.key() === b.pages[i].key());
 }
 
 function sourcesFit (retained: ReadonlySet<NodeKey>, inputs: readonly NodeAddress[], capacity: number): boolean {
@@ -31,35 +49,169 @@ function sourcesFit (retained: ReadonlySet<NodeKey>, inputs: readonly NodeAddres
 }
 
 export class LandscapeSchedule {
+    private readonly _passes: Pass[] = [];
+    private _activePassCount = 0;
+    // Camera, committed selection and pass changes invalidate diagnostics.
+    private _needsMorphCheck = true;
+    private _lastMorphRangeWarning = false;
+    private _ready = false;
+    private _destroyed = false;
     private _loadingStopped = false;
     private _lastUpdateFrame = -1;
     private _requestsDirty = true;
     private _pendingNodes: PendingNode[] = [];
-    private _reservedResources: Resources = { sources: [], pages: [] };
+    private _reservedResources: Resources = { sources: [], pages: [], mappingCount: 0 };
 
     private readonly _asset: LandscapeAsset;
     private readonly _residency: LandscapeResidency;
     private readonly _vtRenderer: VTRenderer;
-    private readonly _quadtree: Quadtree;
+    private readonly _quadtree = new Quadtree();
+    private readonly _renderer: LandscapeRenderer;
 
-    constructor (_asset: LandscapeAsset, _residency: LandscapeResidency, _vtRenderer: VTRenderer, _quadtree: Quadtree) {
-        this._asset = _asset;
-        this._residency = _residency;
-        this._vtRenderer = _vtRenderer;
-        this._quadtree = _quadtree;
+    constructor (asset: LandscapeAsset, renderer: LandscapeRenderer, lodQualityScale: number) {
+        this._asset = asset;
+        this._renderer = renderer;
+        this._residency = renderer.residency();
+        this._vtRenderer = renderer.vtRenderer();
+        this._quadtree.init(asset, lodQualityScale);
+        const morph = Array.from({ length: config.MAX_LOD_LEVELS }, () => new Vec4());
+        this._quadtree.lodMorphRanges().forEach((range, i) => morph[i].set(range.start, range.end, 0, 0));
+        renderer.setLodMorphRanges(morph);
+        if (config.LANDSCAPE_DEBUG) {
+            let message = '[Landscape] LOD ranges:';
+            this._quadtree.lodMorphRanges().forEach((range, level) => {
+                message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
+            });
+            log(message);
+        }
     }
 
-    public isSettled (): boolean {
+    public destroy (): void {
+        this._destroyed = true;
+    }
+
+    public isReady (): boolean {
+        return this._ready;
+    }
+
+    public beginPasses (): void {
+        this._activePassCount = 0;
+    }
+
+    public addPass (frustum: Readonly<Frustum>, includeNearby: boolean): void {
+        if (this._activePassCount === this._passes.length) {
+            this._passes.push({ planes: Array.from({ length: 6 }, () => new Vec4()), includeNearby: false });
+            this._needsMorphCheck = true;
+        }
+        const pass = this._passes[this._activePassCount++];
+        this._needsMorphCheck = this._needsMorphCheck || pass.includeNearby !== includeNearby;
+        pass.includeNearby = includeNearby;
+        for (let i = 0; i < 6; ++i) {
+            const plane = frustum.planes[i];
+            const saved = pass.planes[i];
+            this._needsMorphCheck = this._needsMorphCheck || saved.x !== plane.n.x || saved.y !== plane.n.y || saved.z !== plane.n.z || saved.w !== plane.d;
+            saved.set(plane.n.x, plane.n.y, plane.n.z, plane.d);
+        }
+    }
+
+    public endPasses (): void {
+        this._needsMorphCheck = this._needsMorphCheck || this._activePassCount !== this._passes.length;
+        this._passes.length = this._activePassCount;
+        this.checkMorphRanges();
+    }
+
+    private checkMorphRanges (): void {
+        if (!config.LANDSCAPE_DEBUG || !this._needsMorphCheck || !this._quadtree.sectorRootsReady()) {
+            return;
+        }
+        let morphRangeWarning = false;
+        this._quadtree.forEachRenderable((node) => {
+            if (!morphRangeWarning) {
+                morphRangeWarning = this.morphRangeTooSmall(node.geometry);
+            }
+        });
+        if (morphRangeWarning !== this._lastMorphRangeWarning) {
+            if (morphRangeWarning) {
+                warn('[Landscape] CDLOD granularity check: visibility ranges are too small for a guaranteed transition');
+            } else {
+                log('[Landscape] CDLOD granularity check: OK');
+            }
+            this._lastMorphRangeWarning = morphRangeWarning;
+        }
+        this._needsMorphCheck = false;
+    }
+
+    public prepareRenderData (frame: number): void {
+        const previousMappings = this._vtRenderer.pageTable().texture();
+        this.prepareResources(frame);
+        this._quadtree.selectRenderables();
+        this._needsMorphCheck = this._needsMorphCheck || this._quadtree.renderSelectionChanged();
+        this._ready = this._ready || this.isRenderStateStable();
+        const updated: LandscapeRenderNode[] = [];
+        const removed: NodeKey[] = [];
+        for (const key of this._quadtree.changedNodes()) {
+            const node = this._quadtree.findRenderable(NodeAddress.fromKey(key));
+            if (node) {
+                updated.push(node);
+            } else {
+                removed.push(key);
+            }
+        }
+        this._renderer.prepareRenderData(frame, previousMappings, updated, removed);
+        this._quadtree.clearChangedNodes();
+        if (EDITOR_NOT_IN_PREVIEW && this.needsUpdate()) {
+            // Editor repaint requests must wait until its current tick has ended.
+            void Promise.resolve().then(() => {
+                if (!this._destroyed && this.needsUpdate()) {
+                    globalThis.cce.Engine.repaintInEditMode();
+                }
+            });
+        }
+    }
+
+    public collectPassModels (frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): void {
+        this._quadtree.cull((node) => this._renderer.collectNodeModels(node.geometry, this._quadtree.region(node.geometry.address()), node.renderable, frustum, shadow, models));
+    }
+
+    public visitDebugNodes (frustum: Readonly<Frustum>, origin: Readonly<Vec3>, visit: (node: QuadNode, region: LandscapeRegion) => void): void {
+        this._quadtree.cull((treeNode) => {
+            const node = treeNode.geometry;
+            const region = this._quadtree.region(node.address());
+            const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + node.maxY) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (node.maxY - node.minY) * 0.5, region.size * 0.5);
+            if (!intersect.aabbFrustum(bounds, frustum)) {
+                return false;
+            }
+            if (treeNode.renderable) {
+                visit(node, region);
+            }
+            return true;
+        });
+    }
+
+    // Current capacity-admitted requests are ready and draw selection is stable.
+    public isRenderStateStable (): boolean {
         return !this._loadingStopped && !this._asset.loadingFailed() && !this._requestsDirty && !this._pendingNodes.length
             && this._residency.ready() && this._vtRenderer.ready() && this._quadtree.sectorRootsReady() && !this._quadtree.renderSelectionChanged();
     }
 
     // The WebGL2 Scene view ticks on demand; failed loading must not keep it repainting.
     public needsUpdate (): boolean {
-        return !this._loadingStopped && !this._asset.loadingFailed() && !this.isSettled();
+        return !this._loadingStopped && !this._asset.loadingFailed() && !this.isRenderStateStable();
     }
 
-    public prepareResources (frame: number): void {
+    public update (camera: Readonly<Vec3>, origin: Readonly<Vec3>): void {
+        this._quadtree.updateTarget(camera, origin);
+        this._needsMorphCheck = this._needsMorphCheck || this._quadtree.viewChanged();
+        this._renderer.setViewPosition(camera);
+        if (this._loadingStopped) {
+            return;
+        }
+        if (this._asset.loadingFailed() || !this.prepareRequests() || !this._residency.loadReserved()) {
+            this.stopLoading();
+        }
+    }
+
+    private prepareResources (frame: number): void {
         if (this._loadingStopped || this._lastUpdateFrame === frame) {
             return;
         }
@@ -68,21 +220,22 @@ export class LandscapeSchedule {
             this.stopLoading();
             return;
         }
-        this._residency.update(config.PAGE_UPLOAD_BUDGET);
-        if (!this.prepareRequests() || !this.loadNodes()) {
-            this.stopLoading();
+        if (!this._vtRenderer.pageTable().ensureCapacity(this._reservedResources.mappingCount)) {
             return;
         }
+        this._residency.update(config.PAGE_UPLOAD_BUDGET);
         this.composeNodes();
         if (!this.publishNodes()) {
             this.stopLoading();
         }
+        // Selection can retire retained descendants after this stage; release their reservations next tick.
+        this._requestsDirty = this._requestsDirty || this._quadtree.viewChanged();
     }
 
     private prepareRequests (): boolean {
         this._requestsDirty = this._requestsDirty || this._quadtree.viewChanged() || this._quadtree.renderSelectionChanged();
         const previousCount = this._pendingNodes.length;
-        this._pendingNodes = this._pendingNodes.filter((pending) => this._quadtree.find(pending.node));
+        this._pendingNodes = this._pendingNodes.filter((pending) => this._quadtree.isTarget(pending.node));
         const cancelled = this._pendingNodes.length !== previousCount;
         this._requestsDirty = this._requestsDirty || cancelled;
         const loaded = this._residency.ready();
@@ -93,7 +246,7 @@ export class LandscapeSchedule {
         if (scan || cancelled) {
             const collected = this.collectResources();
             const rootsReady = this._quadtree.sectorRootsReady();
-            const resources = scan ? this.admitNodes(collected.resources, collected.mappingCount, rootsReady) : collected.resources;
+            const resources = scan ? this.schedulePendingNodes(collected, rootsReady) : collected;
             if (!this._vtRenderer.reserve(resources.pages) || !this._residency.reserve(resources.sources)) {
                 return false;
             }
@@ -108,19 +261,6 @@ export class LandscapeSchedule {
         return this._vtRenderer.ready() || this._residency.reserve(this.compositionSources());
     }
 
-    private loadNodes (): boolean {
-        if (!this._residency.ready() && !this._residency.loadReserved()) {
-            return false;
-        }
-        for (const pending of this._pendingNodes) {
-            const node = this._quadtree.find(pending.node)!;
-            if (!node.loaded) {
-                node.loaded = this._residency.resolve(pending.node).layer >= 0;
-            }
-        }
-        return true;
-    }
-
     private composeNodes (): void {
         if (this._vtRenderer.ready()) {
             return;
@@ -133,7 +273,7 @@ export class LandscapeSchedule {
             return true;
         });
         for (const pending of this._pendingNodes) {
-            if (this._quadtree.find(pending.node)!.loaded) {
+            if (this._residency.resolve(pending.node).layer >= 0) {
                 pending.material.pages.forEach((page) => eligible.add(page.key()));
             }
         }
@@ -143,7 +283,7 @@ export class LandscapeSchedule {
     private publishNodes (): boolean {
         for (let i = 0; i < this._pendingNodes.length;) {
             const pending = this._pendingNodes[i];
-            if (!this._quadtree.find(pending.node)!.loaded || pending.material.pages.some((page) => this._vtRenderer.needsComposition(page))) {
+            if (this._residency.resolve(pending.node).layer < 0 || pending.material.pages.some((page) => this._vtRenderer.needsComposition(page))) {
                 ++i;
                 continue;
             }
@@ -156,7 +296,7 @@ export class LandscapeSchedule {
         return true;
     }
 
-    private admitNodes (resources: Resources, mappingCount: number, rootsReady: boolean): Resources {
+    private schedulePendingNodes (resources: Resources, rootsReady: boolean): Resources {
         // Worst-case source lists are fixed within this admission pass; capacity checks are not.
         const pageSources = new Map<NodeKey, NodeAddress[]>();
         const data = this._asset.data();
@@ -176,33 +316,30 @@ export class LandscapeSchedule {
             if (node.ready && sameMapping(node.material, pending.material)) {
                 continue;
             }
-            const candidate = { sources: resources.sources.slice(), pages: resources.pages.slice() };
+            const candidate = { sources: resources.sources.slice(), pages: resources.pages.slice(), mappingCount: resources.mappingCount + (node.ready ? 0 : 1) };
             this.appendResources(candidate, pending);
             if (!this.canPrepare(candidate, pageSources)) {
                 continue;
             }
-            const required = mappingCount + (node.ready ? 0 : 1);
-            if (!this._vtRenderer.pageTable().ensureCapacity(required)) {
+            if (!this._vtRenderer.pageTable().canFit(candidate.mappingCount)) {
                 continue;
             }
             resources = candidate;
-            mappingCount = required;
             pendingKeys.add(request.key());
             this._pendingNodes.push(pending);
         }
         return resources;
     }
 
-    private collectResources (): { resources: Resources; mappingCount: number } {
-        const resources: Resources = { sources: [], pages: [] };
-        let mappingCount = 0;
+    private collectResources (): Resources {
+        const resources: Resources = { sources: [], pages: [], mappingCount: 0 };
         const sourceKeys = new Set<NodeKey>();
         const pageKeys = new Set<NodeKey>();
         this._quadtree.forEachNode((node) => {
             if (!node.ready) {
                 return true;
             }
-            ++mappingCount;
+            ++resources.mappingCount;
             const address = node.geometry.address();
             const source = address.ancestor(Math.max(address.level, this._asset.data().minTileLevel));
             if (!sourceKeys.has(source.key())) {
@@ -221,10 +358,10 @@ export class LandscapeSchedule {
         for (const pending of this._pendingNodes) {
             this.appendResources(resources, pending);
             if (!this._quadtree.find(pending.node)!.ready) {
-                ++mappingCount;
+                ++resources.mappingCount;
             }
         }
-        return { resources, mappingCount };
+        return resources;
     }
 
     private appendResources (resources: Resources, pending: PendingNode): void {
@@ -279,6 +416,41 @@ export class LandscapeSchedule {
             }
         }
         return sources;
+    }
+
+    private morphRangeTooSmall (node: QuadNode): boolean {
+        const address = node.address();
+        const data = this._asset.data();
+        const ranges = this._quadtree.lodMorphRanges();
+        const origin = this._quadtree.worldOrigin();
+        if (address.level === data.maxTileLevel) {
+            return false;
+        }
+        const area = this._quadtree.region(address);
+        const camera = this._quadtree.localCameraPosition();
+        const x = Math.max(Math.abs(area.x - camera.x), Math.abs(area.x + area.size - camera.x));
+        const y = Math.max(Math.abs(node.minY - camera.y), Math.abs(node.maxY - camera.y));
+        const z = Math.max(Math.abs(area.z - camera.z), Math.abs(area.z + area.size - camera.z));
+        const start = ranges[address.level + 1].start;
+        if (x * x + y * y + z * z <= start * start) {
+            return false;
+        }
+        const bounds = this._asset.heightRanges()[address.level][address.z * data.nodesX(address.level) + address.x];
+        const dx = Math.max(area.x - camera.x, camera.x - area.x - area.size, 0);
+        const dy = Math.max(bounds.minY - camera.y, camera.y - bounds.maxY, 0);
+        const dz = Math.max(area.z - camera.z, camera.z - area.z - area.size, 0);
+        const distance = dx * dx + dy * dy + dz * dz;
+        const range = ranges[address.level].end;
+        if (distance > range * range) {
+            return false;
+        }
+        const center = new Vec3(area.x + area.size * 0.5 + origin.x, (bounds.minY + bounds.maxY) * 0.5 + origin.y, area.z + area.size * 0.5 + origin.z);
+        const extent = new Vec3(area.size * 0.5, (bounds.maxY - bounds.minY) * 0.5, area.size * 0.5);
+        const nearby = ranges[Math.min(1, data.maxTileLevel)].end;
+        return this._passes.some((pass) => (pass.includeNearby && distance <= nearby * nearby) || pass.planes.every((plane) => {
+            const radius = extent.x * Math.abs(plane.x) + extent.y * Math.abs(plane.y) + extent.z * Math.abs(plane.z);
+            return center.x * plane.x + center.y * plane.y + center.z * plane.z + radius >= plane.w;
+        }));
     }
 
     private stopLoading (): void {

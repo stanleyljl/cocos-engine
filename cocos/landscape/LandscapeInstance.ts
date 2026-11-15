@@ -2,8 +2,8 @@
 import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { RenderTexture, Texture2D } from '../asset/assets';
 import { AABB, Frustum, intersect } from '../core/geometry';
-import { Color, Vec3 } from '../core/math';
-import { error, log, warn } from '../core/platform/debug';
+import { Color } from '../core/math';
+import { error, warn } from '../core/platform/debug';
 import { director } from '../game/director';
 import { API } from '../gfx';
 import { Camera, CameraProjection, CameraUsage } from '../render-scene/scene/camera';
@@ -17,7 +17,7 @@ import { Node } from '../scene-graph/node';
 import { LandscapeAsset } from './Asset';
 import { LandscapeDebugData } from './Data';
 import { LandscapeQuery, LandscapeQueryStatus } from './Query';
-import { Quadtree } from './Quadtree';
+import { LandscapeSchedule } from './Schedule';
 import { LandscapeRenderer } from './Renderer';
 import * as config from './Config';
 
@@ -59,7 +59,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     private _node: Node | null = null;
     private _scene: RenderScene | null = null;
     private _asset: LandscapeAsset | null = null;
-    private _quadtree: Quadtree | null = null;
+    private _schedule: LandscapeSchedule | null = null;
     private _renderer: LandscapeRenderer | null = null;
     private _query: LandscapeQuery | null = null;
     private _pendingAsset: LandscapeAsset | null = null;
@@ -72,7 +72,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     private _receiveShadow = true;
     private _globalColorStrength = 0.1;
     private _globalColorMap: Texture2D | null = null;
-    private readonly _lodViewPosition = new Vec3();
     private readonly _passes: PassSelection[] = [];
 
     public async onEnable (node: Node, lodQualityScale: number, queryCacheCapacity: number): Promise<boolean> {
@@ -98,9 +97,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 }
                 return false;
             }
-            const quadtree = new Quadtree();
-            quadtree.init(asset, lodQualityScale);
-            const renderer = new LandscapeRenderer(quadtree);
+            const renderer = new LandscapeRenderer();
             this._pendingRenderer = renderer;
             if (!await renderer.init(node, scene, asset) || generation !== this._generation) {
                 if (generation === this._generation) {
@@ -109,13 +106,13 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 }
                 return false;
             }
-            this.applyRendererSettings(renderer);
-            this.logLodRanges(asset, quadtree);
+            const schedule = new LandscapeSchedule(asset, renderer, lodQualityScale);
             const query = new LandscapeQuery(asset.data(), (x, z, complete) => asset.requestQueryTile(x, z, complete), queryCacheCapacity);
+            this.applyRendererSettings(renderer);
             this._node = node;
             this._scene = scene;
             this._asset = asset;
-            this._quadtree = quadtree;
+            this._schedule = schedule;
             this._renderer = renderer;
             this._query = query;
             this._pendingAsset = null;
@@ -140,22 +137,13 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         renderer.setReceiveShadow(this._receiveShadow);
     }
 
-    private logLodRanges (asset: LandscapeAsset, quadtree: Quadtree): void {
-        if (config.LANDSCAPE_DEBUG) {
-            let message = '[Landscape] LOD ranges:';
-            for (let level = 0; level <= asset.data().maxTileLevel; ++level) {
-                const range = quadtree.lodMorphRanges()[level];
-                message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
-            }
-            log(message);
-        }
-    }
-
     public onDisable (): void {
         ++this._generation;
         this._scene?.removeLandscape(this);
         this._pendingRenderer?.destroy();
         this._pendingAsset?.destroy();
+        this._schedule?.destroy();
+        this._schedule = null;
         this._renderer?.destroy();
         this._query?.destroy();
         this._asset?.destroy();
@@ -164,7 +152,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         this._renderer = null;
         this._query = null;
         this._asset = null;
-        this._quadtree = null;
         this._scene = null;
         this._node = null;
         this._passes.length = 0;
@@ -174,7 +161,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         return this._renderer !== null;
     }
     public isReady (): boolean {
-        return this._renderer !== null && this._renderer.isReady();
+        return this._schedule !== null && this._schedule.isReady();
     }
     public setAssetPath (path: string): void {
         this._assetPath = path;
@@ -223,8 +210,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
             return;
         }
         camera.update();
-        this._lodViewPosition.set(camera.position);
-        this._renderer.setViewPos(this._lodViewPosition);
+        this._schedule!.update(camera.position, this._node!.worldPosition);
     }
 
     private pickMainCamera (): Camera | undefined {
@@ -245,12 +231,16 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         if ((camera.visibility & layer) !== layer) {
             return;
         }
-        this._quadtree!.beginUpdate(this._lodViewPosition, this._node!.worldPosition);
+        this._schedule!.prepareRenderData(director.getTotalFrames());
+        this._schedule!.beginPasses();
         this.addPass(camera.frustum, false);
-        const cascades = this.collectShadowPasses(sceneData);
-        this._renderer.preparePasses();
+        const cascades = this.addShadowPasses(sceneData);
+        this.collectPassModels(cascades);
+    }
+
+    private collectPassModels (cascades: number): void {
         for (const pass of this._passes) {
-            this._renderer.collectPassModels(pass.frustum, pass.shadow, pass.models);
+            this._schedule!.collectPassModels(pass.frustum, pass.shadow, pass.models);
         }
         if (cascades >= 2) {
             const covered = new Set<Model>();
@@ -267,14 +257,15 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 });
             }
         }
+        this._schedule!.endPasses();
     }
 
     private addPass (frustum: Readonly<Frustum>, shadow: boolean): void {
         this._passes.push({ frustum, shadow, models: [] });
-        this._quadtree!.addPass(frustum, !shadow);
+        this._schedule!.addPass(frustum, !shadow);
     }
 
-    private collectShadowPasses (sceneData: PipelineSceneData): number {
+    private addShadowPasses (sceneData: PipelineSceneData): number {
         let cascades = 0;
         const shadows = sceneData.shadows;
         if (!this._castShadow || !shadows.enabled || shadows.type !== ShadowType.ShadowMap) {
@@ -388,16 +379,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         }
         const colors = [[1, 0.15, 0.15], [0.15, 0.9, 0.2], [0.2, 0.45, 1], [1, 0.9, 0.1], [1, 0.15, 0.9], [0.1, 0.9, 0.95], [0.65, 0.35, 0.85], [0.95, 0.55, 0.2], [0.9, 0.9, 0.9]].map(([r, g, b]) => new Color(r * 255, g * 255, b * 255, 255));
         const origin = this._node!.worldPosition;
-        this._quadtree!.cull((treeNode) => {
-            const node = treeNode.geometry;
-            const region = this._quadtree!.region(node.address());
-            const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + node.maxY) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (node.maxY - node.minY) * 0.5, region.size * 0.5);
-            if (!intersect.aabbFrustum(bounds, camera.frustum)) {
-                return false;
-            }
-            if (!treeNode.renderable) {
-                return true;
-            }
+        this._schedule!.visitDebugNodes(camera.frustum, origin, (node, region) => {
             const half = region.size * 0.5;
             for (let quadrant = 0; quadrant < 4; ++quadrant) {
                 const x = region.x + (quadrant & 1) * half;
@@ -405,7 +387,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 const box = new AABB(x + half * 0.5, (node.minY + node.maxY) * 0.5, z + half * 0.5, half * 0.5, (node.maxY - node.minY) * 0.5, half * 0.5);
                 geometry.addBoundingBox(box, colors[node.level], true, false, false, true, this._node!.worldMatrix);
             }
-            return true;
         });
     }
 }

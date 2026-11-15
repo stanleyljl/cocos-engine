@@ -665,12 +665,14 @@ export class Landscape extends Component {
         if (!this._runtime.isInitialized()) {
             return;
         }
-        // Snapshot the main-camera LOD position. Pass collection traverses
-        // each current frustum independently.
         this._runtime.update();
     }
 
     private _beforeDraw (): void {
+        // Paused frames skip system ticks but still need terrain streaming before drawing.
+        if (director.isPaused()) {
+            this.update();
+        }
         // Immediate-mode debug boxes must be re-submitted every frame.
         if (this._debugData.showBox) {
             this._runtime?.drawDebugBounds();

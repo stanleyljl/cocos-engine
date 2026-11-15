@@ -119,7 +119,12 @@ export class VTPageAddress {
     }
 }
 
-export class VTGridMapping {
+export interface ReadonlyVTGridMapping {
+    readonly cells: ArrayLike<number>;
+    readonly pages: readonly Readonly<VTPageAddress>[];
+}
+
+export class VTGridMapping implements ReadonlyVTGridMapping {
     public static readonly SIDE_BITS = 4;
     public static readonly SIDE = 1 << VTGridMapping.SIDE_BITS;
     public static readonly CELL_COUNT = VTGridMapping.SIDE * VTGridMapping.SIDE;

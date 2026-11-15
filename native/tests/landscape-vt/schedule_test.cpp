@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 #include "landscape/Asset.h"
 #include "landscape/Quadtree.h"
-#include "landscape/Schedule.h"
 #include "landscape/Residency.h"
 #include "landscape/VTRenderer.h"
 #include "core/assets/Material.h"
@@ -19,7 +18,22 @@
 #include "renderer/gfx-base/GFXPipelineState.h"
 #include "renderer/gfx-base/GFXTexture.h"
 #include "base/Log.h"
+#include "base/StringUtil.h"
+#include <cstdarg>
+#include <cstdio>
+#include "landscape/Renderer.h"
+#include "landscape/DecalRenderer.h"
+#include "landscape/MaterialLibrary.h"
+#include "core/scene-graph/Node.h"
+#include "scene/Model.h"
+#include <optional>
+// Inspect committed state without exposing mutable Quadtree access in the runtime API.
+#define private public
+#include "landscape/Schedule.h"
+#undef private
 #include <algorithm>
+#include <cmath>
+#include "core/geometry/Frustum.h"
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -37,10 +51,12 @@ struct Backend {
     uint32_t uploads{0};
     uint32_t compositions{0};
     uint32_t updates{0};
+    bool preparing{false};
     ccstd::vector<NodeAddress> working;
     ccstd::vector<VTPageAddress> pages;
     std::map<uint64_t, bool> loaded;
     std::map<uint64_t, bool> composed;
+    std::map<uint64_t, uint8_t> draws;
 } backend;
 
 void require(bool condition, const char *message) {
@@ -53,16 +69,72 @@ void require(bool condition, const char *message) {
 std::string addressText(NodeAddress address) {
     return std::to_string(address.level) + ":" + std::to_string(address.x) + ":" + std::to_string(address.z);
 }
+
+std::string targetState(const std::string &state) {
+    const auto begin = state.find(" nodes=") + 7;
+    std::istringstream nodes(state.substr(begin, state.find(" sources=") - begin));
+    std::string node;
+    std::string result;
+    while (std::getline(nodes, node, ',')) {
+        for (uint32_t i = 0; i < 3; ++i) {
+            node.resize(node.rfind(':'));
+        }
+        result += node + ',';
+    }
+    return result;
+}
 } // namespace
 
 namespace cc {
 LogLevel Log::slogLevel = LogLevel::INFO;
-void Log::logMessage(LogType, LogLevel, const char *, ...) {
-    std::abort();
+void Log::logMessage(LogType, LogLevel level, const char *, ...) {
+    require(level >= LogLevel::INFO, "Unexpected terrain warning or error");
+}
+ccstd::string StringUtil::format(const char *format, ...) {
+    char text[256];
+    va_list args;
+    va_start(args, format);
+    const auto length = std::vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    require(length >= 0 && static_cast<size_t>(length) < sizeof(text), "Diagnostic formatting failed");
+    return text;
 }
 } // namespace cc
 
+// This CPU backend never creates JS-backed instance buffers.
+namespace se {
+void RefCounter::decRef() {
+    std::abort();
+}
+void Object::unroot() {
+    std::abort();
+}
+} // namespace se
+
 namespace cc::landscape {
+LandscapeRenderer::LandscapeRenderer()
+: _residency(std::make_unique<LandscapeResidency>()), _vtRenderer(std::make_unique<VTRenderer>()) {}
+LandscapeRenderer::~LandscapeRenderer() = default;
+DecalRenderer::~DecalRenderer() = default;
+MaterialLibrary::~MaterialLibrary() = default;
+void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &) {}
+void LandscapeRenderer::setViewPosition(const Vec3 &) {}
+void LandscapeRenderer::prepareRenderData(uint32_t, gfx::Texture *, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+    require(backend.preparing, "Tick synchronized draw models");
+    for (const auto key : removed) {
+        backend.draws.erase(key);
+    }
+    for (const auto &node : updated) {
+        require(_residency->resolve(node.geometry->address()).layer >= 0, "Renderer received missing geometry");
+        for (const auto page : node.material->pages) {
+            require(!_vtRenderer->needsComposition(page), "Renderer received incomplete material");
+        }
+        backend.draws[node.geometry->address().key()] = node.edgeMask;
+    }
+}
+bool LandscapeRenderer::collectNodeModels(const QuadNode &, const LandscapeRegion &, bool, const geometry::Frustum &, bool, ccstd::vector<const scene::Model *> &) const {
+    return true;
+}
 LandscapeAsset::LandscapeAsset() = default;
 LandscapeAsset::~LandscapeAsset() = default;
 LandscapeResidency::LandscapeResidency() : _capacity(backend.sourceCapacity) {}
@@ -71,6 +143,7 @@ bool LandscapeResidency::canReserve(const ccstd::vector<NodeAddress> &sources) c
     return sources.size() <= backend.sourceCapacity;
 }
 bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
+    require(!backend.preparing, "Rendering changed resource reservations");
     require(canReserve(sources), "Scheduler exceeded source capacity");
     backend.working = sources;
     std::map<uint64_t, bool> next;
@@ -81,9 +154,11 @@ bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
     return true;
 }
 bool LandscapeResidency::loadReserved() {
+    require(!backend.preparing, "Rendering initiated asynchronous loading");
     return true;
 }
 void LandscapeResidency::update(uint32_t budget) {
+    require(backend.preparing, "Tick uploaded GPU resources");
     ++backend.updates;
     budget = std::min(budget, backend.uploads);
     for (const auto address : backend.working) {
@@ -104,7 +179,12 @@ LandscapeResidency::Tile LandscapeResidency::resolve(NodeAddress node) const {
 }
 VTPageTable::VTPageTable() = default;
 VTPageTable::~VTPageTable() = default;
+bool VTPageTable::canFit(uint32_t) const {
+    require(!backend.preparing, "Rendering planned page table capacity");
+    return true;
+}
 bool VTPageTable::ensureCapacity(uint32_t) {
+    require(backend.preparing, "Tick allocated GPU resources");
     return true;
 }
 VTPageComposer::~VTPageComposer() = default;
@@ -145,6 +225,7 @@ VTPageSources VTRenderer::selectSources(VTPageAddress, bool, bool) const {
     return result;
 }
 uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t budget) {
+    require(backend.preparing, "Tick recorded VT composition");
     if (residency.resolve({2, 0, 0}).layer < 0) {
         return 0;
     }
@@ -184,7 +265,144 @@ std::string readParityBlock(const char *name) {
     return {};
 }
 
+void testCameraRotation() {
+    LandscapeAsset asset;
+    auto &data = const_cast<LandscapeData &>(asset.data());
+    data.maxTileLevel = 3;
+    data.sectorSize = 8;
+    data.sectorsX = 3;
+    data.sectorsZ = 3;
+    data.heightScale = 1;
+    auto &ranges = const_cast<ccstd::vector<ccstd::vector<HeightRange>> &>(asset.heightRanges());
+    ranges.resize(data.maxTileLevel + 1);
+    for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
+        ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), {0, 1});
+    }
+    LandscapeRenderer renderer;
+    LandscapeSchedule schedule(asset, renderer, 1.0F);
+    auto &tree = *schedule._quadtree;
+    const auto mapping = [](NodeAddress address) {
+        VTGridMapping result;
+        result.pages = {{address.level, address.x, address.z}};
+        return result;
+    };
+    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < data.sectorsX; ++x) {
+            const NodeAddress address{data.maxTileLevel, x, z};
+            require(tree.publish(address, mapping(address)), "Initialize synthetic sector resources");
+        }
+    }
+    const auto targetKeys = [](const Quadtree &value) {
+        ccstd::unordered_set<uint64_t> result;
+        value.forEachNode([&](const Quadtree::Node &node) {
+            if (!node.refined) {
+                result.insert(node.geometry.address().key());
+            }
+            return node.refined;
+        });
+        return result;
+    };
+    const auto renderState = [&]() {
+        std::map<uint64_t, uint8_t> result;
+        tree.forEachRenderable([&](const Quadtree::Node &node) {
+            result.emplace(node.geometry.address().key(), node.edgeMask);
+        });
+        return result;
+    };
+    const cc::Vec3 camera{7.5F, 0.5F, 7.5F};
+    const auto update = [&](uint32_t direction, bool shadow) {
+        cc::geometry::Frustum frustum;
+        for (auto *plane : frustum.planes) {
+            plane->n.set(0, 1, 0);
+            plane->d = -1000;
+        }
+        // Rotate a 90-degree horizontal view around the same camera position.
+        const float angle = static_cast<float>(direction) * 0.785398163F;
+        for (uint32_t side = 0; side < 2; ++side) {
+            const float normal = angle + (side == 0 ? -0.785398163F : 0.785398163F);
+            auto &plane = *frustum.planes[side];
+            plane.n.set(std::cos(normal), 0, std::sin(normal));
+            plane.d = camera.x * plane.n.x + camera.z * plane.n.z;
+        }
+        tree.updateTarget(camera, cc::Vec3::ZERO);
+        require(tree.selectRenderables(), "Select draws after updating the distance target");
+        const auto requests = tree.requests();
+        const bool selectionChanged = tree.renderSelectionChanged();
+        const auto changed = tree.changedNodes();
+        schedule.beginPasses();
+        schedule.addPass(frustum, true);
+        if (shadow) {
+            schedule.addPass(frustum, false);
+        }
+        schedule.endPasses();
+        const auto after = tree.requests();
+        require(requests.size() == after.size() && std::equal(requests.begin(), requests.end(), after.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Pass collection changed request order");
+        require(tree.renderSelectionChanged() == selectionChanged && tree.changedNodes() == changed, "Pass collection changed committed draws or morph edges");
+    };
+    update(0, false);
+    // Repeat with no fine data, incomplete siblings, and fully loaded detail.
+    for (uint32_t phase = 0; phase < 3; ++phase) {
+        if (phase == 1) {
+            auto &sector = *tree.find({data.maxTileLevel, 0, 0});
+            for (uint32_t q = 0; q < 3; ++q) {
+                const auto address = sector._children[q].geometry.address();
+                require(tree.publish(address, mapping(address)), "Rotation setup could not publish partial siblings");
+            }
+            require(tree.selectRenderables(), "Select partially loaded draws");
+        } else if (phase == 2) {
+            bool complete = false;
+            for (uint32_t step = 0; step < 4096 && !complete; ++step) {
+                complete = true;
+                for (const auto address : tree.requests()) {
+                    if (!tree.find(address)->ready) {
+                        require(tree.publish(address, mapping(address)), "Publish ready target nodes");
+                        complete = false;
+                    }
+                }
+                require(tree.selectRenderables(), "Select loaded draws");
+            }
+            require(complete, "Target loading did not converge");
+        }
+        const auto target = targetKeys(tree);
+        const auto draws = renderState();
+        ccstd::unordered_map<uint64_t, const Quadtree::Node *> nodes;
+        ccstd::unordered_set<uint64_t> ready;
+        tree.forEachNode([&](const Quadtree::Node &node) {
+            const auto key = node.geometry.address().key();
+            nodes.emplace(key, &node);
+            if (node.ready) {
+                ready.insert(key);
+            }
+            return true;
+        });
+        tree.clearChangedNodes();
+        for (uint32_t direction = 0; direction <= 8; ++direction) {
+            update(direction, direction % 2 != 0);
+            require(targetKeys(tree) == target, "Camera rotation or shadow pass changed the distance target");
+            require(renderState() == draws, "Camera rotation coarsened ready terrain");
+            require(tree.changedNodes().empty(), "Camera rotation changed draw materials or morph edges");
+            for (const auto &entry : nodes) {
+                const auto *node = tree.find(NodeAddress::fromKey(entry.first));
+                require(node == entry.second, "Camera rotation retired an existing node or pending request");
+                require(node->ready == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
+                if (node->ready) {
+                    require(node->material.pages.size() == 1 && node->material.pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
+                }
+            }
+        }
+    }
+    std::cout << "PASS: full camera rotation, shadow changes, pending siblings and ready detail retention\n";
+}
+
 int main(int argc, char **argv) {
+    std::vector<std::string> expectedStates;
+    std::istringstream baseline(readParityBlock("PARITY_EXPECTED"));
+    std::string expected;
+    while (std::getline(baseline, expected)) {
+        if (expected.find("state ") == 0) {
+            expectedStates.push_back(expected);
+        }
+    }
     std::istringstream input(readParityBlock("PARITY_CASES"));
     std::string line;
     while (std::getline(input, line) && (line.empty() || line[0] == '#')) {}
@@ -204,17 +422,18 @@ int main(int argc, char **argv) {
     for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
         ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), {0, 1});
     }
-    Quadtree tree;
-    tree.init(asset);
-    LandscapeResidency residency;
-    VTRenderer pages;
+    LandscapeRenderer renderer;
+    auto &residency = renderer.residency();
+    auto &pages = renderer.vtRenderer();
     const bool triplanar = argc == 2 && std::string(argv[1]) == "--triplanar";
     pages.setTriplanarEnabled(triplanar);
-    LandscapeSchedule schedule(asset, residency, pages, tree);
+    LandscapeSchedule schedule(asset, renderer, 1.0F);
+    const auto &tree = *schedule._quadtree;
     std::ostringstream trace;
     trace << line << '\n';
     uint32_t frame = 0;
     bool hadCoverage = false;
+    std::string settledState;
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') {
             continue;
@@ -232,22 +451,38 @@ int main(int argc, char **argv) {
         cc::Vec3 camera;
         bool repeat;
         row >> camera.x >> camera.y >> camera.z >> backend.uploads >> backend.compositions >> repeat;
-        tree.clearChangedNodes();
-        tree.beginUpdate(camera, cc::Vec3::ZERO);
-        tree.updateTarget();
-        schedule.prepareResources(++frame);
+        std::map<uint64_t, uint8_t> committed;
+        tree.forEachRenderable([&](const Quadtree::Node &node) {
+            committed.emplace(node.geometry.address().key(), node.edgeMask);
+        });
+        schedule.update(camera, cc::Vec3::ZERO);
+        std::map<uint64_t, uint8_t> afterTick;
+        tree.forEachRenderable([&](const Quadtree::Node &node) {
+            afterTick.emplace(node.geometry.address().key(), node.edgeMask);
+        });
+        require(afterTick == committed, "Tick changed committed draws or morph edges");
+        backend.preparing = true;
+        schedule.prepareRenderData(++frame);
         if (repeat) {
             const auto updates = backend.updates;
-            schedule.prepareResources(frame);
+            schedule.prepareRenderData(frame);
             require(updates == backend.updates, "Duplicate frame performed resource work");
         }
-        const bool coverage = tree.selectRenderables();
+        schedule.beginPasses();
+        schedule.endPasses();
+        const bool coverage = tree.sectorRootsReady();
+        std::map<uint64_t, uint8_t> selected;
+        tree.forEachRenderable([&](const Quadtree::Node &node) {
+            selected.emplace(node.geometry.address().key(), node.edgeMask);
+        });
+        require(backend.draws == selected, "Renderer draws or morph edges differ from committed state");
+        backend.preparing = false;
         require(!hadCoverage || coverage, "Pending resources removed committed coverage");
         hadCoverage |= coverage;
         std::vector<std::string> nodes;
         tree.forEachNode([&](const Quadtree::Node &node) {
             if (node.geometry.level <= data.maxTileLevel) {
-                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(node.loaded) + ":" + std::to_string(node.ready) + ":" + std::to_string(node.renderable));
+                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(residency.resolve(node.geometry.address()).layer >= 0) + ":" + std::to_string(node.ready) + ":" + std::to_string(node.renderable));
             }
             if (node.ready) {
                 require(residency.resolve(node.geometry.address()).layer >= 0, "Published geometry lost its source");
@@ -255,27 +490,30 @@ int main(int argc, char **argv) {
             return true;
         });
         std::sort(nodes.begin(), nodes.end());
-        trace << "state " << coverage << ' ' << schedule.isSettled() << " nodes=";
+        std::ostringstream state;
+        state << "state " << coverage << ' ' << schedule.isRenderStateStable() << " nodes=";
         for (const auto &node : nodes) {
-            trace << node << ',';
+            state << node << ',';
         }
-        trace << " sources=";
+        state << " sources=";
         for (const auto address : backend.working) {
-            trace << addressText(address) << ':' << backend.loaded[address.key()] << ',';
+            state << addressText(address) << ':' << backend.loaded[address.key()] << ',';
         }
-        trace << " pages=";
+        state << " pages=";
         for (const auto page : backend.pages) {
-            trace << addressText({page.level, page.x, page.z}) << ':' << backend.composed[page.key()] << ',';
+            state << addressText({page.level, page.x, page.z}) << ':' << backend.composed[page.key()] << ',';
         }
-        trace << '\n';
+        settledState = state.str() + '\n';
+        require(targetState(settledState) == targetState(expectedStates.at(frame - 1)), "Tick/render split changed target topology");
+        trace << settledState;
     }
-    require(hadCoverage && schedule.isSettled(), "Scenario never reached complete stable coverage");
+    require(hadCoverage && schedule.isRenderStateStable(), "Scenario never reached complete stable coverage");
     if (argc == 2 && std::string(argv[1]) == "--dump-parity") {
         std::cout << trace.str();
         return 0;
     }
     // Triplanar changes composition inputs, not the distance-based page allocation.
-    const auto baseline = readParityBlock("PARITY_EXPECTED");
-    require(trace.str() == baseline, "Native scheduling differs from the shared TS/C++ baseline; inspect --dump-parity");
+    require(settledState == expectedStates.back() + '\n', "Native settled scheduling differs from the shared TS/C++ baseline; inspect --dump-parity");
+    testCameraRotation();
     std::cout << "PASS: shared scheduling, delayed resources, cancellation, material refresh and repeated frames\n";
 }
