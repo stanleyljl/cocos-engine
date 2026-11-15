@@ -35,8 +35,7 @@
 namespace cc::landscape {
 class LandscapeAsset;
 
-// Owns the target hierarchy, published node mappings and balanced render selection.
-// Schedule supplies completed resources and consumes selection changes.
+// Owns the target hierarchy, published mappings and balanced render selection.
 class Quadtree {
 public:
     struct MorphRange {
@@ -47,82 +46,78 @@ public:
         QuadNode geometry;
         VTGridMapping material;
         std::unique_ptr<Node[]> _children;
-        bool refined{false}; // Target subdivision; committed children remain until render selection replaces them.
-        bool ready{false}; // Complete mapping published; resource-owning ancestors are ready.
-        bool renderable{false}; // Selected in the complete, balanced render set.
-        uint8_t edgeMask{0};// Valid when renderable; Left, right, bottom, top: two bits each, 00 same/boundary, 01 coarser, 10 finer.
+        bool refined{false}; // Target subdivision; children survive until render selection.
+        bool ready{false};
+        bool renderable{false};
+        uint8_t edgeMask{0}; // Left/right/bottom/top: 00 same or boundary, 01 coarser, 10 finer; valid when renderable.
     };
 
-    // Landscape validates LOD quality and loads the asset before initialization.
     void init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
-    // Stage 1: update only the distance target. Selection follows resource preparation.
+
+    // Target and render state.
     void updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
-    // Missing nodes whose parents are ready, then displayed/target-leaf refreshes.
-    // Each group is ordered by ascending LOD, with node keys breaking ties.
+    // Missing coverage before refreshes; each group sorts by LOD, then node key.
     ccstd::vector<NodeAddress> requests() const;
-    // Called only after the complete source/mapping reservation is drawable;
-    // publication commits the mapping and marks the node ready.
+    // Publish only after the source and complete mapping are ready.
     bool publish(NodeAddress address, VTGridMapping material);
-    // Stage 3: select a complete, balanced render set and report draw changes.
     bool selectRenderables();
 
-    // Queries and render-change notifications.
+    // State and changes.
     bool viewChanged() const { return _viewChanged; }
-    bool renderSelectionChanged() const { return _renderSelectionChanged; }
     bool sectorRootsReady() const;
-    const Vec3 &localCameraPosition() const { return _localCameraPosition; }
-    const Vec3 &worldOrigin() const { return _worldOrigin; }
-    const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
-    // Includes management levels above sector roots, unlike source-tile sizing.
-    LandscapeRegion region(NodeAddress address) const;
-    const Node *find(NodeAddress address) const;
-    bool isTarget(NodeAddress address) const;
-    const Node *findRenderable(NodeAddress address) const;
+    // Retained until the next selection, independently of changedNodes.
+    bool renderSelectionChanged() const { return _renderSelectionChanged; }
     const ccstd::unordered_set<uint64_t> &changedNodes() const { return _changedNodes; }
     void clearChangedNodes() { _changedNodes.clear(); }
 
-    // Traversal helpers. Boolean callbacks return false to skip a node's descendants.
+    // Node queries.
+    const Node *find(NodeAddress address) const;
+    const Node *findRenderable(NodeAddress address) const;
+    bool isTarget(NodeAddress address) const;
+    // Includes management levels above sector roots.
+    LandscapeRegion region(NodeAddress address) const;
+    const Vec3 &localCameraPosition() const { return _localCameraPosition; }
+    const Vec3 &worldOrigin() const { return _worldOrigin; }
+    const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
+
+    // Traversal: boolean callbacks return false to prune descendants.
     void forEachNode(const std::function<bool(const Node &)> &visit) const;
-    void cull(const std::function<bool(const Node &)> &visit) const;
     void forEachRenderable(const std::function<void(const Node &)> &visit) const;
+    void cull(const std::function<bool(const Node &)> &visit) const;
 
 private:
-    // Target hierarchy and traversal.
-    Node *findNode(NodeAddress address);
+    // Hierarchy.
     void initLodMorphRanges(float lodQualityScale);
     void buildRoot(Node &node, NodeAddress address);
     void updateTarget(Node &node);
     static NodeAddress child(NodeAddress address, uint32_t quadrant);
-    void visitNodes(const Node &node, const std::function<bool(const Node &)> &visit) const;
-    void visitNodes(Node &node, const std::function<bool(Node &)> &visit) const;
-
-    // Bounds include management levels above sector roots.
+    Node *findNode(NodeAddress address);
     bool contains(NodeAddress address) const;
+
+    // Bounds and morph edges.
     QuadNode geometry(NodeAddress address) const;
     HeightRange heightRange(NodeAddress address) const;
     float distanceSquared(NodeAddress address) const;
-    // Morph helpers; edge sampling requires a balanced render set.
     NodeAddress renderableAt(uint32_t x, uint32_t z) const;
     uint8_t computeEdgeMask(NodeAddress address) const;
 
-    // Immutable metadata copied from the validated asset.
+    void visitNodes(const Node &node, const std::function<bool(const Node &)> &visit) const;
+    void visitNodes(Node &node, const std::function<bool(Node &)> &visit) const;
+
+    // Immutable asset metadata.
     LandscapeData _data;
     ccstd::vector<ccstd::vector<HeightRange>> _heightRanges;
-    std::unique_ptr<Node> _root;
-    // Snapshot of selected addresses, updated only by selectRenderables. IDs survive
-    // target deletion for retirement notifications; edge values remain on the nodes.
-    ccstd::unordered_set<uint64_t> _renderNodeKeys;
-    // Retained until the next selection so Schedule can rescan after draw syncing.
-    bool _renderSelectionChanged{false};
-    // Reuse the selected cut until target or readiness changes.
-    bool _needsRenderSelection{true};
-    // Schedule consumes these keys, including mapping-only updates and removals.
-    ccstd::unordered_set<uint64_t> _changedNodes;
-    // Fixed LOD transition ranges derived during initialization.
     ccstd::vector<MorphRange> _lodMorphRanges;
 
+    std::unique_ptr<Node> _root;
     Vec3 _localCameraPosition;
     Vec3 _worldOrigin;
     bool _viewChanged{true};
+
+    // Previous selection survives target changes until draws are synchronized.
+    ccstd::unordered_set<uint64_t> _renderNodeKeys;
+    bool _needsRenderSelection{true};
+    bool _renderSelectionChanged{false};
+    ccstd::unordered_set<uint64_t> _changedNodes;
 };
 } // namespace cc::landscape

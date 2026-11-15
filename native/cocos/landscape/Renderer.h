@@ -75,72 +75,80 @@ class LandscapeRenderer {
 public:
     LandscapeRenderer();
     ~LandscapeRenderer();
-
     // Runtime methods require successful initialization of all owned modules.
     bool init(Node *node, scene::RenderScene *scene, LandscapeAsset *asset);
     void destroy();
-    LandscapeResidency &residency() const { return *_residency; }
-    VTRenderer &vtRenderer() const { return *_vtRenderer; }
-    void setLodMorphRanges(const ccstd::vector<Vec4> &ranges);
 
-    uint32_t addDecal(float x, float z, float size, uint32_t layer);
-    bool removeDecal(uint32_t id);
-    void setDebugData(const LandscapeDebugData &data);
+    // Render data and pass collection.
     void prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
     bool collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
-    void onGlobalPipelineStateChanged();
+
+    // Runtime settings.
+    void setViewPosition(const Vec3 &position);
+    void setLodMorphRanges(const ccstd::vector<Vec4> &ranges);
+    void setDebugData(const LandscapeDebugData &data);
     void setHoleMode(uint32_t mode);
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
-    void setGlobalColorStrength(float strength);
     void setGlobalColorMap(Texture2D *texture);
-    void setViewPosition(const Vec3 &position);
+    void setGlobalColorStrength(float strength);
+    void onGlobalPipelineStateChanged();
+
+    // Runtime decals.
+    uint32_t addDecal(float x, float z, float size, uint32_t layer);
+    bool removeDecal(uint32_t id);
+
+    LandscapeResidency &residency() const { return *_residency; }
+    VTRenderer &vtRenderer() const { return *_vtRenderer; }
     TextureBase *getVTAtlas() const;
 
 private:
     struct GridDraw {
-        // GPU ownership only. Geometry/material decisions live in Quadtree.
-        int mapping{-1}; // VTPageTable slot for this node's 16x16 cell-to-page mapping; -1 means unallocated.
+        // GPU state; geometry and mapping decisions belong to Quadtree.
+        int mapping{-1}; // VTPageTable slot; -1 means unallocated.
         IntrusivePtr<scene::Model> model;
         LandscapeGridParams params; // Uploaded instance data, restored after material variants change.
     };
 
-    void setUnlit(bool enabled);
+    // Terrain models.
     void syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
-    void bindRuntimeTextures();
-    void recycleModel(GridDraw &draw);
-    IntrusivePtr<scene::Model> createModel();
-    void updateMaterialProperties();
-    void refreshTerrainMaterials();
-    void updateMorphCameraProperty();
     LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask);
-    std::array<Material *, 4> surfaceMaterials() const;
     void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
+    IntrusivePtr<scene::Model> createModel();
+    void recycleModel(GridDraw &draw);
+
+    // Materials and bindings.
+    std::array<Material *, 4> surfaceMaterials() const;
+    void bindRuntimeTextures();
+    void updateMaterialProperties();
+    void updateMorphCameraProperty();
+    void refreshTerrainMaterials();
+    void setUnlit(bool enabled);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
-    IntrusivePtr<RenderingSubMesh> _mesh;
-    IntrusivePtr<Material> _materialSolid;
-    IntrusivePtr<Material> _materialWire;
-    std::unique_ptr<DecalRenderer> _decals;
     IntrusivePtr<LandscapeAsset> _asset;
+    LandscapeData _data;
+
+    std::unique_ptr<DecalRenderer> _decals;
     std::unique_ptr<LandscapeResidency> _residency;
     std::unique_ptr<MaterialLibrary> _materialLibrary;
     std::unique_ptr<VTRenderer> _vtRenderer;
 
-    ccstd::vector<IntrusivePtr<scene::Model>> _pool;
-    ccstd::unordered_map<uint64_t, GridDraw> _draws;
+    IntrusivePtr<RenderingSubMesh> _mesh;
+    IntrusivePtr<Material> _materialSolid;
+    IntrusivePtr<Material> _materialWire;
 
-    // Stored as TypedArray to avoid both per-update ArrayBuffers and implicit
-    // Float32Array-to-TypedArray copies when setting instance attributes.
+    ccstd::unordered_map<uint64_t, GridDraw> _draws;
+    ccstd::vector<IntrusivePtr<scene::Model>> _pool;
+    // TypedArray avoids allocation and conversion when setting instance attributes.
     TypedArray _instanceAttributeScratch;
 
+    Vec3 _viewPosition;
     LandscapeDebugData _debugData;
-    LandscapeData _data;
     uint32_t _holeMode{0};
     bool _heightUnorm{false};
-    Vec3 _viewPosition;
     bool _castShadow{true};
     bool _receiveShadow{true};
     bool _materialsDirty{false};

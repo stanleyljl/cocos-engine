@@ -80,9 +80,9 @@ void recordPagePass(gfx::CommandBuffer &commands, gfx::InputAssembler *inputAsse
 } // namespace
 
 VTPageComposer::VTPageComposer() = default;
+
 VTPageComposer::~VTPageComposer() {
-    // GPU objects borrow mesh/material resources. Release those objects first;
-    // ordinary members then release themselves. Fallback creates a new composer.
+    // Release GPU objects before the mesh/material resources they borrow.
     _composePipelines = {};
     _initialPass = nullptr;
     _inputAssembler = nullptr;
@@ -147,11 +147,92 @@ void VTPageComposer::uploadInputs() {
     }
 }
 
-void VTPageComposer::bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
-    _composeMaterial->setPropertyGFXTexture(name, texture);
-    for (const auto &pass : *_composeMaterial->getPasses()) {
-        pass->bindSampler(scene::Pass::getBindingFromHandle(pass->getHandle(name)), sampler);
+void VTPageComposer::record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t instanceCount, bool initialize) {
+    // Updating the vertex buffer is ordered after the preceding page's draws.
+    const auto *barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
+        {gfx::AccessFlagBit::VERTEX_BUFFER, gfx::AccessFlagBit::TRANSFER_WRITE});
+    commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
+    commands.updateBuffer(_instanceBuffer, instances, instanceCount * sizeof(VTPageInstance));
+    barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
+        {gfx::AccessFlagBit::TRANSFER_WRITE, gfx::AccessFlagBit::VERTEX_BUFFER});
+    commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
+    const auto variant = static_cast<uint32_t>(instances[0].pageInfo.z);
+    recordPagePass(commands, _inputAssembler, renderPass(initialize), (*_composeMaterial->getPasses())[variant], _composePipelines[variant], _compositionTarget->getWindow()->getFramebuffer(), size(), instanceCount);
+}
+
+void VTPageComposer::setGlobalColorMap(Texture2D *texture) {
+    _globalColorMap = texture;
+    // Rebinding the same asset also supports replacement of its GPU texture.
+    applyGlobalColorMap();
+}
+
+bool VTPageComposer::setGlobalColorStrength(float strength) {
+    const float clamped = std::clamp(strength, 0.0F, 1.0F);
+    if (_globalColorStrength == clamped) {
+        return false;
     }
+    _globalColorStrength = clamped;
+    const float previous = _effectiveGlobalColorStrength;
+    applyGlobalColorMap();
+    return previous != _effectiveGlobalColorStrength;
+}
+
+bool VTPageComposer::setHeightBlendEnabled(bool enabled) {
+    auto *pass = _composeMaterial->getPasses()->front().get();
+    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("heightBlendParams")));
+    const float strength = enabled ? 1.0F : 0.0F;
+    if (params.x == strength) {
+        return false;
+    }
+    // Keep the effect's scale/sharpness when toggling the global blend mode.
+    params.x = strength;
+    _composeMaterial->setPropertyVec4("heightBlendParams", params);
+    return true;
+}
+
+uint32_t VTPageComposer::size() const {
+    return _compositionTarget->getWidth();
+}
+
+gfx::RenderPass *VTPageComposer::renderPass(bool initialize) const {
+    return initialize ? _initialPass.get() : _compositionTarget->getWindow()->getFramebuffer()->getRenderPass();
+}
+
+bool VTPageComposer::initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed) {
+    if (device->getCapabilities().maxColorRenderTargets < 2 ||
+        device->getCapabilities().maxTextureSize < atlasSize) {
+        return false;
+    }
+    gfx::RenderPassInfo passInfo;
+    gfx::ColorAttachment color;
+    color.format = gfx::Format::RGBA8;
+    color.loadOp = gfx::LoadOp::LOAD;
+    color.storeOp = gfx::StoreOp::STORE;
+    gfx::GeneralBarrierInfo barrier;
+    barrier.prevAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+    barrier.nextAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+    if (compressed) {
+        barrier.prevAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
+        barrier.nextAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
+    }
+    color.barrier = device->getGeneralBarrier(barrier);
+    passInfo.colorAttachments = {color, color};
+    // No depth attachment: page rectangles never overlap.
+    IRenderTextureCreateInfo info;
+    info.name = "landscape-vt-atlas";
+    info.width = (compressed ? config::VT_PAGE_RES : atlasSize);
+    info.height = (compressed ? config::VT_PAGE_RES : atlasSize);
+    info.passInfo = passInfo;
+    info.colorMipLevels = config::VT_MIP_LEVELS;
+    _compositionTarget = ccnew RenderTexture();
+    _compositionTarget->initialize(info);
+    const auto *window = _compositionTarget->getWindow();
+    if (!window || !window->getFramebuffer()) {
+        return false;
+    }
+    const auto *framebuffer = window->getFramebuffer();
+    const auto &textures = framebuffer->getColorTextures();
+    return textures.size() == 2 && textures[0] && textures[1] && framebuffer->getRenderPass();
 }
 
 bool VTPageComposer::initMaterial(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize) {
@@ -224,102 +305,6 @@ bool VTPageComposer::initSourceTable(LandscapeResidency &residency, gfx::Device 
     return true;
 }
 
-void VTPageComposer::setGlobalColorMap(Texture2D *texture) {
-    _globalColorMap = texture;
-    // Rebinding the same asset also supports replacement of its GPU texture.
-    applyGlobalColorMap();
-}
-
-void VTPageComposer::applyGlobalColorMap() {
-    auto *texture = _globalColorMap ? _globalColorMap->getGFXTexture() : nullptr;
-    _effectiveGlobalColorStrength = texture ? _globalColorStrength : 0.0F;
-    bindTexture("globalColorMap", texture ? texture : _fallbackGlobalColorMap.get(), _globalColorSampler);
-    _composeMaterial->setPropertyVec4("globalColorParams", Vec4{_inverseWidth, _inverseDepth, _effectiveGlobalColorStrength, 0});
-}
-
-bool VTPageComposer::setHeightBlendEnabled(bool enabled) {
-    auto *pass = _composeMaterial->getPasses()->front().get();
-    auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("heightBlendParams")));
-    const float strength = enabled ? 1.0F : 0.0F;
-    if (params.x == strength) {
-        return false;
-    }
-    // Keep the effect's scale/sharpness when toggling the global blend mode.
-    params.x = strength;
-    _composeMaterial->setPropertyVec4("heightBlendParams", params);
-    // Recomposition reserves its source tiles through the normal scheduling path.
-    return true;
-}
-
-bool VTPageComposer::setGlobalColorStrength(float strength) {
-    const float clamped = std::clamp(strength, 0.0F, 1.0F);
-    if (_globalColorStrength == clamped) {
-        return false;
-    }
-    _globalColorStrength = clamped;
-    const float previous = _effectiveGlobalColorStrength;
-    applyGlobalColorMap();
-    return previous != _effectiveGlobalColorStrength;
-}
-
-void VTPageComposer::record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t instanceCount, bool initialize) {
-    // Updating the vertex buffer is ordered after the preceding page's draws.
-    const auto *barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
-        {gfx::AccessFlagBit::VERTEX_BUFFER, gfx::AccessFlagBit::TRANSFER_WRITE});
-    commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-    commands.updateBuffer(_instanceBuffer, instances, instanceCount * sizeof(VTPageInstance));
-    barrier = Root::getInstance()->getDevice()->getGeneralBarrier(
-        {gfx::AccessFlagBit::TRANSFER_WRITE, gfx::AccessFlagBit::VERTEX_BUFFER});
-    commands.pipelineBarrier(barrier, nullptr, nullptr, 0, nullptr, nullptr, 0);
-    const auto variant = static_cast<uint32_t>(instances[0].pageInfo.z);
-    recordPagePass(commands, _inputAssembler, renderPass(initialize), (*_composeMaterial->getPasses())[variant], _composePipelines[variant], _compositionTarget->getWindow()->getFramebuffer(), size(), instanceCount);
-}
-
-bool VTPageComposer::initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed) {
-    if (device->getCapabilities().maxColorRenderTargets < 2 ||
-        device->getCapabilities().maxTextureSize < atlasSize) {
-        return false;
-    }
-    gfx::RenderPassInfo passInfo;
-    gfx::ColorAttachment color;
-    color.format = gfx::Format::RGBA8;
-    color.loadOp = gfx::LoadOp::LOAD;
-    color.storeOp = gfx::StoreOp::STORE;
-    gfx::GeneralBarrierInfo barrier;
-    barrier.prevAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    barrier.nextAccesses = gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    if (compressed) {
-        barrier.prevAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
-        barrier.nextAccesses |= gfx::AccessFlagBit::COMPUTE_SHADER_READ_TEXTURE;
-    }
-    color.barrier = device->getGeneralBarrier(barrier);
-    passInfo.colorAttachments = {color, color};
-    // No depth attachment: page rectangles never overlap.
-    IRenderTextureCreateInfo info;
-    info.name = "landscape-vt-atlas";
-    info.width = (compressed ? config::VT_PAGE_RES : atlasSize);
-    info.height = (compressed ? config::VT_PAGE_RES : atlasSize);
-    info.passInfo = passInfo;
-    info.colorMipLevels = config::VT_MIP_LEVELS;
-    _compositionTarget = ccnew RenderTexture();
-    _compositionTarget->initialize(info);
-    const auto *window = _compositionTarget->getWindow();
-    if (!window || !window->getFramebuffer()) {
-        return false;
-    }
-    const auto *framebuffer = window->getFramebuffer();
-    const auto &textures = framebuffer->getColorTextures();
-    return textures.size() == 2 && textures[0] && textures[1] && framebuffer->getRenderPass();
-}
-
-uint32_t VTPageComposer::size() const {
-    return _compositionTarget->getWidth();
-}
-
-gfx::RenderPass *VTPageComposer::renderPass(bool initialize) const {
-    return initialize ? _initialPass.get() : _compositionTarget->getWindow()->getFramebuffer()->getRenderPass();
-}
-
 bool VTPageComposer::initDrawResources(gfx::Device *device) {
     constexpr uint32_t STRIDE = sizeof(VTPageInstance);
     _instanceBuffer = device->createBuffer({gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
@@ -360,7 +345,22 @@ bool VTPageComposer::initRenderPass(gfx::Device *device, bool compressed) {
     return _initialPass != nullptr;
 }
 
+void VTPageComposer::bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler) {
+    _composeMaterial->setPropertyGFXTexture(name, texture);
+    for (const auto &pass : *_composeMaterial->getPasses()) {
+        pass->bindSampler(scene::Pass::getBindingFromHandle(pass->getHandle(name)), sampler);
+    }
+}
+
+void VTPageComposer::applyGlobalColorMap() {
+    auto *texture = _globalColorMap ? _globalColorMap->getGFXTexture() : nullptr;
+    _effectiveGlobalColorStrength = texture ? _globalColorStrength : 0.0F;
+    bindTexture("globalColorMap", texture ? texture : _fallbackGlobalColorMap.get(), _globalColorSampler);
+    _composeMaterial->setPropertyVec4("globalColorParams", Vec4{_inverseWidth, _inverseDepth, _effectiveGlobalColorStrength, 0});
+}
+
 VTPageMipGenerator::VTPageMipGenerator() = default;
+
 VTPageMipGenerator::~VTPageMipGenerator() {
     for (auto &mip : _mipPasses) {
         mip.pipelineState = nullptr;
@@ -437,14 +437,20 @@ void VTPageMipGenerator::record(gfx::CommandBuffer &commands, const VTPageCompos
 }
 
 VTPageCompressor::VTPageCompressor() = default;
-Texture2D *VTPageCompressor::atlas() const {
-    return _atlas[0].get();
-}
-gfx::Texture *VTPageCompressor::albedo() const {
-    return _atlas[0]->getGFXTexture();
-}
-gfx::Texture *VTPageCompressor::normalRoughness() const {
-    return _atlas[1]->getGFXTexture();
+
+VTPageCompressor::~VTPageCompressor() {
+    _pipeline = nullptr;
+    _mips = {};
+    _pipelineLayout = nullptr;
+    _layout = nullptr;
+    _shader = nullptr;
+    _blocks = nullptr;
+    for (auto &texture : _atlas) {
+        if (texture) {
+            texture->destroy();
+        }
+        texture = nullptr;
+    }
 }
 
 bool VTPageCompressor::supported() {
@@ -541,18 +547,9 @@ bool VTPageCompressor::init(gfx::Device *device, RenderTexture &composition, uin
     return _pipeline != nullptr;
 }
 
-void VTPageCompressor::transition(gfx::CommandBuffer &commands, gfx::AccessFlags previous, gfx::AccessFlags next, bool discardContents) {
-    auto *device = Root::getInstance()->getDevice();
-    gfx::TextureBarrierInfo info;
-    info.prevAccesses = previous;
-    info.nextAccesses = next;
-    info.discardContents = discardContents;
-    info.range.levelCount = config::VT_MIP_LEVELS;
-    info.range.numSlices = 1;
-    const gfx::TextureBarrier *barriers[] = {device->getTextureBarrier(info), device->getTextureBarrier(info)};
-    // Texture2D exposes a sampling view; transfers target its underlying image.
-    const gfx::Texture *textures[] = {albedo()->getViewInfo().texture, normalRoughness()->getViewInfo().texture};
-    commands.pipelineBarrier(nullptr, nullptr, nullptr, 0, barriers, textures, 2);
+void VTPageCompressor::begin(gfx::CommandBuffer &commands, bool discardContents) {
+    const auto previous = discardContents ? gfx::AccessFlagBit::NONE : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
+    transition(commands, previous, gfx::AccessFlagBit::TRANSFER_WRITE, discardContents);
 }
 
 void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
@@ -583,28 +580,35 @@ void VTPageCompressor::record(gfx::CommandBuffer &commands, uint32_t slot) {
     }
 }
 
-VTPageCompressor::~VTPageCompressor() {
-    _pipeline = nullptr;
-    _mips = {};
-    _pipelineLayout = nullptr;
-    _layout = nullptr;
-    _shader = nullptr;
-    _blocks = nullptr;
-    for (auto &texture : _atlas) {
-        if (texture) {
-            texture->destroy();
-        }
-        texture = nullptr;
-    }
-}
-
-void VTPageCompressor::begin(gfx::CommandBuffer &commands, bool discardContents) {
-    const auto previous = discardContents ? gfx::AccessFlagBit::NONE : gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE;
-    transition(commands, previous, gfx::AccessFlagBit::TRANSFER_WRITE, discardContents);
-}
-
 void VTPageCompressor::end(gfx::CommandBuffer &commands) {
     transition(commands, gfx::AccessFlagBit::TRANSFER_WRITE, gfx::AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE, false);
 }
+
+Texture2D *VTPageCompressor::atlas() const {
+    return _atlas[0].get();
+}
+
+gfx::Texture *VTPageCompressor::albedo() const {
+    return _atlas[0]->getGFXTexture();
+}
+
+gfx::Texture *VTPageCompressor::normalRoughness() const {
+    return _atlas[1]->getGFXTexture();
+}
+
+void VTPageCompressor::transition(gfx::CommandBuffer &commands, gfx::AccessFlags previous, gfx::AccessFlags next, bool discardContents) {
+    auto *device = Root::getInstance()->getDevice();
+    gfx::TextureBarrierInfo info;
+    info.prevAccesses = previous;
+    info.nextAccesses = next;
+    info.discardContents = discardContents;
+    info.range.levelCount = config::VT_MIP_LEVELS;
+    info.range.numSlices = 1;
+    const gfx::TextureBarrier *barriers[] = {device->getTextureBarrier(info), device->getTextureBarrier(info)};
+    // Texture2D exposes a sampling view; transfers target its underlying image.
+    const gfx::Texture *textures[] = {albedo()->getViewInfo().texture, normalRoughness()->getViewInfo().texture};
+    commands.pipelineBarrier(nullptr, nullptr, nullptr, 0, barriers, textures, 2);
+}
+
 
 } // namespace cc::landscape

@@ -181,8 +181,7 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
         _vtRenderer.reset();
         return false;
     }
-    // Match Web: root coverage and each root's worst-case composition footprint
-    // must fit before publishing a renderer, including on smaller devices.
+    // Root coverage and worst-case composition inputs must fit before publishing.
     ccstd::unordered_set<uint64_t> rootKeys;
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
@@ -215,127 +214,40 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
     return true;
 }
 
-std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
-    const auto decals = _decals->materials();
-    return {_materialSolid.get(), _materialWire.get(), decals[0], decals[1]};
-}
-
-void LandscapeRenderer::bindRuntimeTextures() {
-    // Bind full VT textures with anisotropic mip filtering for terrain and decals.
-    auto &vt = *_vtRenderer;
-    for (auto *material : surfaceMaterials()) {
-        setRuntimeTexture(material, "holeSplatmap", _residency->splatArray(), _residency->splatSampler());
-        setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
-        setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
-        setRuntimeTexture(material, "vtNormalRoughness", vt.normalRoughness(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
-    }
-    for (auto *material : _decals->materials()) {
-        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
-    }
-}
-
-void LandscapeRenderer::setGlobalColorMap(Texture2D *texture) {
-    _vtRenderer->setGlobalColorMap(texture);
-}
-
-void LandscapeRenderer::setGlobalColorStrength(float strength) {
-    _vtRenderer->setGlobalColorStrength(strength);
-}
-
-void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
-    _debugData = data;
-    _vtRenderer->setHeightBlendEnabled(data.heightBlendEnabled);
-    _vtRenderer->setTriplanarEnabled(data.triplanarEnabled);
-    _vtRenderer->setRefineFarDetail(data.refineFarDetail);
-    _materialsDirty = true;
-}
-
-IntrusivePtr<scene::Model> LandscapeRenderer::createModel() {
-    auto *model = Root::getInstance()->createModel<scene::Model>();
-    if (model == nullptr) {
-        return nullptr;
-    }
-    model->setNode(_node);
-    model->setTransform(_node);
-    model->setCastShadow(_castShadow);
-    model->setReceiveShadow(_receiveShadow);
-    model->initSubModel(0, _mesh, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
-    model->setEnabled(false);
-    model->attachToScene(_scene);
-    return model;
-}
-
-void LandscapeRenderer::updateMaterialProperties() {
-    const Vec4 terrainParams{
-        _data.heightScale,
-        _data.heightBias,
-        _debugData.lodColor ? 1.0F : 0.0F,
-        _debugData.showRanges ? 1.0F : 0.0F,
+void LandscapeRenderer::destroy() {
+    _materialsDirty = false;
+    const auto removeModel = [](const IntrusivePtr<scene::Model> &model) {
+        if (model == nullptr) {
+            return;
+        }
+        model->detachFromScene();
+        model->destroy();
     };
-    const VTPageLayout layout(_data.sectorSize);
-    for (auto *material : surfaceMaterials()) {
-        material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U ? 0.0F : 1.0F, 0, 0, 0});
-        material->setPropertyVec4("terrainParams", terrainParams);
-        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, layout.pageSize(0), 0, 0});
-        material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(_vtRenderer->albedo()->getWidth()),
-                                                   static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
-                                                   static_cast<float>(config::VT_FILTER_MARGIN)});
+
+    for (const auto &entry : _draws) {
+        const auto &draw = entry.second;
+        removeModel(draw.model);
     }
-    for (auto *material : _decals->materials()) {
-        material->setPropertyVec4("decalControl", Vec4{_debugData.decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
+    _draws.clear();
+    for (const auto &model : _pool) {
+        removeModel(model);
     }
-    updateMorphCameraProperty();
-}
 
-void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &ranges) {
-    for (auto *material : surfaceMaterials()) {
-        material->setPropertyVec4Array("lodMorph", ranges);
-    }
-}
+    _pool.clear();
+    _instanceAttributeScratch = ccstd::monostate{};
+    _vtRenderer.reset();
+    _decals.reset();
 
-void LandscapeRenderer::updateMorphCameraProperty() {
-    const Vec4 cameraPosition{
-        _viewPosition.x,
-        _viewPosition.y,
-        _viewPosition.z,
-        0.0F,
-    };
-    for (auto *material : surfaceMaterials()) {
-        material->setPropertyVec4("morphCameraPos", cameraPosition);
-    }
-}
-
-LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask) {
-    LandscapeGridParams gridParams;
-
-    const auto region = _data.nodeRegion(node.address());
-    gridParams.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
-    gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edgeMask), 0, 0};
-
-    const auto tile = _residency->resolve(node.address());
-    CC_ASSERTF(tile.layer >= 0,
-               "[Landscape] unprepared exact height source: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
-               node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
-    // a_tileInst.xy = source tile origin in landscape-local coordinates,
-    // z = source tile size, w = shared height/splat array layer. For LODs finer than the
-    // generated tile level, keep the complete source-tile range here: the
-    // shader's local position selects the corresponding subregion of that tile.
-    gridParams.tile = _residency->shaderParams(tile);
-    return gridParams;
-}
-
-void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams) {
-    applyGridParams(model, _instanceAttributeScratch, gridParams);
-    model->setEnabled(true);
-    updateModelBounds(model, node);
-}
-
-void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node) {
-    const auto region = _data.nodeRegion(node.address());
-    model->createBoundingShape(Vec3{region.x, node.minY, region.z},
-                               Vec3{region.x + region.size, node.maxY, region.z + region.size});
-    model->updateWorldBound();
+    _residency.reset();
+    _asset = nullptr;
+    _mesh = nullptr;
+    _materialSolid = nullptr;
+    _materialWire = nullptr;
+    _materialLibrary.reset();
+    _node = nullptr;
+    _scene = nullptr;
+    _heightUnorm = false;
+    _debugData.unlit = false;
 }
 
 void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
@@ -409,90 +321,22 @@ bool LandscapeRenderer::collectNodeModels(const QuadNode &node, const LandscapeR
     return true;
 }
 
-void LandscapeRenderer::onGlobalPipelineStateChanged() {
-    for (const auto &entry : _draws) {
-        const auto &draw = entry.second;
-        if (draw.model) {
-            draw.model->onGlobalPipelineStateChanged();
-        }
-    }
-    for (const auto &model : _pool) {
-        model->onGlobalPipelineStateChanged();
-    }
-    _decals->onGlobalPipelineStateChanged();
+void LandscapeRenderer::setViewPosition(const Vec3 &position) {
+    _viewPosition = position;
 }
 
-uint32_t LandscapeRenderer::addDecal(float x, float z, float size, uint32_t layer) {
-    const uint32_t id = _decals->addDecal({x, z, size, layer});
-    if (id == 0) {
-        return 0;
-    }
-    _vtRenderer->invalidate({x, z, size});
-    return id;
-}
-
-bool LandscapeRenderer::removeDecal(uint32_t id) {
-    LandscapeRegion region;
-    if (!_decals->removeDecal(id, region)) {
-        return false;
-    }
-    _vtRenderer->invalidate(region);
-    return true;
-}
-
-void LandscapeRenderer::recycleModel(GridDraw &draw) {
-    if (draw.model) {
-        draw.model->setEnabled(false);
-        _pool.push_back(std::move(draw.model));
-    }
-    if (draw.mapping >= 0) {
-        _vtRenderer->pageTable().release(static_cast<uint32_t>(draw.mapping));
-        draw.mapping = -1;
+void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &ranges) {
+    for (auto *material : surfaceMaterials()) {
+        material->setPropertyVec4Array("lodMorph", ranges);
     }
 }
 
-void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
-    // Every renderable node uses the same full grid. Neighbors only refresh the
-    // morph/stitch edge masks; material changes update the mapping without replacing models.
-    ccstd::vector<uint32_t> changedMappings;
-    changedMappings.reserve(updated.size());
-    // Release removed owners before assigning their blocks to new LOD nodes.
-    for (const auto key : removed) {
-        const auto it = _draws.find(key);
-        if (it != _draws.end()) {
-            recycleModel(it->second);
-            _draws.erase(it);
-        }
-        _decals->removeNode(key);
-    }
-    for (const auto &renderable : updated) {
-        const auto key = renderable.geometry->address().key();
-        auto &draw = _draws[key];
-        const auto &node = *renderable.geometry;
-        if (draw.mapping < 0) {
-            draw.mapping = static_cast<int>(_vtRenderer->pageTable().allocate());
-        }
-        const auto mapping = static_cast<uint32_t>(draw.mapping);
-        if (_vtRenderer->pageTable().update(mapping, *renderable.material, *_vtRenderer)) {
-            changedMappings.push_back(mapping);
-        }
-        if (!draw.model) {
-            if (_pool.empty()) {
-                draw.model = createModel();
-            } else {
-                draw.model = std::move(_pool.back());
-                _pool.pop_back();
-            }
-        }
-        const auto gridParams = resolveGridParams(node, mapping, renderable.edgeMask);
-        draw.params = gridParams;
-        if (draw.model) {
-            updateModel(draw.model, node, gridParams);
-        }
-        const auto region = _data.nodeRegion(node.address());
-        _decals->updateNode({key, region, node.minY, node.maxY, gridParams});
-    }
-    _vtRenderer->pageTable().upload(std::move(changedMappings));
+void LandscapeRenderer::setDebugData(const LandscapeDebugData &data) {
+    _debugData = data;
+    _vtRenderer->setHeightBlendEnabled(data.heightBlendEnabled);
+    _vtRenderer->setTriplanarEnabled(data.triplanarEnabled);
+    _vtRenderer->setRefineFarDetail(data.refineFarDetail);
+    _materialsDirty = true;
 }
 
 void LandscapeRenderer::setHoleMode(uint32_t mode) {
@@ -537,6 +381,200 @@ void LandscapeRenderer::setReceiveShadow(bool enabled) {
     _materialsDirty = true;
 }
 
+void LandscapeRenderer::setGlobalColorMap(Texture2D *texture) {
+    _vtRenderer->setGlobalColorMap(texture);
+}
+
+void LandscapeRenderer::setGlobalColorStrength(float strength) {
+    _vtRenderer->setGlobalColorStrength(strength);
+}
+
+void LandscapeRenderer::onGlobalPipelineStateChanged() {
+    for (const auto &entry : _draws) {
+        const auto &draw = entry.second;
+        if (draw.model) {
+            draw.model->onGlobalPipelineStateChanged();
+        }
+    }
+    for (const auto &model : _pool) {
+        model->onGlobalPipelineStateChanged();
+    }
+    _decals->onGlobalPipelineStateChanged();
+}
+
+uint32_t LandscapeRenderer::addDecal(float x, float z, float size, uint32_t layer) {
+    const uint32_t id = _decals->addDecal({x, z, size, layer});
+    if (id == 0) {
+        return 0;
+    }
+    _vtRenderer->invalidate({x, z, size});
+    return id;
+}
+
+bool LandscapeRenderer::removeDecal(uint32_t id) {
+    LandscapeRegion region;
+    if (!_decals->removeDecal(id, region)) {
+        return false;
+    }
+    _vtRenderer->invalidate(region);
+    return true;
+}
+
+TextureBase *LandscapeRenderer::getVTAtlas() const {
+    return _vtRenderer->atlas();
+}
+
+void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+    // Edge and mapping changes reuse the existing grid model.
+    ccstd::vector<uint32_t> changedMappings;
+    changedMappings.reserve(updated.size());
+    // Release removed owners before assigning their blocks to new LOD nodes.
+    for (const auto key : removed) {
+        const auto it = _draws.find(key);
+        if (it != _draws.end()) {
+            recycleModel(it->second);
+            _draws.erase(it);
+        }
+        _decals->removeNode(key);
+    }
+    for (const auto &renderable : updated) {
+        const auto key = renderable.geometry->address().key();
+        auto &draw = _draws[key];
+        const auto &node = *renderable.geometry;
+        if (draw.mapping < 0) {
+            draw.mapping = static_cast<int>(_vtRenderer->pageTable().allocate());
+        }
+        const auto mapping = static_cast<uint32_t>(draw.mapping);
+        if (_vtRenderer->pageTable().update(mapping, *renderable.material, *_vtRenderer)) {
+            changedMappings.push_back(mapping);
+        }
+        if (!draw.model) {
+            if (_pool.empty()) {
+                draw.model = createModel();
+            } else {
+                draw.model = std::move(_pool.back());
+                _pool.pop_back();
+            }
+        }
+        const auto gridParams = resolveGridParams(node, mapping, renderable.edgeMask);
+        draw.params = gridParams;
+        if (draw.model) {
+            updateModel(draw.model, node, gridParams);
+        }
+        const auto region = _data.nodeRegion(node.address());
+        _decals->updateNode({key, region, node.minY, node.maxY, gridParams});
+    }
+    _vtRenderer->pageTable().upload(std::move(changedMappings));
+}
+
+LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask) {
+    LandscapeGridParams gridParams;
+
+    const auto region = _data.nodeRegion(node.address());
+    gridParams.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
+    gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edgeMask), 0, 0};
+
+    const auto tile = _residency->resolve(node.address());
+    CC_ASSERTF(tile.layer >= 0,
+               "[Landscape] unprepared exact height source: node L%u (%u,%u), source L%u (%u,%u), layer=%d",
+               node.level, node.ix, node.iz, tile.address.level, tile.address.x, tile.address.z, tile.layer);
+    // Keep the full source-tile range; finer LODs select their subregion in the shader.
+    gridParams.tile = _residency->shaderParams(tile);
+    return gridParams;
+}
+
+void LandscapeRenderer::updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams) {
+    applyGridParams(model, _instanceAttributeScratch, gridParams);
+    model->setEnabled(true);
+    updateModelBounds(model, node);
+}
+
+void LandscapeRenderer::updateModelBounds(scene::Model *model, const QuadNode &node) {
+    const auto region = _data.nodeRegion(node.address());
+    model->createBoundingShape(Vec3{region.x, node.minY, region.z},
+                               Vec3{region.x + region.size, node.maxY, region.z + region.size});
+    model->updateWorldBound();
+}
+
+IntrusivePtr<scene::Model> LandscapeRenderer::createModel() {
+    auto *model = Root::getInstance()->createModel<scene::Model>();
+    if (model == nullptr) {
+        return nullptr;
+    }
+    model->setNode(_node);
+    model->setTransform(_node);
+    model->setCastShadow(_castShadow);
+    model->setReceiveShadow(_receiveShadow);
+    model->initSubModel(0, _mesh, _debugData.wireframe ? _materialWire.get() : _materialSolid.get());
+    model->setEnabled(false);
+    model->attachToScene(_scene);
+    return model;
+}
+
+void LandscapeRenderer::recycleModel(GridDraw &draw) {
+    if (draw.model) {
+        draw.model->setEnabled(false);
+        _pool.push_back(std::move(draw.model));
+    }
+    if (draw.mapping >= 0) {
+        _vtRenderer->pageTable().release(static_cast<uint32_t>(draw.mapping));
+        draw.mapping = -1;
+    }
+}
+
+std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
+    const auto decals = _decals->materials();
+    return {_materialSolid.get(), _materialWire.get(), decals[0], decals[1]};
+}
+
+void LandscapeRenderer::bindRuntimeTextures() {
+    auto &vt = *_vtRenderer;
+    for (auto *material : surfaceMaterials()) {
+        setRuntimeTexture(material, "holeSplatmap", _residency->splatArray(), _residency->splatSampler());
+        setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
+        setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
+        setRuntimeTexture(material, "vtNormalRoughness", vt.normalRoughness(), vt.sampler());
+        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
+    }
+    for (auto *material : _decals->materials()) {
+        setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
+    }
+}
+
+void LandscapeRenderer::updateMaterialProperties() {
+    const Vec4 terrainParams{
+        _data.heightScale,
+        _data.heightBias,
+        _debugData.lodColor ? 1.0F : 0.0F,
+        _debugData.showRanges ? 1.0F : 0.0F,
+    };
+    const VTPageLayout layout(_data.sectorSize);
+    for (auto *material : surfaceMaterials()) {
+        material->setPropertyVec4("holeParams", Vec4{_holeMode == 0U ? 0.0F : 1.0F, 0, 0, 0});
+        material->setPropertyVec4("terrainParams", terrainParams);
+        material->setPropertyVec4("sectorParams", Vec4{_data.sectorSize, layout.pageSize(0), 0, 0});
+        material->setPropertyVec4("vtLayout", Vec4{static_cast<float>(_vtRenderer->albedo()->getWidth()),
+                                                   static_cast<float>(config::VT_PAGE_RES), static_cast<float>(config::VT_PAGE_BORDER),
+                                                   static_cast<float>(config::VT_FILTER_MARGIN)});
+    }
+    for (auto *material : _decals->materials()) {
+        material->setPropertyVec4("decalControl", Vec4{_debugData.decal3DEnabled ? 1.0F : 0.0F, 0, 0, 0});
+    }
+    updateMorphCameraProperty();
+}
+
+void LandscapeRenderer::updateMorphCameraProperty() {
+    const Vec4 cameraPosition{
+        _viewPosition.x,
+        _viewPosition.y,
+        _viewPosition.z,
+        0.0F,
+    };
+    for (auto *material : surfaceMaterials()) {
+        material->setPropertyVec4("morphCameraPos", cameraPosition);
+    }
+}
+
 void LandscapeRenderer::refreshTerrainMaterials() {
     for (const auto &entry : _draws) {
         const auto &draw = entry.second;
@@ -551,14 +589,6 @@ void LandscapeRenderer::refreshTerrainMaterials() {
     // Inactive models get fresh instance data when reused.
 }
 
-void LandscapeRenderer::setViewPosition(const Vec3 &position) {
-    _viewPosition = position;
-}
-
-TextureBase *LandscapeRenderer::getVTAtlas() const {
-    return _vtRenderer->atlas();
-}
-
 void LandscapeRenderer::setUnlit(bool enabled) {
     // These passes belong exclusively to this renderer. Update their shader
     // variants before refreshing model materials and instance data.
@@ -570,41 +600,6 @@ void LandscapeRenderer::setUnlit(bool enabled) {
     }
 }
 
-void LandscapeRenderer::destroy() {
-    _materialsDirty = false;
-    const auto removeModel = [](const IntrusivePtr<scene::Model> &model) {
-        if (model == nullptr) {
-            return;
-        }
-        model->detachFromScene();
-        model->destroy();
-    };
-
-    for (const auto &entry : _draws) {
-        const auto &draw = entry.second;
-        removeModel(draw.model);
-    }
-    _draws.clear();
-    for (const auto &model : _pool) {
-        removeModel(model);
-    }
-
-    _pool.clear();
-    _instanceAttributeScratch = ccstd::monostate{};
-    _vtRenderer.reset();
-    _decals.reset();
-
-    _residency.reset();
-    _asset = nullptr;
-    _mesh = nullptr;
-    _materialSolid = nullptr;
-    _materialWire = nullptr;
-    _materialLibrary.reset();
-    _node = nullptr;
-    _scene = nullptr;
-    _heightUnorm = false;
-    _debugData.unlit = false;
-}
 
 } // namespace landscape
 } // namespace cc

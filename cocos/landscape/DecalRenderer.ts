@@ -71,16 +71,21 @@ export class DecalRenderer {
     private _node!: Node;
     private _scene!: RenderScene;
     private _asset!: LandscapeAsset;
+
     private _solid: Material | null = null;
     private _wire: Material | null = null;
     private _mesh: RenderingSubMesh | null = null;
+
     private _pageIndexTexture: Texture | null = null;
     private _pageIndexData = new Uint8Array();
+
     private readonly _instances: Instance[] = [];
     private _nextDecalId = 1;
+
     private readonly _nodes = new Map<NodeKey, NodeDraws>();
     private readonly _pool: Model[] = [];
     private readonly _scratch = new Float32Array(4);
+
     private readonly _viewPosition = new Vec3();
     private _enabled = true;
     private _wireframe = false;
@@ -111,10 +116,6 @@ export class DecalRenderer {
         return true;
     }
 
-    public materials (): Material[] {
-        return [this._solid!, this._wire!];
-    }
-
     public setAsset (asset: LandscapeAsset, device: Device, pageCount: number): boolean {
         this._asset = asset;
         for (const key of this._nodes.keys()) {
@@ -132,35 +133,25 @@ export class DecalRenderer {
         return !!this._pageIndexTexture;
     }
 
-    private initializeInstance (decal: Decal, id: number): Instance {
-        const d = { ...decal };
-        const data = this._asset.data();
-        const step = data.nodeSize(0) / 16;
-        const x = d.x + d.size * 0.5;
-        const z = d.z + d.size * 0.5;
-        const address = data.nodeAtClamped(0, { x, z });
-        const bounds = this._asset.getHeightRange(0, address.x, address.z)!;
-        const instance: Instance = { decal: d, id, center: new Vec3(x, (bounds.minY + bounds.maxY) * 0.5, z), fade: 0, active: false, firstX: 0, firstZ: 0, columns: 0, grids: [] };
-        if (this._asset.decalLayers()[d.layer].heightScale === 0) {
-            return instance;
-        }
-        instance.firstX = Math.floor(Math.max(d.x, 0) / step);
-        instance.firstZ = Math.floor(Math.max(d.z, 0) / step);
-        const endX = Math.ceil(Math.min(d.x + d.size, data.width()) / step);
-        const endZ = Math.ceil(Math.min(d.z + d.size, data.depth()) / step);
-        instance.columns = Math.max(0, endX - instance.firstX);
-        for (let iz = instance.firstZ; iz < endZ; ++iz) {
-            for (let ix = instance.firstX; ix < endX; ++ix) {
-                const left = Math.max(ix * step, d.x);
-                const bottom = Math.max(iz * step, d.z);
-                const right = Math.min((ix + 1) * step, d.x + d.size);
-                const top = Math.min((iz + 1) * step, d.z + d.size);
-                instance.grids.push(new Vec4(left, bottom, right - left, top - bottom));
-            }
-        }
-        return instance;
+    public destroy (): void {
+        this.forEachModel((model) => {
+            model.detachFromScene();
+            director.root!.destroyModel(model);
+        });
+        this._nodes.clear();
+        this._pool.length = 0;
+        this._instances.length = 0;
+        this._pageIndexTexture?.destroy();
+        this._mesh?.destroy();
+        this._solid?.destroy();
+        this._wire?.destroy();
+        this._pageIndexTexture = null;
+        this._mesh = null;
+        this._solid = null;
+        this._wire = null;
     }
 
+    // Runtime decals.
     // IDs belong to the current asset load; zero reports failure.
     public addDecal (d: Decal): number {
         const data = this._asset.data();
@@ -198,156 +189,7 @@ export class DecalRenderer {
         return { x: d.x, z: d.z, size: d.size };
     }
 
-    public bindComposeMaterial (material: Material, materials: MaterialLibrary): boolean {
-        const bindings: [string, Texture][] = [['decalAlbedoMap', materials.decalAlbedo()], ['decalNormalMap', materials.decalNormal()], ['decalIndexMap', this._pageIndexTexture!]];
-        for (const [name, texture] of bindings) {
-            material.setProperty(name, texture);
-            for (const pass of material.passes) {
-                if (!pass.getHandle(name)) {
-                    return false;
-                }
-                pass.bindSampler(Pass.getBindingFromHandle(pass.getHandle(name)), materials.clampSampler());
-            }
-        }
-        const layers = Array.from({ length: config.DECAL_LIBRARY_MAX }, () => new Vec4());
-        this._asset.decalLayers().forEach((layer, i) => layers[i].set(layer.modulateColor ? 1 : 0, layer.detailMaterial0 + 1, layer.detailMaterial1 + 1, 0));
-        material.setProperty('decalLayerParams', layers);
-        this._regionsDirty = true;
-        this.updateComposeMaterial(material);
-        return true;
-    }
-
-    public updateComposeMaterial (material: Material): void {
-        if (!this._regionsDirty) {
-            return;
-        }
-        const regions = Array.from({ length: config.DECAL_INSTANCE_MAX }, () => new Vec4());
-        this._instances.forEach((instance, i) => {
-            const d = instance.decal;
-            regions[i].set(d.x, d.z, d.size, d.layer);
-        });
-        material.setProperty('decalRegions', regions);
-        material.setProperty('decalParams', new Vec4(this._instances.length, 0, 0, 0));
-        this._regionsDirty = false;
-    }
-
-    public collectPageDecals (slot: number, region: Readonly<Vec4>): number {
-        const border = region.z * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
-        let count = 0;
-        this._instances.forEach((instance, i) => {
-            const d = instance.decal;
-            if (d.x > region.x + region.z + border || d.z > region.y + region.z + border
-                || d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
-                return;
-            }
-            const offset = (slot * config.DECAL_INSTANCE_MAX + count++) * 2;
-            this._pageIndexData[offset] = i & 255;
-            this._pageIndexData[offset + 1] = i >> 8;
-        });
-        return count;
-    }
-
-    public uploadPageDecals (): void {
-        const copy = new BufferTextureCopy();
-        copy.texExtent.width = config.DECAL_INSTANCE_MAX / 2;
-        copy.texExtent.height = this._pageIndexTexture!.height;
-        director.root!.device.copyBuffersToTexture([this._pageIndexData], this._pageIndexTexture!, [copy]);
-    }
-
-    private updateBinding (draw: Draw, node: TerrainNode, boundsChanged: boolean): void {
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_gridInst', node.gridParams.grid);
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_tileInst', node.gridParams.tile);
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_mappingInst', node.gridParams.mapping);
-        if (boundsChanged) {
-            const lift = this._asset.decalLayers()[this._instances[draw.decal].decal.layer].heightScale;
-            draw.model.createBoundingShape(new Vec3(draw.grid.x, node.minY, draw.grid.y), new Vec3(draw.grid.x + draw.grid.z, node.maxY + lift, draw.grid.y + draw.grid.w));
-            draw.model.updateWorldBound();
-        }
-    }
-
-    private updateInstance (draw: Draw, node: TerrainNode): void {
-        this.updateBinding(draw, node, true);
-        const instance = this._instances[draw.decal];
-        const d = instance.decal;
-        const layer = this._asset.decalLayers()[d.layer];
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalRegion', new Vec4(d.x, d.z, d.size, d.layer));
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalGrid', draw.grid);
-        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalFade', new Vec4(layer.heightScale, instance.fade, 0, 0));
-    }
-
-    private appendDecal (node: NodeDraws, decal: number): void {
-        const instance = this._instances[decal];
-        const d = instance.decal;
-        const region = node.terrain.region;
-        if (region.x + region.size <= d.x || region.z + region.size <= d.z || region.x >= d.x + d.size || region.z >= d.z + d.size) {
-            return;
-        }
-        const step = this._asset.data().nodeSize(0) / 16;
-        const firstX = Math.floor(Math.max(region.x, d.x) / step);
-        const firstZ = Math.floor(Math.max(region.z, d.z) / step);
-        const endX = Math.ceil(Math.min(region.x + region.size, d.x + d.size) / step);
-        const endZ = Math.ceil(Math.min(region.z + region.size, d.z + d.size) / step);
-        for (let iz = firstZ; iz < endZ; ++iz) {
-            for (let ix = firstX; ix < endX; ++ix) {
-                const model = this._pool.pop() || this.createModel();
-                const grid = instance.grids[(iz - instance.firstZ) * instance.columns + ix - instance.firstX];
-                const draw = { model, decal, grid };
-                node.draws.push(draw);
-                this.updateInstance(draw, node.terrain);
-                model.enabled = this._enabled;
-            }
-        }
-        node.draws.sort((a, b) => a.decal - b.decal);
-    }
-
-    private createModel (): Model {
-        const model = director.root!.createModel(Model);
-        model.node = this._node;
-        model.transform = this._node;
-        model.castShadow = this._castShadow;
-        model.receiveShadow = this._receiveShadow;
-        model.initSubModel(0, this._mesh!, this._wireframe ? this._wire! : this._solid!);
-        bindLandscapeModelTextures(model);
-        model.enabled = false;
-        model.attachToScene(this._scene);
-        return model;
-    }
-
-    private compilePipelines (): void {
-        if (!this._pool.length) {
-            return;
-        }
-        const subModel = this._pool[this._pool.length - 1].subModels[0];
-        const root = director.root!;
-        const renderPass = root.mainWindow!.framebuffer.renderPass;
-        subModel.passes.forEach((pass, i) => {
-            const instances = new InstancedBuffer(pass);
-            instances.merge(subModel, i);
-            for (const instance of instances.instances) {
-                if (!instance.shader) {
-                    instances.destroy();
-                    throw new Error('Landscape decal shader compilation failed');
-                }
-                PipelineStateManager.getOrCreatePipelineState(root.device, pass, instance.shader, renderPass, instance.ia);
-            }
-            instances.destroy();
-        });
-    }
-
-    private recycle (draw: Draw): void {
-        draw.model.enabled = false;
-        this._pool.push(draw.model);
-    }
-
-    public removeNode (key: NodeKey): void {
-        const entry = this._nodes.get(key);
-        if (!entry) {
-            return;
-        }
-        entry.draws.forEach((draw) => this.recycle(draw));
-        this._nodes.delete(key);
-    }
-
+    // Displaced geometry and visibility.
     public updateNode (node: TerrainNode): void {
         const entry = this._nodes.get(node.nodeKey);
         if (!entry) {
@@ -363,6 +205,15 @@ export class DecalRenderer {
             entry.terrain = node;
             entry.draws.forEach((draw) => this.updateBinding(draw, node, changed));
         }
+    }
+
+    public removeNode (key: NodeKey): void {
+        const entry = this._nodes.get(key);
+        if (!entry) {
+            return;
+        }
+        entry.draws.forEach((draw) => this.recycle(draw));
+        this._nodes.delete(key);
     }
 
     public updateView (position: Readonly<Vec3>): void {
@@ -442,18 +293,64 @@ export class DecalRenderer {
         }
     }
 
-    private forEachModel (visit: (model: Model) => void): void {
-        for (const entry of this._nodes.values()) {
-            entry.draws.forEach((draw) => visit(draw.model));
+    // VT composition.
+    public bindComposeMaterial (material: Material, materials: MaterialLibrary): boolean {
+        const bindings: [string, Texture][] = [['decalAlbedoMap', materials.decalAlbedo()], ['decalNormalMap', materials.decalNormal()], ['decalIndexMap', this._pageIndexTexture!]];
+        for (const [name, texture] of bindings) {
+            material.setProperty(name, texture);
+            for (const pass of material.passes) {
+                if (!pass.getHandle(name)) {
+                    return false;
+                }
+                pass.bindSampler(Pass.getBindingFromHandle(pass.getHandle(name)), materials.clampSampler());
+            }
         }
-        this._pool.forEach(visit);
+        const layers = Array.from({ length: config.DECAL_LIBRARY_MAX }, () => new Vec4());
+        this._asset.decalLayers().forEach((layer, i) => layers[i].set(layer.modulateColor ? 1 : 0, layer.detailMaterial0 + 1, layer.detailMaterial1 + 1, 0));
+        material.setProperty('decalLayerParams', layers);
+        this._regionsDirty = true;
+        this.updateComposeMaterial(material);
+        return true;
     }
 
-    public onGlobalPipelineStateChanged (): void {
-        this.forEachModel((model) => model.onGlobalPipelineStateChanged());
-        this.compilePipelines();
+    public updateComposeMaterial (material: Material): void {
+        if (!this._regionsDirty) {
+            return;
+        }
+        const regions = Array.from({ length: config.DECAL_INSTANCE_MAX }, () => new Vec4());
+        this._instances.forEach((instance, i) => {
+            const d = instance.decal;
+            regions[i].set(d.x, d.z, d.size, d.layer);
+        });
+        material.setProperty('decalRegions', regions);
+        material.setProperty('decalParams', new Vec4(this._instances.length, 0, 0, 0));
+        this._regionsDirty = false;
     }
 
+    public collectPageDecals (slot: number, region: Readonly<Vec4>): number {
+        const border = region.z * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
+        let count = 0;
+        this._instances.forEach((instance, i) => {
+            const d = instance.decal;
+            if (d.x > region.x + region.z + border || d.z > region.y + region.z + border
+                || d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
+                return;
+            }
+            const offset = (slot * config.DECAL_INSTANCE_MAX + count++) * 2;
+            this._pageIndexData[offset] = i & 255;
+            this._pageIndexData[offset + 1] = i >> 8;
+        });
+        return count;
+    }
+
+    public uploadPageDecals (): void {
+        const copy = new BufferTextureCopy();
+        copy.texExtent.width = config.DECAL_INSTANCE_MAX / 2;
+        copy.texExtent.height = this._pageIndexTexture!.height;
+        director.root!.device.copyBuffersToTexture([this._pageIndexData], this._pageIndexTexture!, [copy]);
+    }
+
+    // Materials and draw settings.
     public setEnabled (enabled: boolean): void {
         this._enabled = enabled;
         for (const entry of this._nodes.values()) {
@@ -466,15 +363,6 @@ export class DecalRenderer {
     public setWireframe (wireframe: boolean): void {
         this._wireframe = wireframe;
         this.refreshMaterials();
-    }
-
-    public refreshMaterials (): void {
-        this.forEachModel((model) => {
-            model.setSubModelMaterial(0, this._wireframe ? this._wire! : this._solid!);
-            bindLandscapeModelTextures(model);
-        });
-        this.refreshInstances(this._viewPosition);
-        this.compilePipelines();
     }
 
     public setCastShadow (enabled: boolean): void {
@@ -492,21 +380,143 @@ export class DecalRenderer {
         this.refreshMaterials();
     }
 
-    public destroy (): void {
+    public refreshMaterials (): void {
         this.forEachModel((model) => {
-            model.detachFromScene();
-            director.root!.destroyModel(model);
+            model.setSubModelMaterial(0, this._wireframe ? this._wire! : this._solid!);
+            bindLandscapeModelTextures(model);
         });
-        this._nodes.clear();
-        this._pool.length = 0;
-        this._instances.length = 0;
-        this._pageIndexTexture?.destroy();
-        this._mesh?.destroy();
-        this._solid?.destroy();
-        this._wire?.destroy();
-        this._pageIndexTexture = null;
-        this._mesh = null;
-        this._solid = null;
-        this._wire = null;
+        this.refreshInstances(this._viewPosition);
+        this.compilePipelines();
+    }
+
+    public onGlobalPipelineStateChanged (): void {
+        this.forEachModel((model) => model.onGlobalPipelineStateChanged());
+        this.compilePipelines();
+    }
+
+    public materials (): Material[] {
+        return [this._solid!, this._wire!];
+    }
+
+    // Instances and models.
+    private initializeInstance (decal: Decal, id: number): Instance {
+        const d = { ...decal };
+        const data = this._asset.data();
+        const step = data.nodeSize(0) / 16;
+        const x = d.x + d.size * 0.5;
+        const z = d.z + d.size * 0.5;
+        const address = data.nodeAtClamped(0, { x, z });
+        const bounds = this._asset.getHeightRange(0, address.x, address.z)!;
+        const instance: Instance = { decal: d, id, center: new Vec3(x, (bounds.minY + bounds.maxY) * 0.5, z), fade: 0, active: false, firstX: 0, firstZ: 0, columns: 0, grids: [] };
+        if (this._asset.decalLayers()[d.layer].heightScale === 0) {
+            return instance;
+        }
+        instance.firstX = Math.floor(Math.max(d.x, 0) / step);
+        instance.firstZ = Math.floor(Math.max(d.z, 0) / step);
+        const endX = Math.ceil(Math.min(d.x + d.size, data.width()) / step);
+        const endZ = Math.ceil(Math.min(d.z + d.size, data.depth()) / step);
+        instance.columns = Math.max(0, endX - instance.firstX);
+        for (let iz = instance.firstZ; iz < endZ; ++iz) {
+            for (let ix = instance.firstX; ix < endX; ++ix) {
+                const left = Math.max(ix * step, d.x);
+                const bottom = Math.max(iz * step, d.z);
+                const right = Math.min((ix + 1) * step, d.x + d.size);
+                const top = Math.min((iz + 1) * step, d.z + d.size);
+                instance.grids.push(new Vec4(left, bottom, right - left, top - bottom));
+            }
+        }
+        return instance;
+    }
+
+    private appendDecal (node: NodeDraws, decal: number): void {
+        const instance = this._instances[decal];
+        const d = instance.decal;
+        const region = node.terrain.region;
+        if (region.x + region.size <= d.x || region.z + region.size <= d.z || region.x >= d.x + d.size || region.z >= d.z + d.size) {
+            return;
+        }
+        const step = this._asset.data().nodeSize(0) / 16;
+        const firstX = Math.floor(Math.max(region.x, d.x) / step);
+        const firstZ = Math.floor(Math.max(region.z, d.z) / step);
+        const endX = Math.ceil(Math.min(region.x + region.size, d.x + d.size) / step);
+        const endZ = Math.ceil(Math.min(region.z + region.size, d.z + d.size) / step);
+        for (let iz = firstZ; iz < endZ; ++iz) {
+            for (let ix = firstX; ix < endX; ++ix) {
+                const model = this._pool.pop() || this.createModel();
+                const grid = instance.grids[(iz - instance.firstZ) * instance.columns + ix - instance.firstX];
+                const draw = { model, decal, grid };
+                node.draws.push(draw);
+                this.updateInstance(draw, node.terrain);
+                model.enabled = this._enabled;
+            }
+        }
+        node.draws.sort((a, b) => a.decal - b.decal);
+    }
+
+    private updateBinding (draw: Draw, node: TerrainNode, boundsChanged: boolean): void {
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_gridInst', node.gridParams.grid);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_tileInst', node.gridParams.tile);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_mappingInst', node.gridParams.mapping);
+        if (boundsChanged) {
+            const lift = this._asset.decalLayers()[this._instances[draw.decal].decal.layer].heightScale;
+            draw.model.createBoundingShape(new Vec3(draw.grid.x, node.minY, draw.grid.y), new Vec3(draw.grid.x + draw.grid.z, node.maxY + lift, draw.grid.y + draw.grid.w));
+            draw.model.updateWorldBound();
+        }
+    }
+
+    private updateInstance (draw: Draw, node: TerrainNode): void {
+        this.updateBinding(draw, node, true);
+        const instance = this._instances[draw.decal];
+        const d = instance.decal;
+        const layer = this._asset.decalLayers()[d.layer];
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalRegion', new Vec4(d.x, d.z, d.size, d.layer));
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalGrid', draw.grid);
+        setLandscapeInstanceAttribute(draw.model, this._scratch, 'a_decalFade', new Vec4(layer.heightScale, instance.fade, 0, 0));
+    }
+
+    private createModel (): Model {
+        const model = director.root!.createModel(Model);
+        model.node = this._node;
+        model.transform = this._node;
+        model.castShadow = this._castShadow;
+        model.receiveShadow = this._receiveShadow;
+        model.initSubModel(0, this._mesh!, this._wireframe ? this._wire! : this._solid!);
+        bindLandscapeModelTextures(model);
+        model.enabled = false;
+        model.attachToScene(this._scene);
+        return model;
+    }
+
+    private recycle (draw: Draw): void {
+        draw.model.enabled = false;
+        this._pool.push(draw.model);
+    }
+
+    private forEachModel (visit: (model: Model) => void): void {
+        for (const entry of this._nodes.values()) {
+            entry.draws.forEach((draw) => visit(draw.model));
+        }
+        this._pool.forEach(visit);
+    }
+
+    private compilePipelines (): void {
+        if (!this._pool.length) {
+            return;
+        }
+        const subModel = this._pool[this._pool.length - 1].subModels[0];
+        const root = director.root!;
+        const renderPass = root.mainWindow!.framebuffer.renderPass;
+        subModel.passes.forEach((pass, i) => {
+            const instances = new InstancedBuffer(pass);
+            instances.merge(subModel, i);
+            for (const instance of instances.instances) {
+                if (!instance.shader) {
+                    instances.destroy();
+                    throw new Error('Landscape decal shader compilation failed');
+                }
+                PipelineStateManager.getOrCreatePipelineState(root.device, pass, instance.shader, renderPass, instance.ia);
+            }
+            instances.destroy();
+        });
     }
 }

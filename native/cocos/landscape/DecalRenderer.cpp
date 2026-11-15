@@ -82,6 +82,7 @@ static void setLandscapeInstanceAttribute(scene::Model *model, TypedArray &scrat
 }
 
 DecalRenderer::DecalRenderer() = default;
+
 DecalRenderer::~DecalRenderer() {
     for (auto &entry : _nodes) {
         for (auto &draw : entry.second.draws) {
@@ -113,10 +114,6 @@ bool DecalRenderer::init(Node *node, scene::RenderScene *scene, bool heightUnorm
     return true;
 }
 
-std::array<Material *, 2> DecalRenderer::materials() const {
-    return {_solid.get(), _wire.get()};
-}
-
 bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_t pageCount) {
     _asset = asset;
     for (auto &entry : _nodes) {
@@ -143,39 +140,6 @@ bool DecalRenderer::setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_
     _pageIndexTexture = device->createTexture(info);
     _pageIndexData.resize(pageCount * config::DECAL_INSTANCE_MAX * 2, 0);
     return _pageIndexTexture != nullptr;
-}
-
-void DecalRenderer::initializeInstance(Instance &instance) {
-    const auto &data = _asset->data();
-    const auto &d = instance.decal;
-    const float step = data.nodeSize(0) / 16.0F;
-    const float x = d.x + d.size * 0.5F;
-    const float z = d.z + d.size * 0.5F;
-    float minY = data.minHeight();
-    float maxY = data.maxHeight();
-    const auto address = data.nodeAtClamped(0, {x, z});
-    _asset->getHeightRange(address.level, address.x, address.z, minY, maxY);
-    // Stable whole-decal fade, independent of geometry LOD and streamed heights.
-    instance.center = {x, (minY + maxY) * 0.5F, z};
-    if (_asset->decalLayers()[d.layer].heightScale == 0.0F) {
-        return;
-    }
-    // The fixed lattice is content data. Camera and terrain LOD changes
-    // only select existing blocks; they never regenerate their rectangles.
-    instance.firstX = static_cast<int>(std::floor(std::max(d.x, 0.0F) / step));
-    instance.firstZ = static_cast<int>(std::floor(std::max(d.z, 0.0F) / step));
-    const int endX = static_cast<int>(std::ceil(std::min(d.x + d.size, data.width()) / step));
-    const int endZ = static_cast<int>(std::ceil(std::min(d.z + d.size, data.depth()) / step));
-    instance.columns = std::max(0, endX - instance.firstX);
-    for (int iz = instance.firstZ; iz < endZ; ++iz) {
-        for (int ix = instance.firstX; ix < endX; ++ix) {
-            const float left = std::max(ix * step, d.x);
-            const float bottom = std::max(iz * step, d.z);
-            const float right = std::min((ix + 1) * step, d.x + d.size);
-            const float top = std::min((iz + 1) * step, d.z + d.size);
-            instance.grids.emplace_back(left, bottom, right - left, top - bottom);
-        }
-    }
 }
 
 uint32_t DecalRenderer::addDecal(const LandscapeAsset::Decal &decal) {
@@ -228,178 +192,6 @@ bool DecalRenderer::removeDecal(uint32_t id, LandscapeRegion &region) {
     return true;
 }
 
-bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrary &materials) {
-    const auto &pass = material->getPasses()->front();
-    for (const char *name : {"decalAlbedoMap", "decalNormalMap", "decalRegions",
-                             "decalIndexMap", "decalLayerParams", "decalParams"}) {
-        if (!pass->getHandle(name)) {
-            CC_LOG_WARNING("[Landscape] VT effect is missing %s; rebuild project effects", name);
-            return false;
-        }
-    }
-    const auto bind = [&](const char *name, gfx::Texture *texture) {
-        material->setPropertyGFXTexture(name, texture);
-        for (const auto &composePass : *material->getPasses()) {
-            composePass->bindSampler(scene::Pass::getBindingFromHandle(composePass->getHandle(name)), materials.clampSampler());
-        }
-    };
-    bind("decalAlbedoMap", materials.decalAlbedo());
-    bind("decalNormalMap", materials.decalNormal());
-    bind("decalIndexMap", _pageIndexTexture);
-    ccstd::vector<Vec4> layers(config::DECAL_LIBRARY_MAX);
-    for (size_t i = 0; i < _asset->decalLayers().size(); ++i) {
-        const auto &layer = _asset->decalLayers()[i];
-        layers[i] = Vec4{layer.modulateColor ? 1.0F : 0.0F,
-                         static_cast<float>(layer.detailMaterial0 + 1), static_cast<float>(layer.detailMaterial1 + 1), 0};
-    }
-    material->setPropertyVec4Array("decalLayerParams", layers);
-    _regionsDirty = true;
-    updateComposeMaterial(material);
-    return true;
-}
-
-void DecalRenderer::updateComposeMaterial(Material *material) {
-    if (!_regionsDirty) {
-        return;
-    }
-    ccstd::vector<Vec4> regions(config::DECAL_INSTANCE_MAX);
-    for (size_t i = 0; i < _instances.size(); ++i) {
-        const auto &d = _instances[i].decal;
-        regions[i] = Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)};
-    }
-    material->setPropertyVec4Array("decalRegions", regions);
-    material->setPropertyVec4("decalParams", Vec4{static_cast<float>(_instances.size()), 0, 0, 0});
-    _regionsDirty = false;
-}
-
-uint32_t DecalRenderer::collectPageDecals(uint32_t slot, const Vec4 &region) {
-    // Both flat and displaced decals contribute surface color/normal to VT.
-    // Include filtering gutters and preserve authored order followed by runtime insertion order.
-    const float border = region.z * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
-    uint32_t count = 0;
-    for (size_t i = 0; i < _instances.size(); ++i) {
-        const auto &d = _instances[i].decal;
-        if (d.x > region.x + region.z + border || d.z > region.y + region.z + border ||
-            d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
-            continue;
-        }
-        const size_t offset = (slot * config::DECAL_INSTANCE_MAX + count++) * 2;
-        _pageIndexData[offset] = static_cast<uint8_t>(i & 0xFFU);
-        _pageIndexData[offset + 1] = static_cast<uint8_t>(i >> 8U);
-    }
-    return count;
-}
-
-void DecalRenderer::uploadPageDecals() {
-    gfx::BufferTextureCopy copy;
-    copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, _pageIndexTexture->getHeight(), 1};
-    const uint8_t *bytes[]{_pageIndexData.data()};
-    Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndexTexture, &copy, 1);
-}
-
-void DecalRenderer::updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged) {
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_gridInst", node.gridParams.grid);
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_tileInst", node.gridParams.tile);
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_mappingInst", node.gridParams.mapping);
-    if (boundsChanged) {
-        const auto &d = _instances[draw.decal].decal;
-        const float lift = _asset->decalLayers()[d.layer].heightScale;
-        draw.model->createBoundingShape(Vec3{draw.grid.x, node.minY, draw.grid.y},
-                                       Vec3{draw.grid.x + draw.grid.z, node.maxY + lift, draw.grid.y + draw.grid.w});
-        draw.model->updateWorldBound();
-    }
-}
-
-void DecalRenderer::updateInstance(const Draw &draw, const TerrainNode &node) {
-    updateBinding(draw, node, true);
-    const auto &d = _instances[draw.decal].decal;
-    const auto &layer = _asset->decalLayers()[d.layer];
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalRegion", Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)});
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalGrid", draw.grid);
-    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalFade", Vec4{layer.heightScale, _instances[draw.decal].fade, 0, 0});
-}
-
-void DecalRenderer::appendDecal(NodeDraws &node, uint32_t decal) {
-    const auto &instance = _instances[decal];
-    const auto &d = _instances[decal].decal;
-    const auto &region = node.terrain.region;
-    if (region.x + region.size <= d.x || region.z + region.size <= d.z ||
-        region.x >= d.x + d.size || region.z >= d.z + d.size) {
-        return;
-    }
-    const size_t firstDraw = node.draws.size();
-    const float step = _asset->data().nodeSize(0) / 16.0F;
-    const int firstX = static_cast<int>(std::floor(std::max(region.x, d.x) / step));
-    const int firstZ = static_cast<int>(std::floor(std::max(region.z, d.z) / step));
-    const int endX = static_cast<int>(std::ceil(std::min(region.x + region.size, d.x + d.size) / step));
-    const int endZ = static_cast<int>(std::ceil(std::min(region.z + region.size, d.z + d.size) / step));
-    for (int iz = firstZ; iz < endZ; ++iz) {
-        for (int ix = firstX; ix < endX; ++ix) {
-            IntrusivePtr<scene::Model> model;
-            if (_pool.empty()) {
-                model = createModel();
-            } else {
-                model = std::move(_pool.back());
-                _pool.pop_back();
-            }
-            const size_t index = static_cast<size_t>(iz - instance.firstZ) * instance.columns + ix - instance.firstX;
-            CC_ASSERT(index < instance.grids.size());
-            auto &draw = node.draws.emplace_back(Draw{model, decal, instance.grids[index]});
-            updateInstance(draw, node.terrain);
-            model->setEnabled(_enabled);
-        }
-    }
-    // Preserve composition order when a lower-index decal enters range later.
-    std::inplace_merge(node.draws.begin(), node.draws.begin() + firstDraw, node.draws.end(),
-                       [](const Draw &a, const Draw &b) { return a.decal < b.decal; });
-}
-
-IntrusivePtr<scene::Model> DecalRenderer::createModel() {
-    auto *model = Root::getInstance()->createModel<scene::Model>();
-    model->setNode(_node);
-    model->setTransform(_node);
-    model->setCastShadow(_castShadow);
-    model->setReceiveShadow(_receiveShadow);
-    model->initSubModel(0, _mesh, _wireframe ? _wire.get() : _solid.get());
-    model->setEnabled(false);
-    model->attachToScene(_scene);
-    return model;
-}
-
-void DecalRenderer::compilePipelines() {
-    if (_pool.empty()) {
-        return;
-    }
-    auto *subModel = _pool.back()->getSubModels().front().get();
-    auto *renderPass = Root::getInstance()->getMainWindow()->getFramebuffer()->getRenderPass();
-    const auto &passes = *subModel->getPasses();
-    for (uint32_t i = 0; i < passes.size(); ++i) {
-        // Use the real instance layout without adding a draw to a live render queue.
-        // Creating shader objects alone does not compile programs on GLES3.
-        pipeline::InstancedBuffer instances(passes[i]);
-        instances.merge(subModel, i);
-        for (const auto &instance : instances.getInstances()) {
-            pipeline::PipelineStateManager::getOrCreatePipelineState(passes[i], instance.shader, instance.ia, renderPass);
-        }
-    }
-}
-
-void DecalRenderer::recycle(Draw &draw) {
-    draw.model->setEnabled(false);
-    _pool.push_back(std::move(draw.model));
-}
-
-void DecalRenderer::removeNode(uint64_t nodeKey) {
-    const auto it = _nodes.find(nodeKey);
-    if (it == _nodes.end()) {
-        return;
-    }
-    for (auto &draw : it->second.draws) {
-        recycle(draw);
-    }
-    _nodes.erase(it);
-}
-
 void DecalRenderer::updateNode(const TerrainNode &node) {
     auto result = _nodes.try_emplace(node.nodeKey);
     auto &entry = result.first->second;
@@ -416,6 +208,17 @@ void DecalRenderer::updateNode(const TerrainNode &node) {
             updateBinding(draw, node, boundsChanged);
         }
     }
+}
+
+void DecalRenderer::removeNode(uint64_t nodeKey) {
+    const auto it = _nodes.find(nodeKey);
+    if (it == _nodes.end()) {
+        return;
+    }
+    for (auto &draw : it->second.draws) {
+        recycle(draw);
+    }
+    _nodes.erase(it);
 }
 
 void DecalRenderer::updateView(const Vec3 &viewPosition) {
@@ -516,16 +319,73 @@ void DecalRenderer::collectPassModels(const QuadNode &node, const geometry::Frus
     }
 }
 
-void DecalRenderer::onGlobalPipelineStateChanged() {
-    for (const auto &entry : _nodes) {
-        for (const auto &draw : entry.second.draws) {
-            draw.model->onGlobalPipelineStateChanged();
+bool DecalRenderer::bindComposeMaterial(Material *material, const MaterialLibrary &materials) {
+    const auto &pass = material->getPasses()->front();
+    for (const char *name : {"decalAlbedoMap", "decalNormalMap", "decalRegions",
+                             "decalIndexMap", "decalLayerParams", "decalParams"}) {
+        if (!pass->getHandle(name)) {
+            CC_LOG_WARNING("[Landscape] VT effect is missing %s; rebuild project effects", name);
+            return false;
         }
     }
-    for (const auto &model : _pool) {
-        model->onGlobalPipelineStateChanged();
+    const auto bind = [&](const char *name, gfx::Texture *texture) {
+        material->setPropertyGFXTexture(name, texture);
+        for (const auto &composePass : *material->getPasses()) {
+            composePass->bindSampler(scene::Pass::getBindingFromHandle(composePass->getHandle(name)), materials.clampSampler());
+        }
+    };
+    bind("decalAlbedoMap", materials.decalAlbedo());
+    bind("decalNormalMap", materials.decalNormal());
+    bind("decalIndexMap", _pageIndexTexture);
+    ccstd::vector<Vec4> layers(config::DECAL_LIBRARY_MAX);
+    for (size_t i = 0; i < _asset->decalLayers().size(); ++i) {
+        const auto &layer = _asset->decalLayers()[i];
+        layers[i] = Vec4{layer.modulateColor ? 1.0F : 0.0F,
+                         static_cast<float>(layer.detailMaterial0 + 1), static_cast<float>(layer.detailMaterial1 + 1), 0};
     }
-    compilePipelines();
+    material->setPropertyVec4Array("decalLayerParams", layers);
+    _regionsDirty = true;
+    updateComposeMaterial(material);
+    return true;
+}
+
+void DecalRenderer::updateComposeMaterial(Material *material) {
+    if (!_regionsDirty) {
+        return;
+    }
+    ccstd::vector<Vec4> regions(config::DECAL_INSTANCE_MAX);
+    for (size_t i = 0; i < _instances.size(); ++i) {
+        const auto &d = _instances[i].decal;
+        regions[i] = Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)};
+    }
+    material->setPropertyVec4Array("decalRegions", regions);
+    material->setPropertyVec4("decalParams", Vec4{static_cast<float>(_instances.size()), 0, 0, 0});
+    _regionsDirty = false;
+}
+
+uint32_t DecalRenderer::collectPageDecals(uint32_t slot, const Vec4 &region) {
+    // Both flat and displaced decals contribute surface color/normal to VT.
+    // Include filtering gutters and preserve authored order followed by runtime insertion order.
+    const float border = region.z * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+    uint32_t count = 0;
+    for (size_t i = 0; i < _instances.size(); ++i) {
+        const auto &d = _instances[i].decal;
+        if (d.x > region.x + region.z + border || d.z > region.y + region.z + border ||
+            d.x + d.size < region.x - border || d.z + d.size < region.y - border) {
+            continue;
+        }
+        const size_t offset = (slot * config::DECAL_INSTANCE_MAX + count++) * 2;
+        _pageIndexData[offset] = static_cast<uint8_t>(i & 0xFFU);
+        _pageIndexData[offset + 1] = static_cast<uint8_t>(i >> 8U);
+    }
+    return count;
+}
+
+void DecalRenderer::uploadPageDecals() {
+    gfx::BufferTextureCopy copy;
+    copy.texExtent = {config::DECAL_INSTANCE_MAX / 2, _pageIndexTexture->getHeight(), 1};
+    const uint8_t *bytes[]{_pageIndexData.data()};
+    Root::getInstance()->getDevice()->copyBuffersToTexture(bytes, _pageIndexTexture, &copy, 1);
 }
 
 void DecalRenderer::setEnabled(bool enabled) {
@@ -540,19 +400,6 @@ void DecalRenderer::setEnabled(bool enabled) {
 void DecalRenderer::setWireframe(bool wireframe) {
     _wireframe = wireframe;
     refreshMaterials();
-}
-
-void DecalRenderer::refreshMaterials() {
-    for (const auto &entry : _nodes) {
-        for (const auto &draw : entry.second.draws) {
-            draw.model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
-        }
-    }
-    for (const auto &model : _pool) {
-        model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
-    }
-    refreshInstances(_viewPosition);
-    compilePipelines();
 }
 
 void DecalRenderer::setCastShadow(bool enabled) {
@@ -580,6 +427,160 @@ void DecalRenderer::setReceiveShadow(bool enabled) {
     // Variant changes can rebuild instance layouts; restore all active bindings.
     refreshMaterials();
 }
+
+void DecalRenderer::refreshMaterials() {
+    for (const auto &entry : _nodes) {
+        for (const auto &draw : entry.second.draws) {
+            draw.model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
+        }
+    }
+    for (const auto &model : _pool) {
+        model->setSubModelMaterial(0, _wireframe ? _wire.get() : _solid.get());
+    }
+    refreshInstances(_viewPosition);
+    compilePipelines();
+}
+
+void DecalRenderer::onGlobalPipelineStateChanged() {
+    for (const auto &entry : _nodes) {
+        for (const auto &draw : entry.second.draws) {
+            draw.model->onGlobalPipelineStateChanged();
+        }
+    }
+    for (const auto &model : _pool) {
+        model->onGlobalPipelineStateChanged();
+    }
+    compilePipelines();
+}
+
+std::array<Material *, 2> DecalRenderer::materials() const {
+    return {_solid.get(), _wire.get()};
+}
+
+void DecalRenderer::initializeInstance(Instance &instance) {
+    const auto &data = _asset->data();
+    const auto &d = instance.decal;
+    const float step = data.nodeSize(0) / 16.0F;
+    const float x = d.x + d.size * 0.5F;
+    const float z = d.z + d.size * 0.5F;
+    float minY = data.minHeight();
+    float maxY = data.maxHeight();
+    const auto address = data.nodeAtClamped(0, {x, z});
+    _asset->getHeightRange(address.level, address.x, address.z, minY, maxY);
+    // Stable whole-decal fade, independent of geometry LOD and streamed heights.
+    instance.center = {x, (minY + maxY) * 0.5F, z};
+    if (_asset->decalLayers()[d.layer].heightScale == 0.0F) {
+        return;
+    }
+    // Camera and terrain LOD changes select fixed blocks without rebuilding the lattice.
+    instance.firstX = static_cast<int>(std::floor(std::max(d.x, 0.0F) / step));
+    instance.firstZ = static_cast<int>(std::floor(std::max(d.z, 0.0F) / step));
+    const int endX = static_cast<int>(std::ceil(std::min(d.x + d.size, data.width()) / step));
+    const int endZ = static_cast<int>(std::ceil(std::min(d.z + d.size, data.depth()) / step));
+    instance.columns = std::max(0, endX - instance.firstX);
+    for (int iz = instance.firstZ; iz < endZ; ++iz) {
+        for (int ix = instance.firstX; ix < endX; ++ix) {
+            const float left = std::max(ix * step, d.x);
+            const float bottom = std::max(iz * step, d.z);
+            const float right = std::min((ix + 1) * step, d.x + d.size);
+            const float top = std::min((iz + 1) * step, d.z + d.size);
+            instance.grids.emplace_back(left, bottom, right - left, top - bottom);
+        }
+    }
+}
+
+void DecalRenderer::appendDecal(NodeDraws &node, uint32_t decal) {
+    const auto &instance = _instances[decal];
+    const auto &d = _instances[decal].decal;
+    const auto &region = node.terrain.region;
+    if (region.x + region.size <= d.x || region.z + region.size <= d.z ||
+        region.x >= d.x + d.size || region.z >= d.z + d.size) {
+        return;
+    }
+    const size_t firstDraw = node.draws.size();
+    const float step = _asset->data().nodeSize(0) / 16.0F;
+    const int firstX = static_cast<int>(std::floor(std::max(region.x, d.x) / step));
+    const int firstZ = static_cast<int>(std::floor(std::max(region.z, d.z) / step));
+    const int endX = static_cast<int>(std::ceil(std::min(region.x + region.size, d.x + d.size) / step));
+    const int endZ = static_cast<int>(std::ceil(std::min(region.z + region.size, d.z + d.size) / step));
+    for (int iz = firstZ; iz < endZ; ++iz) {
+        for (int ix = firstX; ix < endX; ++ix) {
+            IntrusivePtr<scene::Model> model;
+            if (_pool.empty()) {
+                model = createModel();
+            } else {
+                model = std::move(_pool.back());
+                _pool.pop_back();
+            }
+            const size_t index = static_cast<size_t>(iz - instance.firstZ) * instance.columns + ix - instance.firstX;
+            CC_ASSERT(index < instance.grids.size());
+            auto &draw = node.draws.emplace_back(Draw{model, decal, instance.grids[index]});
+            updateInstance(draw, node.terrain);
+            model->setEnabled(_enabled);
+        }
+    }
+    // Preserve composition order when a lower-index decal enters range later.
+    std::inplace_merge(node.draws.begin(), node.draws.begin() + firstDraw, node.draws.end(),
+                       [](const Draw &a, const Draw &b) { return a.decal < b.decal; });
+}
+
+void DecalRenderer::updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged) {
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_gridInst", node.gridParams.grid);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_tileInst", node.gridParams.tile);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_mappingInst", node.gridParams.mapping);
+    if (boundsChanged) {
+        const auto &d = _instances[draw.decal].decal;
+        const float lift = _asset->decalLayers()[d.layer].heightScale;
+        draw.model->createBoundingShape(Vec3{draw.grid.x, node.minY, draw.grid.y},
+                                       Vec3{draw.grid.x + draw.grid.z, node.maxY + lift, draw.grid.y + draw.grid.w});
+        draw.model->updateWorldBound();
+    }
+}
+
+void DecalRenderer::updateInstance(const Draw &draw, const TerrainNode &node) {
+    updateBinding(draw, node, true);
+    const auto &d = _instances[draw.decal].decal;
+    const auto &layer = _asset->decalLayers()[d.layer];
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalRegion", Vec4{d.x, d.z, d.size, static_cast<float>(d.layer)});
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalGrid", draw.grid);
+    setLandscapeInstanceAttribute(draw.model, _scratch, "a_decalFade", Vec4{layer.heightScale, _instances[draw.decal].fade, 0, 0});
+}
+
+IntrusivePtr<scene::Model> DecalRenderer::createModel() {
+    auto *model = Root::getInstance()->createModel<scene::Model>();
+    model->setNode(_node);
+    model->setTransform(_node);
+    model->setCastShadow(_castShadow);
+    model->setReceiveShadow(_receiveShadow);
+    model->initSubModel(0, _mesh, _wireframe ? _wire.get() : _solid.get());
+    model->setEnabled(false);
+    model->attachToScene(_scene);
+    return model;
+}
+
+void DecalRenderer::recycle(Draw &draw) {
+    draw.model->setEnabled(false);
+    _pool.push_back(std::move(draw.model));
+}
+
+void DecalRenderer::compilePipelines() {
+    if (_pool.empty()) {
+        return;
+    }
+    auto *subModel = _pool.back()->getSubModels().front().get();
+    auto *renderPass = Root::getInstance()->getMainWindow()->getFramebuffer()->getRenderPass();
+    const auto &passes = *subModel->getPasses();
+    for (uint32_t i = 0; i < passes.size(); ++i) {
+        // Use the real instance layout without adding a draw to a live render queue.
+        // Creating shader objects alone does not compile programs on GLES3.
+        pipeline::InstancedBuffer instances(passes[i]);
+        instances.merge(subModel, i);
+        for (const auto &instance : instances.getInstances()) {
+            pipeline::PipelineStateManager::getOrCreatePipelineState(passes[i], instance.shader, instance.ia, renderPass);
+        }
+    }
+}
+
 
 } // namespace landscape
 } // namespace cc

@@ -41,55 +41,36 @@ function recordPagePass (commands: CommandBuffer, ia: InputAssembler, renderPass
 }
 
 export class VTPageComposer {
+    private readonly _device: Device;
+    private readonly _size: number;
+
     private _albedo: Texture2D | null = null;
     private _normal: Texture2D | null = null;
     private _framebuffer: Framebuffer | null = null;
     private _renderPass: RenderPass | null = null;
     private _initialPass: RenderPass | null = null;
+
     private _mesh: RenderingSubMesh | null = null;
     private _instances: Buffer | null = null;
     private _ia: InputAssembler | null = null;
     private _pipelines: PipelineState[] = [];
     private _material: Material | null = null;
+
     private _sourceTable: Texture | null = null;
     private _sourceRows = new Float32Array();
     private _decals!: DecalRenderer;
+
+    private _globalColorMap: Texture2D | null = null;
     private _fallbackGlobalColor!: Texture;
     private _globalColorSampler!: Sampler;
-    private _globalColorMap: Texture2D | null = null;
     private _globalColorStrength = 0.1;
     private _effectiveGlobalColorStrength = 0;
     private _inverseWidth = 0;
     private _inverseDepth = 0;
 
-    private readonly _device: Device;
-    private readonly _size: number;
-
     constructor (_device: Device, _size: number) {
         this._device = _device;
         this._size = _size;
-    }
-
-    public target (): Texture2D {
-        return this._albedo!;
-    }
-    public albedo (): Texture {
-        return this._albedo!.getGFXTexture()!;
-    }
-    public normal (): Texture {
-        return this._normal!.getGFXTexture()!;
-    }
-    public material (): Material {
-        return this._material!;
-    }
-    public size (): number {
-        return this._size;
-    }
-    public inputAssembler (): InputAssembler {
-        return this._ia!;
-    }
-    public renderPass (initialize = false): RenderPass {
-        return initialize ? this._initialPass! : this._renderPass!;
     }
 
     public init (asset: LandscapeAsset, residency: LandscapeResidency, materials: MaterialLibrary, decals: DecalRenderer): boolean {
@@ -172,13 +153,34 @@ export class VTPageComposer {
         return true;
     }
 
-    private bindTexture (name: string, texture: Texture, sampler: Sampler): void {
-        this.material().setProperty(name, texture);
-        for (const pass of this.material().passes) {
-            pass.bindSampler(Pass.getBindingFromHandle(pass.getHandle(name)), sampler);
+    public destroy (): void {
+        for (const pipeline of this._pipelines) {
+            pipeline.destroy();
         }
+        this._pipelines = [];
+        this._ia?.destroy();
+        this._instances?.destroy();
+        this._mesh?.destroy();
+        this._framebuffer?.destroy();
+        this._renderPass?.destroy();
+        this._initialPass?.destroy();
+        this._sourceTable?.destroy();
+        this._material?.destroy();
+        this._albedo?.destroy();
+        this._normal?.destroy();
+        this._ia = null;
+        this._instances = null;
+        this._mesh = null;
+        this._framebuffer = null;
+        this._renderPass = null;
+        this._initialPass = null;
+        this._sourceTable = null;
+        this._material = null;
+        this._albedo = null;
+        this._normal = null;
     }
 
+    // Composition.
     public prepareInputs (slot: number, region: LandscapeRegion, sources: VTPageSources, residency: LandscapeResidency): VTPageInstance | null {
         const splat = residency.resolve(sources.splat);
         if (splat.layer < 0) {
@@ -223,16 +225,10 @@ export class VTPageComposer {
         recordPagePass(commands, this.inputAssembler(), this.renderPass(initialize), this.material().passes[variant], this._pipelines[variant], this._framebuffer!, this._size, instances.length);
     }
 
+    // Material settings.
     public setGlobalColorMap (texture: Texture2D | null): void {
         this._globalColorMap = texture;
         this.applyGlobalColorMap();
-    }
-
-    private applyGlobalColorMap (): void {
-        const texture = this._globalColorMap?.getGFXTexture();
-        this._effectiveGlobalColorStrength = texture ? this._globalColorStrength : 0;
-        this.bindTexture('globalColorMap', texture || this._fallbackGlobalColor, this._globalColorSampler);
-        this.material().setProperty('globalColorParams', new Vec4(this._inverseWidth, this._inverseDepth, this._effectiveGlobalColorStrength, 0));
     }
 
     public setGlobalColorStrength (strength: number): boolean {
@@ -250,6 +246,48 @@ export class VTPageComposer {
         return this.setEnabled('heightBlendParams', enabled);
     }
 
+    public target (): Texture2D {
+        return this._albedo!;
+    }
+
+    public albedo (): Texture {
+        return this._albedo!.getGFXTexture()!;
+    }
+
+    public normal (): Texture {
+        return this._normal!.getGFXTexture()!;
+    }
+
+    public size (): number {
+        return this._size;
+    }
+
+    public material (): Material {
+        return this._material!;
+    }
+
+    public inputAssembler (): InputAssembler {
+        return this._ia!;
+    }
+
+    public renderPass (initialize = false): RenderPass {
+        return initialize ? this._initialPass! : this._renderPass!;
+    }
+
+    private bindTexture (name: string, texture: Texture, sampler: Sampler): void {
+        this.material().setProperty(name, texture);
+        for (const pass of this.material().passes) {
+            pass.bindSampler(Pass.getBindingFromHandle(pass.getHandle(name)), sampler);
+        }
+    }
+
+    private applyGlobalColorMap (): void {
+        const texture = this._globalColorMap?.getGFXTexture();
+        this._effectiveGlobalColorStrength = texture ? this._globalColorStrength : 0;
+        this.bindTexture('globalColorMap', texture || this._fallbackGlobalColor, this._globalColorSampler);
+        this.material().setProperty('globalColorParams', new Vec4(this._inverseWidth, this._inverseDepth, this._effectiveGlobalColorStrength, 0));
+    }
+
     private setEnabled (name: string, enabled: boolean): boolean {
         const pass = this.material().passes[0];
         const params = pass.getUniform(pass.getHandle(name), new Vec4());
@@ -260,33 +298,6 @@ export class VTPageComposer {
         params.x = strength;
         this.material().setProperty(name, params);
         return true;
-    }
-
-    public destroy (): void {
-        for (const pipeline of this._pipelines) {
-            pipeline.destroy();
-        }
-        this._pipelines = [];
-        this._ia?.destroy();
-        this._instances?.destroy();
-        this._mesh?.destroy();
-        this._framebuffer?.destroy();
-        this._renderPass?.destroy();
-        this._initialPass?.destroy();
-        this._sourceTable?.destroy();
-        this._material?.destroy();
-        this._albedo?.destroy();
-        this._normal?.destroy();
-        this._ia = null;
-        this._instances = null;
-        this._mesh = null;
-        this._framebuffer = null;
-        this._renderPass = null;
-        this._initialPass = null;
-        this._sourceTable = null;
-        this._material = null;
-        this._albedo = null;
-        this._normal = null;
     }
 }
 
@@ -299,9 +310,9 @@ interface MipPass {
 }
 
 export class VTPageMipGenerator {
-    private readonly _mips: MipPass[] = [];
-
     private readonly _device: Device;
+
+    private readonly _mips: MipPass[] = [];
 
     constructor (_device: Device) {
         this._device = _device;
@@ -343,6 +354,17 @@ export class VTPageMipGenerator {
         return true;
     }
 
+    public destroy (): void {
+        for (const mip of this._mips) {
+            mip.pipeline.destroy();
+            mip.framebuffer.destroy();
+            mip.material.destroy();
+            mip.albedo.destroy();
+            mip.normal.destroy();
+        }
+        this._mips.length = 0;
+    }
+
     public record (commands: CommandBuffer, composer: VTPageComposer, instances: readonly VTPageInstance[], initialize: boolean): void {
         const slots = composer.size() / config.VT_PAGE_RES;
         for (let i = 0; i < this._mips.length; ++i) {
@@ -366,16 +388,5 @@ export class VTPageMipGenerator {
             commands.blitTexture(mip.albedo, composer.albedo(), regions, Filter.POINT);
             commands.blitTexture(mip.normal, composer.normal(), regions, Filter.POINT);
         }
-    }
-
-    public destroy (): void {
-        for (const mip of this._mips) {
-            mip.pipeline.destroy();
-            mip.framebuffer.destroy();
-            mip.material.destroy();
-            mip.albedo.destroy();
-            mip.normal.destroy();
-        }
-        this._mips.length = 0;
     }
 }

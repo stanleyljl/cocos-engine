@@ -49,8 +49,7 @@ struct VTPageInstance {
     uint32_t physicalSlot() const { return static_cast<uint32_t>(pageInfo.x); }
 };
 
-// Owns composition inputs, material and draw resources. Page selection and
-// submission belong to VTRenderer; this stage only prepares inputs and records draws.
+// VTRenderer selects pages; this stage prepares inputs and records composition.
 class VTPageComposer {
 public:
     VTPageComposer();
@@ -58,41 +57,50 @@ public:
     VTPageComposer(const VTPageComposer &) = delete;
     VTPageComposer &operator=(const VTPageComposer &) = delete;
     bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
-    RenderTexture *target() const { return _compositionTarget.get(); }
-    uint32_t size() const;
-    gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }
-    gfx::RenderPass *renderPass(bool initialize = false) const;
-    void record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t count, bool initialize);
-    Material *material() const { return _composeMaterial.get(); }
+
+    // Composition.
     bool prepareInputs(uint32_t slot, LandscapeRegion region, const VTPageSources &sources, const LandscapeResidency &residency, VTPageInstance &instance);
     void uploadInputs();
+    void record(gfx::CommandBuffer &commands, const VTPageInstance *instances, uint32_t count, bool initialize);
+
+    // Material settings.
     void setGlobalColorMap(Texture2D *texture);
     // Return whether cached page pixels need recomposition.
     bool setGlobalColorStrength(float strength);
     bool setHeightBlendEnabled(bool enabled);
 
+    RenderTexture *target() const { return _compositionTarget.get(); }
+    uint32_t size() const;
+    Material *material() const { return _composeMaterial.get(); }
+    gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }
+    gfx::RenderPass *renderPass(bool initialize = false) const;
+
 private:
+    using SourceRow = std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT>;
+    static_assert(sizeof(SourceRow) == config::VT_NORMAL_SOURCE_COUNT * 4 * sizeof(float), "Source rows must match RGBA32F texels");
+
     bool initTarget(gfx::Device *device, uint32_t atlasSize, bool compressed);
-    bool initDrawResources(gfx::Device *device);
-    bool initRenderPass(gfx::Device *device, bool compressed);
     bool initMaterial(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, gfx::Device *device, bool compressed, uint32_t targetSize);
     bool initSourceTable(LandscapeResidency &residency, gfx::Device *device, uint32_t pageCount);
+    bool initDrawResources(gfx::Device *device);
+    bool initRenderPass(gfx::Device *device, bool compressed);
     void bindTexture(const char *name, gfx::Texture *texture, gfx::Sampler *sampler);
     void applyGlobalColorMap();
 
     // A full RGBA atlas, or a scratch page reused by the compressed path.
     IntrusivePtr<RenderTexture> _compositionTarget;
+
     IntrusivePtr<RenderingSubMesh> _pageMesh;
     IntrusivePtr<gfx::Buffer> _instanceBuffer;
     IntrusivePtr<gfx::InputAssembler> _inputAssembler;
     std::array<IntrusivePtr<gfx::PipelineState>, 2> _composePipelines; // XZ and triplanar, compiled at init.
     IntrusivePtr<gfx::RenderPass> _initialPass;
     IntrusivePtr<Material> _composeMaterial;
+
     IntrusivePtr<gfx::Texture> _sourceTable;
-    using SourceRow = std::array<Vec4, config::VT_NORMAL_SOURCE_COUNT>;
-    static_assert(sizeof(SourceRow) == config::VT_NORMAL_SOURCE_COUNT * 4 * sizeof(float), "Source rows must match RGBA32F texels");
     ccstd::vector<SourceRow> _sourceRows;
     DecalRenderer *_decals{nullptr}; // borrowed; owner destroys VT first
+
     IntrusivePtr<Texture2D> _globalColorMap;
     IntrusivePtr<gfx::Texture> _fallbackGlobalColorMap;
     gfx::Sampler *_globalColorSampler{nullptr}; // device-owned
@@ -113,8 +121,7 @@ public:
     void record(gfx::CommandBuffer &commands, const VTPageComposer &composer, uint32_t count, bool initialize);
 
 private:
-    // Descriptors are independent per mip: later recording cannot overwrite
-    // the preceding pass's source views. Prefix views exclude the destination.
+    // Per-mip descriptors preserve earlier bindings; source views exclude the destination.
     struct MipPass {
         IntrusivePtr<Material> material;
         IntrusivePtr<gfx::PipelineState> pipelineState;
@@ -136,24 +143,27 @@ public:
     VTPageCompressor &operator=(const VTPageCompressor &) = delete;
     static bool supported();
     bool init(gfx::Device *device, RenderTexture &composition, uint32_t atlasSize);
-    Texture2D *atlas() const;
-    gfx::Texture *albedo() const;
-    gfx::Texture *normalRoughness() const;
     void begin(gfx::CommandBuffer &commands, bool discardContents);
     void record(gfx::CommandBuffer &commands, uint32_t slot);
     void end(gfx::CommandBuffer &commands);
 
+    Texture2D *atlas() const;
+    gfx::Texture *albedo() const;
+    gfx::Texture *normalRoughness() const;
+
 private:
+    struct Mip {
+        IntrusivePtr<gfx::Buffer> constants;
+        IntrusivePtr<gfx::DescriptorSet> bindings;
+    };
+
     void transition(gfx::CommandBuffer &commands, gfx::AccessFlags previous, gfx::AccessFlags next, bool discardContents);
+
     std::array<IntrusivePtr<Texture2D>, 2> _atlas;
     IntrusivePtr<gfx::Buffer> _blocks;
     IntrusivePtr<gfx::Shader> _shader;
     IntrusivePtr<gfx::DescriptorSetLayout> _layout;
     IntrusivePtr<gfx::PipelineLayout> _pipelineLayout;
-    struct Mip {
-        IntrusivePtr<gfx::Buffer> constants;
-        IntrusivePtr<gfx::DescriptorSet> bindings;
-    };
     std::array<Mip, config::VT_MIP_LEVELS> _mips;
     IntrusivePtr<gfx::PipelineState> _pipeline;
 };

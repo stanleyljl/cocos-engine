@@ -52,9 +52,7 @@ class RenderScene;
 namespace landscape {
 class MaterialLibrary;
 
-// Owns decal selection, VT composition inputs and displaced geometry.
-// LandscapeRenderer supplies resolved terrain nodes; VTRenderer schedules
-// page composition. Neither residency nor quadtree selection belongs here.
+// Owns decal instances, VT composition inputs and displaced geometry.
 class DecalRenderer {
 public:
     struct TerrainNode {
@@ -69,20 +67,15 @@ public:
     ~DecalRenderer();
     DecalRenderer(const DecalRenderer &) = delete;
     DecalRenderer &operator=(const DecalRenderer &) = delete;
-
     bool init(Node *node, scene::RenderScene *scene, bool heightUnorm);
     bool setAsset(LandscapeAsset *asset, gfx::Device *device, uint32_t pageCount);
+
+    // Runtime decals.
     // IDs belong to the current asset load; zero reports failure.
     uint32_t addDecal(const LandscapeAsset::Decal &decal);
     bool removeDecal(uint32_t id, LandscapeRegion &region);
-    // Only shared terrain shader uniforms/textures/variants are set by the caller.
-    std::array<Material *, 2> materials() const;
 
-    bool bindComposeMaterial(Material *material, const MaterialLibrary &materials);
-    void updateComposeMaterial(Material *material);
-    uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
-    void uploadPageDecals();
-
+    // Displaced geometry and visibility.
     // Committed terrain changes update only the affected node's bindings.
     void updateNode(const TerrainNode &node);
     void removeNode(uint64_t nodeKey);
@@ -91,13 +84,23 @@ public:
     void refreshInstances(const Vec3 &viewPosition);
     void preparePasses(uint32_t stamp);
     void collectPassModels(const QuadNode &node, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
-    void onGlobalPipelineStateChanged();
+
+    // VT composition.
+    bool bindComposeMaterial(Material *material, const MaterialLibrary &materials);
+    void updateComposeMaterial(Material *material);
+    uint32_t collectPageDecals(uint32_t slot, const Vec4 &region);
+    void uploadPageDecals();
+
+    // Materials and draw settings.
     void setEnabled(bool enabled);
     void setWireframe(bool wireframe);
-    // Rebind the selected material and restore instance attributes after variant changes.
-    void refreshMaterials();
     void setCastShadow(bool enabled);
     void setReceiveShadow(bool enabled);
+    // Rebind the selected material and restore instance attributes after variant changes.
+    void refreshMaterials();
+    void onGlobalPipelineStateChanged();
+    // The caller updates shared terrain uniforms, textures and variants.
+    std::array<Material *, 2> materials() const;
 
 private:
     struct Draw {
@@ -121,27 +124,34 @@ private:
         TerrainNode terrain;
         ccstd::vector<Draw> draws;
     };
-    void updateInstance(const Draw &draw, const TerrainNode &node);
-    void updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged);
-    void appendDecal(NodeDraws &node, uint32_t decal);
+
+    // Instances and models.
     void initializeInstance(Instance &instance);
+    void appendDecal(NodeDraws &node, uint32_t decal);
+    void updateBinding(const Draw &draw, const TerrainNode &node, bool boundsChanged);
+    void updateInstance(const Draw &draw, const TerrainNode &node);
     IntrusivePtr<scene::Model> createModel();
-    void compilePipelines();
     void recycle(Draw &draw);
+    void compilePipelines();
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
     IntrusivePtr<LandscapeAsset> _asset;
+
     IntrusivePtr<Material> _solid;
     IntrusivePtr<Material> _wire;
     IntrusivePtr<RenderingSubMesh> _mesh;
+
     IntrusivePtr<gfx::Texture> _pageIndexTexture;
     ccstd::vector<uint8_t> _pageIndexData; // two bytes per instance index, low byte first
+
     ccstd::vector<Instance> _instances;
     uint32_t _nextDecalId{1};
+
     ccstd::unordered_map<uint64_t, NodeDraws> _nodes;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;
     TypedArray _scratch;
+
     Vec3 _viewPosition;
     bool _enabled{true};
     bool _wireframe{false};

@@ -1,8 +1,5 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-import { DEBUG } from 'internal:constants';
-import { Vec4 } from '../core/math';
 import { log } from '../core/platform/debug';
-import { Pass } from '../render-scene/core/pass';
 import { Address, BufferTextureCopy, Device, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
 import { Texture2D } from '../asset/assets';
 import { LandscapeAsset } from './Asset';
@@ -14,28 +11,25 @@ import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, Read
 import * as config from './Config';
 
 export class VTPageTable {
+    private readonly _device: Device;
+
     private _texture: Texture | null = null;
     private _entries = new Uint8Array();
     private readonly _freeSlots: number[] = [];
     private _size = 0;
     private _count = 0;
 
-    private readonly _device: Device;
-
     constructor (_device: Device) {
         this._device = _device;
     }
 
-    public texture (): Texture {
-        return this._texture!;
-    }
-
-    private requiredSize (count: number): number {
-        let size = Math.max(256, this._size);
-        while (size * size < count * VTGridMapping.CELL_COUNT) {
-            size *= 2;
-        }
-        return size <= this._device.capabilities.maxTextureSize ? size : 0;
+    public destroy (): void {
+        this._texture?.destroy();
+        this._texture = null;
+        this._entries = new Uint8Array();
+        this._freeSlots.length = 0;
+        this._size = 0;
+        this._count = 0;
     }
 
     public canFit (count: number): boolean {
@@ -130,13 +124,16 @@ export class VTPageTable {
         this._device.copyBuffersToTexture(buffers, this.texture(), copies);
     }
 
-    public destroy (): void {
-        this._texture?.destroy();
-        this._texture = null;
-        this._entries = new Uint8Array();
-        this._freeSlots.length = 0;
-        this._size = 0;
-        this._count = 0;
+    public texture (): Texture {
+        return this._texture!;
+    }
+
+    private requiredSize (count: number): number {
+        let size = Math.max(256, this._size);
+        while (size * size < count * VTGridMapping.CELL_COUNT) {
+            size *= 2;
+        }
+        return size <= this._device.capabilities.maxTextureSize ? size : 0;
     }
 }
 
@@ -160,23 +157,26 @@ export class VTPage {
 }
 
 export class VTRenderer {
+    private readonly _device: Device;
+    private readonly _atlasSize: number;
+
     private _data!: LandscapeData;
     private _layout!: VTPageLayout;
     private _heightRanges!: readonly (readonly HeightRange[])[]; // Borrowed immutable asset metadata.
+
+    private _reservation = 0;
     private _pages: VTPage[] = [];
     private _reservedSlots: number[] = [];
     private readonly _lookup = new Map<NodeKey, number>();
-    private _reservation = 0;
+
     private readonly _pageTable: VTPageTable;
     private readonly _composer: VTPageComposer;
     private readonly _mipGenerator: VTPageMipGenerator;
     private _sampler!: Sampler;
     private _needsClear = true;
+
     private _refineFarDetail = true;
     private _triplanarEnabled = true;
-
-    private readonly _device: Device;
-    private readonly _atlasSize: number;
 
     constructor (_device: Device, _atlasSize: number) {
         this._device = _device;
@@ -223,35 +223,37 @@ export class VTRenderer {
         this._lookup.clear();
     }
 
-    public pageTable (): VTPageTable {
-        return this._pageTable;
+    // Page residency and composition.
+    public canReserve (pages: readonly VTPageAddress[]): boolean {
+        return pages.length <= this._pages.length && pages.every((page) => {
+            const side = 2 ** (this._layout.rootLevel() - page.level);
+            return page.level >= 0 && page.level <= this._layout.rootLevel() && page.x >= 0 && page.z >= 0
+                && page.x < this._data.sectorsX * side && page.z < this._data.sectorsZ * side;
+        });
     }
-    public reservedSlots (): readonly number[] {
-        return this._reservedSlots;
-    }
-    public page (slot: number): VTPage {
-        return this._pages[slot];
-    }
-    public region (address: VTPageAddress): LandscapeRegion {
-        return this._layout.pageRegion(address);
-    }
-    public getTriplanarEnabled (): boolean {
-        return this._triplanarEnabled;
-    }
-    public getRefineFarDetail (): boolean {
-        return this._refineFarDetail;
-    }
-    public atlas (): Texture2D {
-        return this._composer.target();
-    }
-    public albedo (): Texture {
-        return this._composer.albedo();
-    }
-    public normalRoughness (): Texture {
-        return this._composer.normal();
-    }
-    public sampler (): Sampler {
-        return this._sampler;
+
+    public reserve (pages: readonly VTPageAddress[]): boolean {
+        if (!this.canReserve(pages)) {
+            return false;
+        }
+        ++this._reservation;
+        this._reservedSlots = pages.map((address) => {
+            const slot = this._lookup.get(address.key());
+            if (slot === undefined) {
+                return -1;
+            }
+            this._pages[slot].lastReserved = this._reservation;
+            return slot;
+        });
+        for (let i = 0; i < pages.length; ++i) {
+            if (this._reservedSlots[i] >= 0) {
+                continue;
+            }
+            const slot = this.allocate(pages[i]);
+            this._pages[slot].lastReserved = this._reservation;
+            this._reservedSlots[i] = slot;
+        }
+        return true;
     }
 
     public renderPages (residency: LandscapeResidency, pages: readonly VTPageAddress[], maxPages: number): number {
@@ -293,80 +295,6 @@ export class VTRenderer {
         return batch.length;
     }
 
-    public needsComposition (address: VTPageAddress): boolean {
-        const slot = this._lookup.get(address.key());
-        return slot === undefined || this._pages[slot].state !== PageState.READY;
-    }
-
-    public canReserve (pages: readonly VTPageAddress[]): boolean {
-        return pages.length <= this._pages.length && pages.every((page) => {
-            const side = 2 ** (this._layout.rootLevel() - page.level);
-            return page.level >= 0 && page.level <= this._layout.rootLevel() && page.x >= 0 && page.z >= 0
-                && page.x < this._data.sectorsX * side && page.z < this._data.sectorsZ * side;
-        });
-    }
-
-    public reserve (pages: readonly VTPageAddress[]): boolean {
-        if (!this.canReserve(pages)) {
-            return false;
-        }
-        ++this._reservation;
-        this._reservedSlots = pages.map((address) => {
-            const slot = this._lookup.get(address.key());
-            if (slot === undefined) {
-                return -1;
-            }
-            this._pages[slot].lastReserved = this._reservation;
-            return slot;
-        });
-        for (let i = 0; i < pages.length; ++i) {
-            if (this._reservedSlots[i] >= 0) {
-                continue;
-            }
-            const slot = this.allocate(pages[i]);
-            this._pages[slot].lastReserved = this._reservation;
-            this._reservedSlots[i] = slot;
-        }
-        return true;
-    }
-
-    public selectSources (page: VTPageAddress, refine: boolean, triplanar: boolean): VTPageSources {
-        const size = this._layout.pageSize(page.level);
-        const result = new VTPageSources();
-        result.splat = this._data.nodeAtClamped(this.sourceLevel(size), { x: (page.x + 0.5) * size, z: (page.z + 0.5) * size });
-        const target = size * Math.max(0.5, (config.SOURCE_TILE_RESOLUTION - 1) / config.VT_PAGE_INTERIOR);
-        const level = refine && page.level >= config.VT_NORMAL_DETAIL_MIN_LEVEL ? this.sourceLevel(target) : result.splat.level;
-        for (let row = 0; row < 2; ++row) {
-            for (let col = 0; col < 2; ++col) {
-                result.normals[row * 2 + col] = this._data.nodeAtClamped(level, { x: (page.x + 0.25 + col * 0.5) * size, z: (page.z + 0.25 + row * 0.5) * size });
-            }
-        }
-        result.triplanar = triplanar && this.hasCliff(this.region(page));
-        return result;
-    }
-
-    private hasCliff (region: LandscapeRegion): boolean {
-        // Estimate slope from each region's height span and size, including gutters.
-        // This coarse classification can miss cliffs narrower than the region.
-        const border = region.size * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
-        let level = 0;
-        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < region.size + 2 * border) {
-            ++level;
-        }
-        const first = this._data.nodeAtClamped(level, { x: region.x - border, z: region.z - border });
-        const last = this._data.nodeAtClamped(level, { x: region.x + region.size + border, z: region.z + region.size + border });
-        const heightThreshold = this._data.nodeSize(level) * Math.sqrt(1 / (config.TRIPLANAR_START_NORMAL_Y * config.TRIPLANAR_START_NORMAL_Y) - 1);
-        for (let z = first.z; z <= last.z; ++z) {
-            for (let x = first.x; x <= last.x; ++x) {
-                const range = this._heightRanges[level][z * this._data.nodesX(level) + x];
-                if (range.maxY - range.minY > heightThreshold) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     public invalidate (changed?: LandscapeRegion): void {
         for (const page of this._pages) {
             if (page.state !== PageState.READY) {
@@ -388,6 +316,11 @@ export class VTRenderer {
         return this._reservedSlots.length > 0 && this._reservedSlots.every((slot) => this._pages[slot].state === PageState.READY);
     }
 
+    public needsComposition (address: VTPageAddress): boolean {
+        const slot = this._lookup.get(address.key());
+        return slot === undefined || this._pages[slot].state !== PageState.READY;
+    }
+
     public resolve (address: VTPageAddress): number {
         const slot = this._lookup.get(address.key());
         if (slot === undefined) {
@@ -397,6 +330,34 @@ export class VTRenderer {
         return page.lastReserved === this._reservation && page.drawable() ? slot : -1;
     }
 
+    public reservedSlots (): readonly number[] {
+        return this._reservedSlots;
+    }
+
+    public page (slot: number): VTPage {
+        return this._pages[slot];
+    }
+
+    public region (address: VTPageAddress): LandscapeRegion {
+        return this._layout.pageRegion(address);
+    }
+
+    public selectSources (page: VTPageAddress, refine: boolean, triplanar: boolean): VTPageSources {
+        const size = this._layout.pageSize(page.level);
+        const result = new VTPageSources();
+        result.splat = this._data.nodeAtClamped(this.sourceLevel(size), { x: (page.x + 0.5) * size, z: (page.z + 0.5) * size });
+        const target = size * Math.max(0.5, (config.SOURCE_TILE_RESOLUTION - 1) / config.VT_PAGE_INTERIOR);
+        const level = refine && page.level >= config.VT_NORMAL_DETAIL_MIN_LEVEL ? this.sourceLevel(target) : result.splat.level;
+        for (let row = 0; row < 2; ++row) {
+            for (let col = 0; col < 2; ++col) {
+                result.normals[row * 2 + col] = this._data.nodeAtClamped(level, { x: (page.x + 0.25 + col * 0.5) * size, z: (page.z + 0.25 + row * 0.5) * size });
+            }
+        }
+        result.triplanar = triplanar && this.hasCliff(this.region(page));
+        return result;
+    }
+
+    // Composition settings.
     public setGlobalColorMap (texture: Texture2D | null): void {
         this._composer.setGlobalColorMap(texture);
         this.invalidate();
@@ -405,13 +366,6 @@ export class VTRenderer {
     public setGlobalColorStrength (strength: number): void {
         if (this._composer.setGlobalColorStrength(strength)) {
             this.invalidate();
-        }
-        if (DEBUG && config.LANDSCAPE_DEBUG) {
-            const pass = this._composer.material().passes[0];
-            const params = pass.getUniform(pass.getHandle('globalColorParams'), new Vec4());
-            const texture = pass.descriptorSet.getTexture(Pass.getBindingFromHandle(pass.getHandle('globalColorMap')));
-            const stale = this._reservedSlots.filter((slot) => this._pages[slot].state === PageState.OUTDATED).length;
-            log(`[Landscape] Global color strength: requested=${strength.toFixed(2)} effective=${params.z.toFixed(2)} map=${texture ? texture.width : 0}x${texture ? texture.height : 0} stale=${stale}/${this._reservedSlots.length}`);
         }
     }
 
@@ -429,6 +383,10 @@ export class VTRenderer {
         this.invalidate();
     }
 
+    public getTriplanarEnabled (): boolean {
+        return this._triplanarEnabled;
+    }
+
     public setRefineFarDetail (enabled: boolean): void {
         if (enabled === this._refineFarDetail) {
             return;
@@ -441,12 +399,29 @@ export class VTRenderer {
         }
     }
 
-    private sourceLevel (size: number): number {
-        let level = this._data.minTileLevel;
-        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < size) {
-            ++level;
-        }
-        return level;
+    public getRefineFarDetail (): boolean {
+        return this._refineFarDetail;
+    }
+
+    // GPU resources.
+    public pageTable (): VTPageTable {
+        return this._pageTable;
+    }
+
+    public atlas (): Texture2D {
+        return this._composer.target();
+    }
+
+    public albedo (): Texture {
+        return this._composer.albedo();
+    }
+
+    public normalRoughness (): Texture {
+        return this._composer.normal();
+    }
+
+    public sampler (): Sampler {
+        return this._sampler;
     }
 
     private allocate (address: VTPageAddress): number {
@@ -476,5 +451,35 @@ export class VTRenderer {
         this._pages[slot] = page;
         this._lookup.set(address.key(), slot);
         return slot;
+    }
+
+    private sourceLevel (size: number): number {
+        let level = this._data.minTileLevel;
+        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < size) {
+            ++level;
+        }
+        return level;
+    }
+
+    private hasCliff (region: LandscapeRegion): boolean {
+        // Estimate slope from each region's height span and size, including gutters.
+        // This coarse classification can miss cliffs narrower than the region.
+        const border = region.size * config.VT_PAGE_BORDER / config.VT_PAGE_INTERIOR;
+        let level = 0;
+        while (level < this._data.maxTileLevel && this._data.nodeSize(level) < region.size + 2 * border) {
+            ++level;
+        }
+        const first = this._data.nodeAtClamped(level, { x: region.x - border, z: region.z - border });
+        const last = this._data.nodeAtClamped(level, { x: region.x + region.size + border, z: region.z + region.size + border });
+        const heightThreshold = this._data.nodeSize(level) * Math.sqrt(1 / (config.TRIPLANAR_START_NORMAL_Y * config.TRIPLANAR_START_NORMAL_Y) - 1);
+        for (let z = first.z; z <= last.z; ++z) {
+            for (let x = first.x; x <= last.x; ++x) {
+                const range = this._heightRanges[level][z * this._data.nodesX(level) + x];
+                if (range.maxY - range.minY > heightThreshold) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

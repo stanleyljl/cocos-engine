@@ -25,79 +25,85 @@ class LandscapeResidency;
 class VTRenderer;
 class Quadtree;
 
-// Owns terrain state and coordinates resource readiness before committing draws.
+// Coordinates terrain updates, resource readiness and pass collection.
 class LandscapeSchedule {
 public:
     LandscapeSchedule(LandscapeAsset &asset, LandscapeRenderer &renderer, float lodQualityScale);
     ~LandscapeSchedule();
+
+    // Frame updates.
     void update(const Vec3 &camera, const Vec3 &origin);
+    void prepareRenderData(uint32_t frame);
+
+    // Pass collection.
     void beginPasses();
     void addPass(const geometry::Frustum &frustum, bool includeNearby);
-    void prepareRenderData(uint32_t frame);
-    void endPasses();
     void collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
-    void visitDebugNodes(const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const;
+    void endPasses();
+
+    // Latched after the first stable render state.
     bool isReady() const { return _ready; }
     // Current capacity-admitted requests are ready and draw selection is stable.
     bool isRenderStateStable() const;
 
-private:
-    struct Pass {
-        std::array<Vec4, 6> planes;
-        bool includeNearby{false}; // Include near-camera nodes in morph diagnostics.
-    };
+    void visitDebugNodes(const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const;
 
+private:
     struct Resources {
-        // Sources retain collection order; pages are sorted by key. Both are unique.
+        // Unique sources in collection order; unique pages sorted by key.
         ccstd::vector<NodeAddress> sources;
         ccstd::vector<VTPageAddress> pages;
         uint32_t mappingCount{0};
     };
     struct PendingNode {
         NodeAddress node;
-        VTGridMapping material; // Replacement mapping; the node retains its drawable mapping.
+        VTGridMapping material; // Replacement; the published mapping remains drawable.
     };
-    void prepareResources(uint32_t frame);
-    bool prepareRequests();
-    void checkMorphRanges();
-    void composeNodes();
-    bool publishNodes();
+    struct Pass {
+        std::array<Vec4, 6> planes;
+        bool includeNearby{false}; // Include near-camera nodes in morph diagnostics.
+    };
 
-    // Build a reservation from ready nodes and pending replacements, then admit requests.
+    // Resource requests.
+    bool prepareRequests();
     Resources collectResources() const;
     void schedulePendingNodes(Resources &resources, bool sectorRootsReady);
     void appendResources(Resources &resources, const PendingNode &pending) const;
     bool canPrepare(const Resources &resources, ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> &pageSources) const;
     ccstd::vector<NodeAddress> compositionSources() const;
-    void stopLoading();
-#if CC_LANDSCAPE_DEBUG
-    bool morphRangeTooSmall(const QuadNode &node) const;
-#endif
 
-    // Borrowed dependencies outlive the scheduler.
+    // Resource preparation.
+    void prepareResources(uint32_t frame);
+    void composeNodes();
+    bool publishNodes();
+    void stopLoading();
+
+    // Morph diagnostics.
+    void checkMorphRanges();
+    bool morphRangeTooSmall(const QuadNode &node) const;
+
+    // Borrowed dependencies outlive Schedule; Quadtree is owned here.
     LandscapeAsset &_asset;
     LandscapeResidency &_residency;
     VTRenderer &_vtRenderer;
     LandscapeRenderer &_renderer;
     std::unique_ptr<Quadtree> _quadtree;
-    ccstd::vector<Pass> _passes;
-    size_t _activePassCount{0};
-    // Camera, committed selection and pass changes invalidate diagnostics.
-    bool _needsMorphCheck{true};
-#if CC_LANDSCAPE_DEBUG
-    bool _lastMorphRangeWarning{false}; // Log only diagnostic state transitions.
-#endif
-    bool _ready{false};
 
-    ccstd::vector<PendingNode> _pendingNodes;
-    // Last committed reservation, retained while a source batch loads. Temporary
-    // composition inputs are owned by Residency and are not part of this base set.
-    Resources _reservedResources;
-    // View/selection changes, cancellation and publication request another admission
-    // pass. Defer that pass until the source batch completes; capacity rejection alone
-    // does not request a retry.
-    bool _requestsDirty{true};
+    bool _ready{false};
     bool _loadingStopped{false};
     std::optional<uint32_t> _lastUpdateFrame;
+    // Retry after view/selection changes, cancellation or publication, not capacity rejection.
+    bool _requestsDirty{true};
+    ccstd::vector<PendingNode> _pendingNodes;
+    // Retained while loading; temporary composition inputs belong to Residency.
+    Resources _reservedResources;
+
+    ccstd::vector<Pass> _passes;
+    size_t _activePassCount{0};
+    // Invalidated by camera, selection or pass changes.
+    bool _needsMorphCheck{true};
+#if CC_LANDSCAPE_DEBUG
+    bool _lastMorphRangeWarning{false};
+#endif
 };
 } // namespace cc::landscape

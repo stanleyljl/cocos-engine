@@ -37,10 +37,8 @@
 #include "landscape/MaterialLibrary.h"
 #include "landscape/Residency.h"
 #include "renderer/gfx-base/GFXCommandBuffer.h"
-#include "renderer/gfx-base/GFXDescriptorSet.h"
 #include "renderer/gfx-base/GFXDevice.h"
 #include "renderer/gfx-base/GFXTexture.h"
-#include "scene/Pass.h"
 #include "scene/RenderWindow.h"
 
 namespace cc::landscape {
@@ -48,17 +46,12 @@ VTPageTable::VTPageTable() = default;
 
 VTPageTable::~VTPageTable() = default;
 
-uint32_t VTPageTable::requiredSize(uint32_t count) const {
-    constexpr uint32_t ENTRIES = VTGridMapping::CELL_COUNT;
-    uint32_t size = std::max(256U, _size);
-    auto *device = Root::getInstance()->getDevice();
-    while (static_cast<uint64_t>(size) * size < static_cast<uint64_t>(count) * ENTRIES) {
-        size *= 2;
-        if (size > device->getCapabilities().maxTextureSize) {
-            return 0;
-        }
-    }
-    return size <= device->getCapabilities().maxTextureSize ? size : 0;
+void VTPageTable::destroy() {
+    _texture = nullptr;
+    _entries.clear();
+    _freeSlots.clear();
+    _size = 0;
+    _count = 0;
 }
 
 bool VTPageTable::canFit(uint32_t count) const {
@@ -166,12 +159,17 @@ void VTPageTable::upload(ccstd::vector<uint32_t> slots) {
     Root::getInstance()->getDevice()->copyBuffersToTexture(buffers.data(), _texture, copies.data(), static_cast<uint32_t>(copies.size()));
 }
 
-void VTPageTable::destroy() {
-    _texture = nullptr;
-    _entries.clear();
-    _freeSlots.clear();
-    _size = 0;
-    _count = 0;
+uint32_t VTPageTable::requiredSize(uint32_t count) const {
+    constexpr uint32_t ENTRIES = VTGridMapping::CELL_COUNT;
+    uint32_t size = std::max(256U, _size);
+    auto *device = Root::getInstance()->getDevice();
+    while (static_cast<uint64_t>(size) * size < static_cast<uint64_t>(count) * ENTRIES) {
+        size *= 2;
+        if (size > device->getCapabilities().maxTextureSize) {
+            return 0;
+        }
+    }
+    return size <= device->getCapabilities().maxTextureSize ? size : 0;
 }
 
 void VTPageTable::resizeEntries(size_t count) {
@@ -218,6 +216,53 @@ void VTRenderer::destroy() {
     _sampler = nullptr;
     _needsClear = true;
     _refineFarDetail = true;
+}
+
+bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
+    if (pages.size() > _pages.size()) {
+        return false;
+    }
+    for (const auto p : pages) {
+        if (p.level > _layout.rootLevel()) {
+            return false;
+        }
+        const uint64_t side = 1ULL << (_layout.rootLevel() - p.level);
+        if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
+    if (!canReserve(pages)) {
+        return false;
+    }
+    ++_reservation;
+    // First protect resident pages and remember their slots before any eviction.
+    constexpr uint32_t MISSING = std::numeric_limits<uint32_t>::max();
+    _reservedSlots.clear();
+    for (const auto address : pages) {
+        const auto found = _lookup.find(address.key());
+        if (found == _lookup.end()) {
+            _reservedSlots.push_back(MISSING);
+            continue;
+        }
+        const auto slot = found->second;
+        _pages[slot].lastReserved = _reservation;
+        _reservedSlots.push_back(slot);
+    }
+    // Fill only the missing slots, preserving demand order without another lookup.
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (_reservedSlots[i] != MISSING) {
+            continue;
+        }
+        const int slot = allocate(pages[i]);
+        assert(slot >= 0);
+        _pages[slot].lastReserved = _reservation;
+        _reservedSlots[i] = static_cast<uint32_t>(slot);
+    }
+    return true;
 }
 
 uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages) {
@@ -284,56 +329,45 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
     return static_cast<uint32_t>(_batch.size());
 }
 
+void VTRenderer::invalidate() {
+    for (auto &p : _pages) {
+        if (p.state == PageState::READY) {
+            p.state = PageState::OUTDATED;
+        }
+    }
+}
+
+void VTRenderer::invalidate(LandscapeRegion changed) {
+    for (auto &page : _pages) {
+        if (page.state != PageState::READY) {
+            continue;
+        }
+        const auto bounds = region(page.address);
+        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
+        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
+            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
+            continue;
+        }
+        page.state = PageState::OUTDATED;
+    }
+}
+
+bool VTRenderer::ready() const {
+    return !_reservedSlots.empty() && std::all_of(_reservedSlots.begin(), _reservedSlots.end(), [this](uint32_t slot) { return _pages[slot].state == PageState::READY; });
+}
+
 bool VTRenderer::needsComposition(VTPageAddress address) const {
     const auto it = _lookup.find(address.key());
     return it == _lookup.end() || _pages[it->second].state != PageState::READY;
 }
 
-bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
-    if (pages.size() > _pages.size()) {
-        return false;
+int VTRenderer::resolve(VTPageAddress address) const {
+    const auto it = _lookup.find(address.key());
+    if (it == _lookup.end()) {
+        return -1;
     }
-    for (const auto p : pages) {
-        if (p.level > _layout.rootLevel()) {
-            return false;
-        }
-        const uint64_t side = 1ULL << (_layout.rootLevel() - p.level);
-        if (p.x >= _data.sectorsX * side || p.z >= _data.sectorsZ * side) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
-    if (!canReserve(pages)) {
-        return false;
-    }
-    ++_reservation;
-    // First protect resident pages and remember their slots before any eviction.
-    constexpr uint32_t MISSING = std::numeric_limits<uint32_t>::max();
-    _reservedSlots.clear();
-    for (const auto address : pages) {
-        const auto found = _lookup.find(address.key());
-        if (found == _lookup.end()) {
-            _reservedSlots.push_back(MISSING);
-            continue;
-        }
-        const auto slot = found->second;
-        _pages[slot].lastReserved = _reservation;
-        _reservedSlots.push_back(slot);
-    }
-    // Fill only the missing slots, preserving demand order without another lookup.
-    for (size_t i = 0; i < pages.size(); ++i) {
-        if (_reservedSlots[i] != MISSING) {
-            continue;
-        }
-        const int slot = allocate(pages[i]);
-        assert(slot >= 0);
-        _pages[slot].lastReserved = _reservation;
-        _reservedSlots[i] = static_cast<uint32_t>(slot);
-    }
-    return true;
+    const auto &p = _pages[it->second];
+    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
 }
 
 VTPageSources VTRenderer::selectSources(VTPageAddress page, bool refineFarDetail, bool triplanar) const {
@@ -363,91 +397,29 @@ VTPageSources VTRenderer::selectSources(VTPageAddress page, bool refineFarDetail
     return result;
 }
 
-bool VTRenderer::hasCliff(LandscapeRegion region) const {
-    // Estimate slope from each region's height span and size, including gutters.
-    // This coarse classification can miss cliffs narrower than the region.
-    const float border = region.size * config::VT_PAGE_BORDER / config::VT_PAGE_INTERIOR;
-    uint32_t level = 0;
-    while (level < _data.maxTileLevel && _data.nodeSize(level) < region.size + 2 * border) {
-        ++level;
-    }
-    const auto first = _data.nodeAtClamped(level, {region.x - border, region.z - border});
-    const auto last = _data.nodeAtClamped(level, {region.x + region.size + border, region.z + region.size + border});
-    const float heightThreshold = _data.nodeSize(level) * std::sqrt(1.0F / (config::TRIPLANAR_START_NORMAL_Y * config::TRIPLANAR_START_NORMAL_Y) - 1.0F);
-    for (uint32_t z = first.z; z <= last.z; ++z) {
-        for (uint32_t x = first.x; x <= last.x; ++x) {
-            const auto &range = (*_heightRanges)[level][static_cast<size_t>(z) * _data.nodesX(level) + x];
-            if (range.maxY - range.minY > heightThreshold) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-void VTRenderer::invalidate() {
-    for (auto &p : _pages) {
-        if (p.state == PageState::READY) {
-            p.state = PageState::OUTDATED;
-        }
-    }
-}
-
-void VTRenderer::invalidate(LandscapeRegion changed) {
-    for (auto &page : _pages) {
-        if (page.state != PageState::READY) {
-            continue;
-        }
-        const auto bounds = region(page.address);
-        const float border = bounds.size * static_cast<float>(config::VT_PAGE_BORDER) / config::VT_PAGE_INTERIOR;
-        if (changed.x > bounds.x + bounds.size + border || changed.z > bounds.z + bounds.size + border ||
-            changed.x + changed.size < bounds.x - border || changed.z + changed.size < bounds.z - border) {
-            continue;
-        }
-        page.state = PageState::OUTDATED;
-    }
-}
-
-bool VTRenderer::ready() const {
-    return !_reservedSlots.empty() && std::all_of(_reservedSlots.begin(), _reservedSlots.end(), [this](uint32_t slot) { return _pages[slot].state == PageState::READY; });
-}
-
-int VTRenderer::resolve(VTPageAddress address) const {
-    const auto it = _lookup.find(address.key());
-    if (it == _lookup.end()) {
-        return -1;
-    }
-    const auto &p = _pages[it->second];
-    return p.lastReserved == _reservation && p.drawable() ? static_cast<int>(it->second) : -1;
+void VTRenderer::setGlobalColorMap(Texture2D *texture) {
+    _composer->setGlobalColorMap(texture);
+    invalidate();
 }
 
 void VTRenderer::setGlobalColorStrength(float strength) {
     if (_composer->setGlobalColorStrength(strength)) {
         invalidate();
     }
-#if CC_DEBUG && CC_LANDSCAPE_DEBUG
-    auto *pass = _composer->material()->getPasses()->front().get();
-    const auto params = ccstd::get<Vec4>(pass->getUniform(pass->getHandle("globalColorParams")));
-    const auto binding = scene::Pass::getBindingFromHandle(pass->getHandle("globalColorMap"));
-    const auto *texture = pass->getDescriptorSet()->getTexture(binding);
-    const auto stale = std::count_if(reservedSlots().begin(), reservedSlots().end(), [this](uint32_t slot) {
-        return page(slot).state == PageState::OUTDATED;
-    });
-    CC_LOG_INFO("[Landscape] Global color strength: requested=%.2f effective=%.2f map=%ux%u stale=%zu/%zu",
-                strength, params.z, texture ? texture->getWidth() : 0U, texture ? texture->getHeight() : 0U,
-                static_cast<size_t>(stale), reservedSlots().size());
-#endif
-}
-
-void VTRenderer::setGlobalColorMap(Texture2D *texture) {
-    _composer->setGlobalColorMap(texture);
-    invalidate();
 }
 
 void VTRenderer::setHeightBlendEnabled(bool enabled) {
     if (_composer->setHeightBlendEnabled(enabled)) {
         invalidate();
     }
+}
+
+void VTRenderer::setTriplanarEnabled(bool enabled) {
+    if (enabled == _triplanarEnabled) {
+        return;
+    }
+    _triplanarEnabled = enabled;
+    invalidate();
 }
 
 void VTRenderer::setRefineFarDetail(bool enabled) {
@@ -460,14 +432,6 @@ void VTRenderer::setRefineFarDetail(bool enabled) {
             page.state = PageState::OUTDATED;
         }
     }
-}
-
-void VTRenderer::setTriplanarEnabled(bool enabled) {
-    if (enabled == _triplanarEnabled) {
-        return;
-    }
-    _triplanarEnabled = enabled;
-    invalidate();
 }
 
 TextureBase *VTRenderer::atlas() const {
@@ -526,14 +490,6 @@ bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &
     return true;
 }
 
-uint32_t VTRenderer::sourceLevel(float size) const {
-    uint32_t level = _data.minTileLevel;
-    while (level < _data.maxTileLevel && _data.nodeSize(level) < size) {
-        ++level;
-    }
-    return level;
-}
-
 int VTRenderer::allocate(VTPageAddress address) {
     int slot = -1;
     uint64_t oldest = std::numeric_limits<uint64_t>::max();
@@ -561,5 +517,36 @@ int VTRenderer::allocate(VTPageAddress address) {
     _lookup[address.key()] = static_cast<uint32_t>(slot);
     return slot;
 }
+
+uint32_t VTRenderer::sourceLevel(float size) const {
+    uint32_t level = _data.minTileLevel;
+    while (level < _data.maxTileLevel && _data.nodeSize(level) < size) {
+        ++level;
+    }
+    return level;
+}
+
+bool VTRenderer::hasCliff(LandscapeRegion region) const {
+    // Estimate slope from each region's height span and size, including gutters.
+    // This coarse classification can miss cliffs narrower than the region.
+    const float border = region.size * config::VT_PAGE_BORDER / config::VT_PAGE_INTERIOR;
+    uint32_t level = 0;
+    while (level < _data.maxTileLevel && _data.nodeSize(level) < region.size + 2 * border) {
+        ++level;
+    }
+    const auto first = _data.nodeAtClamped(level, {region.x - border, region.z - border});
+    const auto last = _data.nodeAtClamped(level, {region.x + region.size + border, region.z + region.size + border});
+    const float heightThreshold = _data.nodeSize(level) * std::sqrt(1.0F / (config::TRIPLANAR_START_NORMAL_Y * config::TRIPLANAR_START_NORMAL_Y) - 1.0F);
+    for (uint32_t z = first.z; z <= last.z; ++z) {
+        for (uint32_t x = first.x; x <= last.x; ++x) {
+            const auto &range = (*_heightRanges)[level][static_cast<size_t>(z) * _data.nodesX(level) + x];
+            if (range.maxY - range.minY > heightThreshold) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 
 } // namespace cc::landscape

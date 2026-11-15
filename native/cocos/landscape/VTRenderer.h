@@ -45,26 +45,28 @@ class VTPageTable {
 public:
     VTPageTable();
     ~VTPageTable();
-    gfx::Texture *texture() const { return _texture.get(); }
+    void destroy();
     bool canFit(uint32_t count) const;
     bool ensureCapacity(uint32_t count);
     uint32_t allocate();
     void release(uint32_t slot);
     bool update(uint32_t slot, const VTGridMapping &mapping, const VTRenderer &pages);
     void upload(ccstd::vector<uint32_t> slots);
-    void destroy();
+    gfx::Texture *texture() const { return _texture.get(); }
 
 protected:
     // CPU allocation step; runtime callers use ensureCapacity() to update both mirrors.
     void resizeEntries(size_t count);
 
 private:
-    uint32_t requiredSize(uint32_t count) const;
     struct Entry {
         uint8_t physicalSlot{0};
         uint8_t level{0};
     };
     static_assert(sizeof(Entry) == 2, "VT page table entries must match RG8 texels");
+
+    uint32_t requiredSize(uint32_t count) const;
+
     IntrusivePtr<gfx::Texture> _texture;
     ccstd::vector<Entry> _entries;
     ccstd::vector<uint32_t> _freeSlots;
@@ -74,14 +76,6 @@ private:
 
 class VTRenderer {
 public:
-    VTRenderer();
-    ~VTRenderer();
-    VTRenderer(const VTRenderer &) = delete;
-    VTRenderer &operator=(const VTRenderer &) = delete;
-    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize);
-    void destroy();
-    uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
-
     enum class PageState {
         EMPTY,
         UNCOMPOSED, // No composed pixels yet.
@@ -95,13 +89,19 @@ public:
         bool needsComposition() const { return state == PageState::UNCOMPOSED || state == PageState::OUTDATED; }
         bool drawable() const { return state == PageState::READY || state == PageState::OUTDATED; }
     };
+
+    VTRenderer();
+    ~VTRenderer();
+    VTRenderer(const VTRenderer &) = delete;
+    VTRenderer &operator=(const VTRenderer &) = delete;
+    bool init(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize);
+    void destroy();
+
+    // Page residency and composition.
     // Reservation inputs are unique addresses, collected by LandscapeSchedule.
     bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
     bool reserve(const ccstd::vector<VTPageAddress> &pages);
-    const ccstd::vector<uint32_t> &reservedSlots() const { return _reservedSlots; }
-    const Page &page(uint32_t slot) const { return _pages[slot]; }
-    LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
-    VTPageSources selectSources(VTPageAddress address, bool refineFarDetail, bool triplanar) const;
+    uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
     void invalidate();
     // Invalidate intersecting cached pages, including their filtering gutters.
     void invalidate(LandscapeRegion region);
@@ -109,16 +109,23 @@ public:
     bool needsComposition(VTPageAddress address) const;
     // Exact address only. An absent/unpublished page is an error at draw time.
     int resolve(VTPageAddress address) const;
+    const ccstd::vector<uint32_t> &reservedSlots() const { return _reservedSlots; }
+    const Page &page(uint32_t slot) const { return _pages[slot]; }
+    LandscapeRegion region(VTPageAddress address) const { return _layout.pageRegion(address); }
+    VTPageSources selectSources(VTPageAddress address, bool refineFarDetail, bool triplanar) const;
 
-    VTPageTable &pageTable() { return _pageTable; }
-    const VTPageTable &pageTable() const { return _pageTable; }
-    bool getTriplanarEnabled() const { return _triplanarEnabled; }
-    bool getRefineFarDetail() const { return _refineFarDetail; }
-    void setGlobalColorStrength(float strength);
+    // Composition settings.
     void setGlobalColorMap(Texture2D *texture);
+    void setGlobalColorStrength(float strength);
     void setHeightBlendEnabled(bool enabled);
     void setTriplanarEnabled(bool enabled);
+    bool getTriplanarEnabled() const { return _triplanarEnabled; }
     void setRefineFarDetail(bool enabled);
+    bool getRefineFarDetail() const { return _refineFarDetail; }
+
+    // GPU resources.
+    VTPageTable &pageTable() { return _pageTable; }
+    const VTPageTable &pageTable() const { return _pageTable; }
     TextureBase *atlas() const;
     gfx::Texture *albedo() const;
     gfx::Texture *normalRoughness() const;
@@ -131,12 +138,14 @@ protected:
 
 private:
     bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
+    int allocate(VTPageAddress address);
     uint32_t sourceLevel(float size) const;
     bool hasCliff(LandscapeRegion region) const;
-    int allocate(VTPageAddress address);
+
     LandscapeData _data;
     VTPageLayout _layout;
     const ccstd::vector<ccstd::vector<HeightRange>> *_heightRanges{nullptr}; // Borrowed immutable asset metadata.
+
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _reservedSlots;
@@ -149,6 +158,7 @@ private:
     ccstd::vector<VTPageInstance> _batch;
     gfx::Sampler *_sampler{nullptr}; // device-owned
     bool _needsClear{true};
+
     bool _refineFarDetail{true};
     bool _triplanarEnabled{true};
 };
