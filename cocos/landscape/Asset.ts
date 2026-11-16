@@ -383,18 +383,19 @@ export class LandscapeAsset {
         }
     }
 
-    public resolveFile (logical: string): string {
+    private resolveFile (logical: string): string {
         const result = this._files.size ? this._files.get(logical) : this._dataDir + logical;
         requireValue(result, `Missing resource ${logical}`);
         return result;
     }
 
-    public static async loadBytes (url: string): Promise<ArrayBuffer> {
+    private static async loadBytes (url: string): Promise<ArrayBuffer> {
         return new Promise<ArrayBuffer>((resolve, reject) => {
             downloader._downloadArrayBuffer(url, {}, (err, value) => err ? reject(err) : resolve(value));
         });
     }
 
+    // Web material loading shares this PNG decoder; native material loading uses Image directly.
     public static async loadColor (url: string, resolution: number, channels: 3 | 4): Promise<Uint8Array> {
         return decodeColor(await LandscapeAsset.loadBytes(url), resolution, channels);
     }

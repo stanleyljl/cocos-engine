@@ -345,7 +345,7 @@ void testCameraRotation() {
         if (phase == 1) {
             auto &sector = *tree.find({data.maxTileLevel, 0, 0});
             for (uint32_t q = 0; q < 3; ++q) {
-                const auto address = sector._children[q].geometry.address();
+                const auto address = sector.children[q].geometry.address();
                 require(tree.publish(address, mapping(address)), "Rotation setup could not publish partial siblings");
             }
             require(tree.selectRenderables(), "Select partially loaded draws");

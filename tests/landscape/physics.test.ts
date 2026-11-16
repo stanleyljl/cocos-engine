@@ -8,7 +8,6 @@ import '../../exports/physics-cannon';
 import { initPhysXLibs, PX } from '../../cocos/physics/physx/physx-adapter';
 import { waitForAmmoInstantiation } from '../../cocos/physics/bullet/instantiated';
 import { builtinResMgr } from '../../exports/base';
-import type { Landscape } from '../../cocos/landscape/landscape';
 import { LandscapePhysics, LandscapePhysicsStatus as Status } from '../../cocos/landscape/landscape-physics';
 import { LandscapeHeightLayout, LandscapeHeightLoader } from '../../cocos/landscape/landscape-height-data';
 import { TerrainAsset, TERRAIN_HEIGHT_BASE, TERRAIN_HEIGHT_FACTORY } from '../../cocos/terrain/terrain-asset';
@@ -52,7 +51,7 @@ describe.each(['bullet', 'cannon.js', 'physx'])('Landscape physics: %s', backend
         scene = new Scene('landscape physics test'); director.runSceneImmediate(scene);
         node = new Node(); scene.addChild(node); node.setPosition(-2, 0, -1);
         loader = new Loader();
-        manager = new LandscapePhysics({ node, landscapeAsset: { manifestPath: 'test.lsmanifest' } } as Landscape, loader);
+        manager = new LandscapePhysics(node, 'test.lsmanifest', loader);
         manager._setEnabled(true);
     });
     afterEach(() => { manager._destroy(); scene.active = false; scene._destroyImmediate(); });

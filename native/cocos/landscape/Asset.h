@@ -96,9 +96,6 @@ public:
     // Completion receives source RGB normals and never uploads to GPU.
     void requestQueryTile(uint32_t x, uint32_t z, LandscapeQueryCompletion completion);
     bool getHeightRange(uint32_t level, uint32_t globalX, uint32_t globalZ, float &minY, float &maxY) const;
-    // Validate the supplied dimensions: heights 137x137, splats 129x129, normals 145x145.
-    // Decode grayscale16 as RG8/R16UI, or RGB8 normals.
-    static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t resolution, ccstd::vector<uint8_t> &data);
     // Native libpng decode for physics after its asynchronous file read.
     // Avoid JS inflate/unfilter loops; returns source uint16 values in host order.
     static Uint16Array decodeSamples(const Uint8Array &png, uint32_t resolution);
@@ -125,6 +122,8 @@ private:
     };
 
     void resetAsyncState();
+    // Validate the supplied dimensions and decode grayscale16 as RG8/R16UI, or RGB8 normals.
+    static bool loadTile(const ccstd::string &path, gfx::Format format, uint32_t resolution, ccstd::vector<uint8_t> &data);
     static bool decodeTileSet(const ccstd::string &heightPath, const ccstd::string &splatPath, const ccstd::string &normalPath, gfx::Format heightFormat, TileData &tile);
     ccstd::string resolveFile(const ccstd::string &logicalPath) const;
 

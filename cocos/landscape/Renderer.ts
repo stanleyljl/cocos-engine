@@ -117,8 +117,8 @@ export class LandscapeRenderer {
         if (!this._decals.setAsset(asset, device, side * side)) {
             return false;
         }
-        this._vt = new VTRenderer(device, this._atlasSize);
-        if (!this._vt.init(asset, this._residency, this._materials, this._decals)) {
+        this._vt = new VTRenderer();
+        if (!this._vt.init(asset, this._residency, this._materials, this._decals, this._atlasSize)) {
             return false;
         }
         // Root coverage and each root's worst-case composition footprint must

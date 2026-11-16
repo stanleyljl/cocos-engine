@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import { Vec3 } from '../core/math';
+import type { LandscapeAsset } from './Asset';
 import * as config from './Config';
 import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, QuadNode, ReadonlyVTGridMapping, VTGridMapping } from './Data';
 
@@ -28,11 +29,6 @@ class MutableQuadtreeNode implements QuadtreeNode {
     public edgeMask = 0;
 }
 
-interface HeightData {
-    data(): LandscapeData;
-    heightRanges(): readonly (readonly HeightRange[])[];
-}
-
 // Owns the target hierarchy, published mappings and balanced render selection.
 export class Quadtree {
     private _data!: LandscapeData;
@@ -50,7 +46,7 @@ export class Quadtree {
     private _renderSelectionChanged = false;
     private readonly _changedNodes = new Set<NodeKey>();
 
-    public init (asset: HeightData, lodQualityScale = 1): void {
+    public init (asset: LandscapeAsset, lodQualityScale = 1): void {
         this._data = asset.data();
         this._heightRanges = asset.heightRanges();
         this._root = new MutableQuadtreeNode();

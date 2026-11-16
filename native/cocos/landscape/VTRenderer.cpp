@@ -439,11 +439,11 @@ TextureBase *VTRenderer::atlas() const {
 }
 
 gfx::Texture *VTRenderer::albedo() const {
-    return _compressor ? _compressor->albedo() : _composer->target()->getWindow()->getColorTexture(0);
+    return _compressor ? _compressor->albedo() : _composer->albedo();
 }
 
 gfx::Texture *VTRenderer::normalRoughness() const {
-    return _compressor ? _compressor->normalRoughness() : _composer->target()->getWindow()->getColorTexture(1);
+    return _compressor ? _compressor->normalRoughness() : _composer->normal();
 }
 
 bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity) {

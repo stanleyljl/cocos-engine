@@ -1,5 +1,6 @@
 import * as config from '../../cocos/landscape/Config';
 import { Vec3 } from '../../cocos/core/math';
+import type { LandscapeAsset } from '../../cocos/landscape/Asset';
 import { HeightRange, LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageLayout } from '../../cocos/landscape/Data';
 import { Quadtree } from '../../cocos/landscape/Quadtree';
 import { PageState, VTPage, VTRenderer } from '../../cocos/landscape/VTRenderer';
@@ -181,7 +182,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                 data = cacheData(level, sectorsX, sectorsZ);
                 if (command === 'tree') {
                     const ranges = Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: 1 })));
-                    tree.init({ data: () => data, heightRanges: () => ranges });
+                    tree.init({ data: () => data, heightRanges: () => ranges } as unknown as LandscapeAsset);
                     for (let z = 0; z < sectorsZ; ++z) {
                         for (let x = 0; x < sectorsX; ++x) {
                             const address = new NodeAddress(level, x, z);

@@ -52,7 +52,7 @@ void Quadtree::updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOr
     _localCameraPosition = localCameraPosition;
     _worldOrigin = worldOrigin;
     if (_viewChanged || _needsRenderSelection) {
-        updateTarget(*_root);
+        updateTargetNode(*_root);
         _needsRenderSelection = true;
     }
 }
@@ -142,7 +142,7 @@ bool Quadtree::selectRenderables() {
             if (!node->refined) {
                 continue;
             }
-            const bool childrenReady = std::all_of(node->_children.get(), node->_children.get() + 4, [](const Node &child) {
+            const bool childrenReady = std::all_of(node->children.get(), node->children.get() + 4, [](const Node &child) {
                 return child.ready;
             });
             if (!childrenReady) {
@@ -154,7 +154,7 @@ bool Quadtree::selectRenderables() {
             }
             node->renderable = false;
             for (uint32_t q = 0; q < 4; ++q) {
-                auto &child = node->_children[q];
+                auto &child = node->children[q];
                 child.renderable = true;
                 nextLevelNodes.push_back(&child);
             }
@@ -186,7 +186,7 @@ bool Quadtree::selectRenderables() {
     }
     visitNodes(*_root, [](Node &node) {
         if (!node.refined) {
-            node._children.reset();
+            node.children.reset();
         }
         return node.refined;
     });
@@ -214,12 +214,12 @@ const Quadtree::Node *Quadtree::find(NodeAddress address) const {
     }
     const Node *node = _root.get();
     while (node->geometry.level > address.level) {
-        if (!node->_children) {
+        if (!node->children) {
             return nullptr;
         }
         const auto shift = node->geometry.level - 1 - address.level;
         const auto quadrant = ((address.x >> shift) & 1U) | (((address.z >> shift) & 1U) << 1U);
-        node = &node->_children[quadrant];
+        node = &node->children[quadrant];
     }
     return node;
 }
@@ -313,21 +313,21 @@ void Quadtree::buildRoot(Node &node, NodeAddress address) {
     }
     // Management nodes aggregate bounds but own no height or material resources.
     node.refined = true;
-    node._children = std::make_unique<Node[]>(4);
+    node.children = std::make_unique<Node[]>(4);
     HeightRange bounds{std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
     for (uint32_t q = 0; q < 4; ++q) {
         const auto addressOfChild = child(address, q);
-        buildRoot(node._children[q], addressOfChild);
+        buildRoot(node.children[q], addressOfChild);
         if (contains(addressOfChild)) {
-            bounds.minY = std::min(bounds.minY, node._children[q].geometry.minY);
-            bounds.maxY = std::max(bounds.maxY, node._children[q].geometry.maxY);
+            bounds.minY = std::min(bounds.minY, node.children[q].geometry.minY);
+            bounds.maxY = std::max(bounds.maxY, node.children[q].geometry.maxY);
         }
     }
     node.geometry.minY = bounds.minY;
     node.geometry.maxY = bounds.maxY;
 }
 
-void Quadtree::updateTarget(Node &node) {
+void Quadtree::updateTargetNode(Node &node) {
     const auto address = node.geometry.address();
     if (!contains(address)) {
         return;
@@ -348,14 +348,14 @@ void Quadtree::updateTarget(Node &node) {
     if (!refine) {
         return;
     }
-    if (!node._children) {
-        node._children = std::make_unique<Node[]>(4);
+    if (!node.children) {
+        node.children = std::make_unique<Node[]>(4);
         for (uint32_t q = 0; q < 4; ++q) {
-            node._children[q].geometry = geometry(child(address, q));
+            node.children[q].geometry = geometry(child(address, q));
         }
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        updateTarget(node._children[q]);
+        updateTargetNode(node.children[q]);
     }
 }
 
@@ -409,7 +409,7 @@ NodeAddress Quadtree::renderableAt(uint32_t x, uint32_t z) const {
     while (!node->renderable) {
         const auto shift = node->geometry.level - 1;
         const auto quadrant = ((x >> shift) & 1U) | (((z >> shift) & 1U) << 1U);
-        node = &node->_children[quadrant];
+        node = &node->children[quadrant];
     }
     return node->geometry.address();
 }
@@ -453,11 +453,11 @@ void Quadtree::visitNodes(const Node &node, const std::function<bool(const Node 
     if (!visit(node)) {
         return;
     }
-    if (!node._children) {
+    if (!node.children) {
         return;
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        visitNodes(static_cast<const Node &>(node._children[q]), visit);
+        visitNodes(static_cast<const Node &>(node.children[q]), visit);
     }
 }
 
@@ -468,11 +468,11 @@ void Quadtree::visitNodes(Node &node, const std::function<bool(Node &)> &visit) 
     if (!visit(node)) {
         return;
     }
-    if (!node._children) {
+    if (!node.children) {
         return;
     }
     for (uint32_t q = 0; q < 4; ++q) {
-        visitNodes(node._children[q], visit);
+        visitNodes(node.children[q], visit);
     }
 }
 

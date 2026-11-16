@@ -82,6 +82,12 @@ bool VTPageComposer::setGlobalColorStrength(float) {
 bool VTPageComposer::setHeightBlendEnabled(bool) {
     std::abort();
 }
+gfx::Texture *VTPageComposer::albedo() const {
+    std::abort();
+}
+gfx::Texture *VTPageComposer::normal() const {
+    std::abort();
+}
 VTPageMipGenerator::VTPageMipGenerator() {
     std::abort();
 }
@@ -590,7 +596,7 @@ void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = f
     for (const auto key : keys) {
         const auto address = NodeAddress::fromKey(key);
         const auto &node = *selection.find(address);
-        if (!node._children || !std::all_of(node._children.get(), node._children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
+        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
             continue;
         }
         const uint32_t x = address.x << address.level;
@@ -850,13 +856,13 @@ void testSingleRoot() {
         tree.init(d);
         const auto childMask = [&](NodeAddress address) {
             const auto *node = tree.find(address);
-            require(node && node->_children, "Management node must own four children");
+            require(node && node->children, "Management node must own four children");
             uint8_t mask = 0;
             for (uint32_t q = 0; q < 4; ++q) {
-                if (tree.find(node->_children[q].geometry.address())) {
+                if (tree.find(node->children[q].geometry.address())) {
                     mask |= static_cast<uint8_t>(1U << q);
                 } else {
-                    require(!node->_children[q]._children && !node->_children[q].ready, "Empty sector must not allocate descendants or load resources");
+                    require(!node->children[q].children && !node->children[q].ready, "Empty sector must not allocate descendants or load resources");
                 }
             }
             return mask;
@@ -920,17 +926,17 @@ void testReadySelection() {
     require(!tree.publish({0, 7, 0}, testMapping({0, 7, 0})), "Child became ready before its ancestor");
     auto &sector = *tree.find({3, 0, 0});
     for (uint32_t q = 0; q < 4; ++q) {
-        require(!sector._children[q].ready, "New target nodes must start unready");
+        require(!sector.children[q].ready, "New target nodes must start unready");
     }
     selectAndCheckChanges(tree);
     require(renderableKeys(tree) == roots, "Unpublished children must not replace the parent");
     for (uint32_t q = 0; q < 3; ++q) {
-        const auto address = sector._children[q].geometry.address();
+        const auto address = sector.children[q].geometry.address();
         require(tree.publish(address, testMapping(address)), "Publish partial sibling resources");
     }
     selectAndCheckChanges(tree);
     require(renderableKeys(tree) == roots, "Three ready children must not replace their parent");
-    const auto fourth = sector._children[3].geometry.address();
+    const auto fourth = sector.children[3].geometry.address();
     require(tree.publish(fourth, testMapping(fourth)), "Publish last sibling");
     selectAndCheckChanges(tree);
     require(sector.ready && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
@@ -956,7 +962,7 @@ void testReadySelection() {
     require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
     applyView(tree, {});
     selectAndCheckChanges(tree);
-    require(renderableKeys(tree) == roots && !sector._children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
+    require(renderableKeys(tree) == roots && !sector.children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
     applyView(tree, near);
     const NodeAddress pending{2, 0, 0};
     require(tree.find(pending) && !tree.find(pending)->ready, "Prepare moving-view load");
@@ -1200,7 +1206,7 @@ void testMaterialPublication() {
     }
     auto expectedRefresh = before;
     tree.forEachNode([&](const Quadtree::Node &entry) {
-        if (!entry._children) {
+        if (!entry.children) {
             expectedRefresh.insert(entry.geometry.address().key());
         }
         return true;
@@ -1242,7 +1248,7 @@ void testDistanceTargets() {
                 refine |= std::sqrt(dx * dx + dy * dy + dz * dz) <= tree.lodMorphRanges()[child.level].end;
             }
             require(!refine || splits.count(node.key()) != 0, "Target omitted distance-required subdivision");
-            require((splits.count(node.key()) != 0) == static_cast<bool>(renderable._children), "Candidates differ from the balanced target");
+            require((splits.count(node.key()) != 0) == static_cast<bool>(renderable.children), "Candidates differ from the balanced target");
         });
     }
     // A translation of the entire terrain and camera must preserve local requests.
@@ -1663,7 +1669,7 @@ std::string pagingParityTrace() {
                 std::vector<std::string> draw;
                 std::vector<std::string> changed;
                 tree.forEachNode([&](const Quadtree::Node &node) {
-                    if (!node._children) {
+                    if (!node.children) {
                         target.push_back(parityAddress(node.geometry.address()));
                     }
                     return true;

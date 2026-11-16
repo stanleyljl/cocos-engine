@@ -190,6 +190,14 @@ bool VTPageComposer::setHeightBlendEnabled(bool enabled) {
     return true;
 }
 
+gfx::Texture *VTPageComposer::albedo() const {
+    return _compositionTarget->getWindow()->getColorTexture(0);
+}
+
+gfx::Texture *VTPageComposer::normal() const {
+    return _compositionTarget->getWindow()->getColorTexture(1);
+}
+
 uint32_t VTPageComposer::size() const {
     return _compositionTarget->getWidth();
 }
@@ -386,11 +394,11 @@ bool VTPageMipGenerator::init(const VTPageComposer &composer, bool compressed) {
     };
     for (uint32_t level = 1; level < config::VT_MIP_LEVELS; ++level) {
         auto &mip = _mipPasses[level - 1];
-        mip.albedo = view(composer.target()->getWindow()->getColorTexture(0), level, 1);
-        mip.normal = view(composer.target()->getWindow()->getColorTexture(1), level, 1);
+        mip.albedo = view(composer.albedo(), level, 1);
+        mip.normal = view(composer.normal(), level, 1);
         // Prefix views exclude the destination, preserving absolute mip indices.
-        mip.sourceAlbedo = view(composer.target()->getWindow()->getColorTexture(0), 0, level);
-        mip.sourceNormal = view(composer.target()->getWindow()->getColorTexture(1), 0, level);
+        mip.sourceAlbedo = view(composer.albedo(), 0, level);
+        mip.sourceNormal = view(composer.normal(), 0, level);
         if (!mip.albedo || !mip.normal || !mip.sourceAlbedo || !mip.sourceNormal) {
             return false;
         }

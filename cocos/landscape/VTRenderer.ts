@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import { log } from '../core/platform/debug';
-import { Address, BufferTextureCopy, Device, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
+import { Address, BufferTextureCopy, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
+import { director } from '../game/director';
 import { Texture2D } from '../asset/assets';
 import { LandscapeAsset } from './Asset';
 import { LandscapeResidency } from './Residency';
@@ -11,17 +12,11 @@ import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, Read
 import * as config from './Config';
 
 export class VTPageTable {
-    private readonly _device: Device;
-
     private _texture: Texture | null = null;
     private _entries = new Uint8Array();
     private readonly _freeSlots: number[] = [];
     private _size = 0;
     private _count = 0;
-
-    constructor (_device: Device) {
-        this._device = _device;
-    }
 
     public destroy (): void {
         this._texture?.destroy();
@@ -44,7 +39,8 @@ export class VTPageTable {
         if (size === this._size) {
             return true;
         }
-        const texture = this._device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RG8, size, size));
+        const device = director.root!.device;
+        const texture = device.createTexture(new TextureInfo(TextureType.TEX2D, TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_DST, Format.RG8, size, size));
         if (!texture) {
             return false;
         }
@@ -53,7 +49,7 @@ export class VTPageTable {
         const copy = new BufferTextureCopy();
         copy.texExtent.width = size;
         copy.texExtent.height = size;
-        this._device.copyBuffersToTexture([entries], texture, [copy]);
+        device.copyBuffersToTexture([entries], texture, [copy]);
         this._texture?.destroy();
         this._texture = texture;
         this._entries = entries;
@@ -97,19 +93,19 @@ export class VTPageTable {
         return true;
     }
 
-    public upload (slots: number[]): void {
+    public upload (slots: readonly number[]): void {
         if (!slots.length) {
             return;
         }
-        slots.sort((a, b) => a - b);
+        const sorted = slots.slice().sort((a, b) => a - b);
         const copies: BufferTextureCopy[] = [];
         const buffers: Uint8Array[] = [];
         const cells = VTGridMapping.CELL_COUNT;
-        for (let i = 0; i < slots.length; ++i) {
-            const first = slots[i] * cells;
+        for (let i = 0; i < sorted.length; ++i) {
+            const first = sorted[i] * cells;
             let width = cells;
-            while (i + 1 < slots.length && slots[i + 1] === slots[i] + 1
-                && Math.floor(slots[i + 1] * cells / this._size) === Math.floor(first / this._size)) {
+            while (i + 1 < sorted.length && sorted[i + 1] === sorted[i] + 1
+                && Math.floor(sorted[i + 1] * cells / this._size) === Math.floor(first / this._size)) {
                 ++i;
                 width += cells;
             }
@@ -121,7 +117,7 @@ export class VTPageTable {
             copies.push(copy);
             buffers.push(this._entries.subarray(first * 2, (first + width) * 2));
         }
-        this._device.copyBuffersToTexture(buffers, this.texture(), copies);
+        director.root!.device.copyBuffersToTexture(buffers, this.texture(), copies);
     }
 
     public texture (): Texture {
@@ -133,7 +129,7 @@ export class VTPageTable {
         while (size * size < count * VTGridMapping.CELL_COUNT) {
             size *= 2;
         }
-        return size <= this._device.capabilities.maxTextureSize ? size : 0;
+        return size <= director.root!.device.capabilities.maxTextureSize ? size : 0;
     }
 }
 
@@ -157,9 +153,6 @@ export class VTPage {
 }
 
 export class VTRenderer {
-    private readonly _device: Device;
-    private readonly _atlasSize: number;
-
     private _data!: LandscapeData;
     private _layout!: VTPageLayout;
     private _heightRanges!: readonly (readonly HeightRange[])[]; // Borrowed immutable asset metadata.
@@ -169,25 +162,17 @@ export class VTRenderer {
     private _reservedSlots: number[] = [];
     private readonly _lookup = new Map<NodeKey, number>();
 
-    private readonly _pageTable: VTPageTable;
-    private readonly _composer: VTPageComposer;
-    private readonly _mipGenerator: VTPageMipGenerator;
+    private readonly _pageTable = new VTPageTable();
+    private readonly _composer = new VTPageComposer();
+    private readonly _mipGenerator = new VTPageMipGenerator();
     private _sampler!: Sampler;
     private _needsClear = true;
 
     private _refineFarDetail = true;
     private _triplanarEnabled = true;
 
-    constructor (_device: Device, _atlasSize: number) {
-        this._device = _device;
-        this._atlasSize = _atlasSize;
-        this._pageTable = new VTPageTable(_device);
-        this._composer = new VTPageComposer(_device, _atlasSize);
-        this._mipGenerator = new VTPageMipGenerator(_device);
-    }
-
-    public init (asset: LandscapeAsset, residency: LandscapeResidency, materials: MaterialLibrary, decals: DecalRenderer): boolean {
-        const capacity = (this._atlasSize / config.VT_PAGE_RES) ** 2;
+    public init (asset: LandscapeAsset, residency: LandscapeResidency, materials: MaterialLibrary, decals: DecalRenderer, atlasSize: number): boolean {
+        const capacity = (atlasSize / config.VT_PAGE_RES) ** 2;
         const data = asset.data();
         if (!residency.valid() || !materials.valid() || capacity < data.sectorsX * data.sectorsZ) {
             return false;
@@ -196,7 +181,7 @@ export class VTRenderer {
         this._heightRanges = asset.heightRanges();
         this._layout = new VTPageLayout(data.sectorSize);
         this._pages = Array.from({ length: capacity }, () => new VTPage());
-        if (!this._pageTable.ensureCapacity(1) || !this._composer.init(asset, residency, materials, decals) || !this._mipGenerator.init(this._composer)) {
+        if (!this._pageTable.ensureCapacity(1) || !this._composer.init(asset, residency, materials, decals, atlasSize) || !this._mipGenerator.init(this._composer)) {
             return false;
         }
         const sampler = new SamplerInfo();
@@ -207,9 +192,9 @@ export class VTRenderer {
         sampler.addressU = Address.CLAMP;
         sampler.addressV = Address.CLAMP;
         sampler.addressW = Address.CLAMP;
-        this._sampler = this._device.getSampler(sampler);
+        this._sampler = director.root!.device.getSampler(sampler);
         if (config.LANDSCAPE_DEBUG) {
-            log(`[Landscape] VT atlas: ${this._atlasSize}x${this._atlasSize} RGBA8 pages=${this._pages.length}`);
+            log(`[Landscape] VT atlas: ${atlasSize}x${atlasSize} RGBA8 pages=${this._pages.length}`);
         }
         return true;
     }
@@ -279,7 +264,7 @@ export class VTRenderer {
             return 0;
         }
         this._composer.uploadInputs();
-        const commands = this._device.commandBuffer;
+        const commands = director.root!.device.commandBuffer;
         for (let variant = 0; variant < 2; ++variant) {
             const group = batch.filter((entry) => entry.pageInfo.z === variant);
             if (!group.length) {
@@ -334,7 +319,7 @@ export class VTRenderer {
         return this._reservedSlots;
     }
 
-    public page (slot: number): VTPage {
+    public page (slot: number): Readonly<VTPage> {
         return this._pages[slot];
     }
 

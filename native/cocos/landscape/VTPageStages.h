@@ -70,6 +70,8 @@ public:
     bool setHeightBlendEnabled(bool enabled);
 
     RenderTexture *target() const { return _compositionTarget.get(); }
+    gfx::Texture *albedo() const;
+    gfx::Texture *normal() const;
     uint32_t size() const;
     Material *material() const { return _composeMaterial.get(); }
     gfx::InputAssembler *inputAssembler() const { return _inputAssembler.get(); }

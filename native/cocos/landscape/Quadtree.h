@@ -45,7 +45,7 @@ public:
     struct Node {
         QuadNode geometry;
         VTGridMapping material;
-        std::unique_ptr<Node[]> _children;
+        std::unique_ptr<Node[]> children;
         bool refined{false}; // Target subdivision; children survive until render selection.
         bool ready{false};
         bool renderable{false};
@@ -89,7 +89,7 @@ private:
     // Hierarchy.
     void initLodMorphRanges(float lodQualityScale);
     void buildRoot(Node &node, NodeAddress address);
-    void updateTarget(Node &node);
+    void updateTargetNode(Node &node);
     static NodeAddress child(NodeAddress address, uint32_t quadrant);
     Node *findNode(NodeAddress address);
     bool contains(NodeAddress address) const;

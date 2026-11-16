@@ -2,6 +2,7 @@
 import { Material, Texture2D } from '../asset/assets';
 import { RenderingSubMesh } from '../asset/assets/rendering-sub-mesh';
 import { Vec4 } from '../core/math';
+import { director } from '../game/director';
 import { Attribute, Buffer, BufferInfo, BufferTextureCopy, BufferUsageBit, Color, ColorAttachment, CommandBuffer, Device, DrawInfo, Feature, Filter, Format, Framebuffer, FramebufferInfo, InputAssembler, InputAssemblerInfo, InputState, LoadOp, MemoryUsageBit, PipelineState, PipelineStateInfo, Rect, RenderPass, RenderPassInfo, Sampler, Texture, TextureBlit, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
 import { Pass } from '../render-scene/core/pass';
 import { SetIndex } from '../rendering/define';
@@ -41,8 +42,7 @@ function recordPagePass (commands: CommandBuffer, ia: InputAssembler, renderPass
 }
 
 export class VTPageComposer {
-    private readonly _device: Device;
-    private readonly _size: number;
+    private _size = 0;
 
     private _albedo: Texture2D | null = null;
     private _normal: Texture2D | null = null;
@@ -68,13 +68,10 @@ export class VTPageComposer {
     private _inverseWidth = 0;
     private _inverseDepth = 0;
 
-    constructor (_device: Device, _size: number) {
-        this._device = _device;
-        this._size = _size;
-    }
-
-    public init (asset: LandscapeAsset, residency: LandscapeResidency, materials: MaterialLibrary, decals: DecalRenderer): boolean {
-        const device = this._device;
+    // Native additionally accepts compressed for its compute-based ASTC path; WebGL2 uses RGBA8.
+    public init (asset: LandscapeAsset, residency: LandscapeResidency, materials: MaterialLibrary, decals: DecalRenderer, atlasSize: number): boolean {
+        const device = director.root!.device;
+        this._size = atlasSize;
         const data = asset.data();
         this._decals = decals;
         // This runtime is WebGL2-only and needs two color attachments. Its GFX
@@ -207,7 +204,7 @@ export class VTPageComposer {
         const copy = new BufferTextureCopy();
         copy.texExtent.width = config.VT_NORMAL_SOURCE_COUNT;
         copy.texExtent.height = this._sourceRows.length / (config.VT_NORMAL_SOURCE_COUNT * 4);
-        this._device.copyBuffersToTexture([this._sourceRows], this._sourceTable!, [copy]);
+        director.root!.device.copyBuffersToTexture([this._sourceRows], this._sourceTable!, [copy]);
         for (const pass of this.material().passes) {
             pass.update();
         }
@@ -310,23 +307,19 @@ interface MipPass {
 }
 
 export class VTPageMipGenerator {
-    private readonly _device: Device;
-
     private readonly _mips: MipPass[] = [];
 
-    constructor (_device: Device) {
-        this._device = _device;
-    }
-
+    // Native additionally selects full-atlas or compressed scratch-page mip generation.
     public init (composer: VTPageComposer): boolean {
+        const device = director.root!.device;
         let sourceAlbedo = composer.albedo();
         let sourceNormal = composer.normal();
         for (let level = 1; level < config.VT_MIP_LEVELS; ++level) {
             const size = composer.size() / 2 ** level;
             const info = new TextureInfo(TextureType.TEX2D, TextureUsageBit.COLOR_ATTACHMENT | TextureUsageBit.SAMPLED | TextureUsageBit.TRANSFER_SRC, Format.RGBA8, size, size);
-            const albedo = this._device.createTexture(info);
-            const normal = this._device.createTexture(info);
-            const framebuffer = this._device.createFramebuffer(new FramebufferInfo(composer.renderPass(), [albedo, normal]));
+            const albedo = device.createTexture(info);
+            const normal = device.createTexture(info);
+            const framebuffer = device.createFramebuffer(new FramebufferInfo(composer.renderPass(), [albedo, normal]));
             const material = new Material();
             try {
                 material.initialize({ effectName: 'landscape/builtin-landscape-vt-mip', defines: { LANDSCAPE_VT_COMPACT: false } });
@@ -336,10 +329,10 @@ export class VTPageMipGenerator {
                 material.setProperty('sourceAlbedo', sourceAlbedo);
                 material.setProperty('sourceNormal', sourceNormal);
                 // Each source is a separate texture with its data at mip zero.
-                material.setProperty('mipLayout', new Vec4(size * 2, config.VT_PAGE_RES / 2 ** (level - 1), 0, this._device.capabilities.screenSpaceSignY * this._device.capabilities.clipSpaceSignY));
+                material.setProperty('mipLayout', new Vec4(size * 2, config.VT_PAGE_RES / 2 ** (level - 1), 0, device.capabilities.screenSpaceSignY * device.capabilities.clipSpaceSignY));
                 const pass = material.passes[0];
                 pass.update();
-                const pipeline = createPipeline(this._device, pass, composer.renderPass(), composer.inputAssembler());
+                const pipeline = createPipeline(device, pass, composer.renderPass(), composer.inputAssembler());
                 this._mips.push({ albedo, normal, framebuffer, material, pipeline });
             } catch (cause) {
                 framebuffer.destroy();
@@ -365,6 +358,7 @@ export class VTPageMipGenerator {
         this._mips.length = 0;
     }
 
+    // WebGL2 needs page addresses for mip copies; native texture views only need the instance count.
     public record (commands: CommandBuffer, composer: VTPageComposer, instances: readonly VTPageInstance[], initialize: boolean): void {
         const slots = composer.size() / config.VT_PAGE_RES;
         for (let i = 0; i < this._mips.length; ++i) {

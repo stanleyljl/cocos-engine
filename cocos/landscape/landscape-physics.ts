@@ -11,7 +11,6 @@ import { PhysicsSystem } from '../physics/framework/physics-system';
 import { PhysicsMaterial } from '../physics/framework/assets/physics-material';
 import { selector } from '../physics/framework/physics-selector';
 import { LandscapePhysicsCollider, LandscapePhysicsMeshCollider, LandscapeHeightfieldData } from './landscape-physics-collider';
-import type { Landscape } from './landscape';
 import { LandscapeHeightGrid, LandscapeHeightLayout, LandscapeHeightLoader, LandscapeWorldBounds } from './landscape-height-data';
 
 export type LandscapePhysicsBounds = LandscapeWorldBounds;
@@ -93,7 +92,24 @@ export class LandscapePhysics {
     private _resetTiles = false;
 
     /** @engineInternal Construct through Landscape.physics. Loader injection is for tests. */
-    constructor (private readonly _landscape: Landscape, private readonly _loader = new LandscapeHeightLoader()) {}
+    constructor (private readonly _node: Node, manifestPath: string, private readonly _loader = new LandscapeHeightLoader()) {
+        this.setManifestPath(manifestPath);
+    }
+
+    /** @engineInternal */
+    public setManifestPath (manifestPath: string): void {
+        if (manifestPath === this._url) {
+            return;
+        }
+        ++this._generation;
+        this._url = manifestPath;
+        this._layout = undefined;
+        this._grid = undefined;
+        this._layoutPending = false;
+        this._error = '';
+        this._dirty = true;
+        this._resetTiles = true;
+    }
 
     public get options (): Readonly<LandscapePhysicsOptions> { return { ...this._options }; }
 
@@ -184,7 +200,7 @@ export class LandscapePhysics {
         if (!this._enabled || this._destroyed || !layout || this._resetTiles || this._error || !this._transformValid) {
             return false;
         }
-        const origin = this._landscape.node.worldPosition;
+        const origin = this._node.worldPosition;
         if (origin.x !== this._originX || origin.z !== this._originZ) {
             return false;
         }
@@ -276,7 +292,7 @@ export class LandscapePhysics {
             this._unlisten();
             return;
         }
-        const node = this._landscape.node;
+        const node = this._node;
         const m = node.worldMatrix;
         this._transformValid = [m.m00 - 1, m.m01, m.m02, m.m04, m.m05 - 1, m.m06, m.m08, m.m09, m.m10 - 1]
             .every(v => Math.abs(v) < 1e-5);
@@ -389,17 +405,7 @@ export class LandscapePhysics {
     }
 
     private _ensureLayout (): void {
-        const url = this._landscape.landscapeAsset?.manifestPath || '';
-        if (url !== this._url) {
-            ++this._generation;
-            this._url = url;
-            this._layout = undefined;
-            this._grid = undefined;
-            this._layoutPending = false;
-            this._error = '';
-            this._dirty = true;
-            this._resetTiles = true;
-        }
+        const url = this._url;
         if (!url || this._layout || this._layoutPending || this._error) {
             return;
         }
@@ -540,7 +546,7 @@ export class LandscapePhysics {
         const patch: CollisionPatch = { node };
         node.active = false;
         try {
-            node.parent = this._landscape.node;
+            node.parent = this._node;
             const local = this._grid!.tileLocalOrigin(tile.x, tile.z);
             const heightfield = new LandscapeHeightfieldData(samples, layout, holes);
             node.setPosition(local.x + x0 * spacing, heightfield.localOriginY, local.z + z0 * spacing);

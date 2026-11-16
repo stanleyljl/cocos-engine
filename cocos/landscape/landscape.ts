@@ -273,7 +273,7 @@ export class Landscape extends Component {
     /** Explicit world-space collision regions, independent of rendering LOD. */
     public get physics (): LandscapePhysics {
         if (!this._physics) {
-            this._physics = new LandscapePhysics(this);
+            this._physics = new LandscapePhysics(this.node, this._landscapeAsset?.manifestPath || '');
             this._physics._setEnabled(this.enabledInHierarchy && !!this._runtime?.isInitialized());
         }
         return this._physics;
@@ -454,6 +454,7 @@ export class Landscape extends Component {
             this.onDisable();
         }
         this._landscapeAsset = value;
+        this._physics?.setManifestPath(value?.manifestPath || '');
         if (enabled) {
             this.onEnable();
         }
@@ -558,6 +559,7 @@ export class Landscape extends Component {
 
     public onEnable (): void {
         const generation = ++this._enableGeneration;
+        this._physics?.setManifestPath(this._landscapeAsset?.manifestPath || '');
         if (!EDITOR_NOT_IN_PREVIEW && this._landscapeAsset) {
             // Count initialization before Web resources can yield. Failed initialization
             // keeps the scene pending until the component is disabled or destroyed.
