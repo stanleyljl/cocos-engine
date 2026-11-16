@@ -29,6 +29,7 @@
 #include "base/Ptr.h"
 #include "base/RefCounted.h"
 #include "base/std/container/array.h"
+#include "base/std/container/map.h"
 #include "base/std/container/string.h"
 #include "base/std/container/vector.h"
 #include "landscape/Data.h"
@@ -68,6 +69,7 @@ public:
     // initialization succeeded and the complete runtime was added to its scene.
     bool onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
     void onDisable();
+    void destroy();
     // Once per tick, after camera controllers: advance queries, target state and streaming.
     void update();
 
@@ -99,9 +101,10 @@ public:
     // World-space, translation-only placement, matching landscape selection.
     // Query result buffer: position XYZ, normal XYZ, material ID, weight.
     uint32_t sampleSurface(float worldX, float worldZ, Float32Array output);
-    uint32_t setQuerySource(uint32_t id, float worldX, float worldZ, float radius);
+    uint32_t addQuerySource(Node *node, float radius);
+    bool setQuerySourceRadius(uint32_t id, float radius);
     void removeQuerySource(uint32_t id);
-    uint32_t getQuerySourceStatus(uint32_t id) const;
+    uint32_t getQuerySourceStatus(uint32_t id);
 
 private:
     void initializeRuntime(uint32_t queryCacheCapacity);
@@ -111,7 +114,7 @@ private:
     uint32_t addShadowPasses(const pipeline::PipelineSceneData &sceneData);
     void collectPassModels(uint32_t cascadesToDeduplicate);
     void removeCSMDuplicates(uint32_t cascadeCount);
-    bool queryTransformValid() const;
+    static bool isTranslationOnly(Node *node);
 
     struct PassSelection {
         const geometry::Frustum *frustum{nullptr};
@@ -120,6 +123,15 @@ private:
     };
     ccstd::vector<PassSelection> _passes;
     size_t _passCount{0};
+
+    struct QuerySource {
+        IntrusivePtr<Node> node;
+        float radius{0.0F};
+    };
+    // Registrations survive disable/re-enable; destroy releases their node references.
+    // Ordered IDs preserve registration order when admitting sources to the cache.
+    ccstd::map<uint32_t, QuerySource> _querySources;
+    uint64_t _nextQuerySource{1};
 
     LandscapeDebugData _debugData;
     uint32_t _holeMode{0};

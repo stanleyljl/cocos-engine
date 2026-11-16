@@ -2,11 +2,12 @@ import { System, SystemPriority } from '../../cocos/core';
 import { director, DirectorEvent } from '../../cocos/game/director';
 import { Node } from '../../cocos/scene-graph/node';
 import { ComponentScheduler } from '../../cocos/scene-graph/component-scheduler';
-import { Landscape, LandscapeQueryStatus } from '../../cocos/landscape';
+import { Landscape } from '../../cocos/landscape';
 import * as constants from 'internal:constants';
 
 async function fixture (initialized = true) {
     const terrain = new Landscape();
+    terrain.node = new Node();
     const source = new Node();
     Object.defineProperty(terrain, 'enabledInHierarchy', { get: () => true });
     Object.defineProperty(source, 'activeInHierarchy', { get: () => true });
@@ -20,8 +21,9 @@ async function fixture (initialized = true) {
         setReceiveShadow: jest.fn(),
         onEnable: jest.fn(() => constants.JSB ? initialized : Promise.resolve(initialized)),
         onDisable: jest.fn(),
+        destroy: jest.fn(),
         isInitialized: jest.fn(() => initialized),
-        setQuerySource: jest.fn(() => LandscapeQueryStatus.NotReady),
+        addQuerySource: jest.fn(() => 1),
         removeQuerySource: jest.fn(),
         update: jest.fn(),
         drawDebugBounds: jest.fn(),
@@ -51,6 +53,7 @@ describe('Landscape tick and draw scheduling', () => {
         }
         for (const { terrain, source } of fixtures.splice(0)) {
             terrain.onDestroy();
+            terrain.node.destroy();
             source.destroy();
         }
     });
@@ -87,7 +90,7 @@ describe('Landscape tick and draw scheduling', () => {
     });
 
     test('ticks after physics camera callbacks and before drawing, regardless of registration order', async () => {
-        const { source, native, id } = await create();
+        const { source, native } = await create();
         const order: string[] = [];
         const physics = new System();
         physics.postUpdate = () => {
@@ -98,20 +101,22 @@ describe('Landscape tick and draw scheduling', () => {
         systems.push(physics);
         director.registerSystem('LANDSCAPE_TEST_PHYSICS', physics, SystemPriority.LOW);
         native.update.mockImplementation(() => {
-            expect(native.setQuerySource).toHaveBeenLastCalledWith(id, 12, 34, 0);
+            expect(source.worldPosition.x).toBe(12);
+            expect(source.worldPosition.z).toBe(34);
+            expect(native.addQuerySource).toHaveBeenCalledWith(source, 0);
             order.push('tick');
         });
         native.drawDebugBounds.mockImplementation(() => order.push('draw'));
         director.tick(1 / 60);
         expect(order).toEqual(['physics-camera', 'tick', 'draw']);
         expect(native.update).toHaveBeenCalledTimes(1);
-        expect(native.setQuerySource).toHaveBeenCalledTimes(1);
+        expect(native.addQuerySource).toHaveBeenCalledTimes(1);
 
         director.emit(DirectorEvent.BEFORE_DRAW);
         director.emit(DirectorEvent.BEFORE_DRAW);
         expect(native.drawDebugBounds).toHaveBeenCalledTimes(3);
         expect(native.update).toHaveBeenCalledTimes(1);
-        expect(native.setQuerySource).toHaveBeenCalledTimes(1);
+        expect(native.addQuerySource).toHaveBeenCalledTimes(1);
     });
 
     test('component scheduling does not invoke update before the Landscape system', async () => {
@@ -153,16 +158,16 @@ describe('Landscape tick and draw scheduling', () => {
         expect(second.native.update).toHaveBeenCalledTimes(4);
     });
 
-    test('pausing stops ticks while debug drawing continues; resuming runs one tick', async () => {
+    test('paused draws advance streaming once; resuming runs one system tick', async () => {
         const { native } = await create();
         director.pause();
         director.tick(1 / 60);
-        expect(native.update).not.toHaveBeenCalled();
-        expect(native.setQuerySource).not.toHaveBeenCalled();
+        expect(native.update).toHaveBeenCalledTimes(1);
+        expect(native.addQuerySource).toHaveBeenCalledTimes(1);
         expect(native.drawDebugBounds).toHaveBeenCalledTimes(1);
         director.resume();
         director.tick(1 / 60);
-        expect(native.update).toHaveBeenCalledTimes(1);
+        expect(native.update).toHaveBeenCalledTimes(2);
         expect(native.drawDebugBounds).toHaveBeenCalledTimes(2);
     });
 
@@ -172,7 +177,7 @@ describe('Landscape tick and draw scheduling', () => {
         terrain.debugData.unlit = true;
         director.tick(1 / 60);
         expect(native.setDebugData).toHaveBeenLastCalledWith(terrain.debugData);
-        expect(native.setQuerySource).toHaveBeenCalledTimes(1);
+        expect(native.addQuerySource).toHaveBeenCalledTimes(1);
         expect(native.update).not.toHaveBeenCalled();
         native.isInitialized.mockReturnValue(true);
         director.tick(1 / 60);

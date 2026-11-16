@@ -33,7 +33,6 @@ import { Node } from '../scene-graph/node';
 import type { RenderScene } from '../render-scene/core/render-scene';
 import { LandscapePhysics } from './landscape-physics';
 import { LandscapeInstance, LandscapeInstanceInterface } from './LandscapeInstance';
-import { API } from '../gfx';
 import { warn } from '../core/platform/debug';
 
 /** Terrain holes share streamed splat data in both modes. */
@@ -61,12 +60,6 @@ export class LandscapeSurfaceResult {
     public surfaceType = -1;
     public surfaceWeight = 0;
     public get height (): number { return this.position.y; }
-}
-
-interface QuerySource {
-    node: Node;
-    radius: number;
-    status: LandscapeQueryStatus;
 }
 
 /** One runtime instance of an already loaded decal layer. */
@@ -275,6 +268,7 @@ export class Landscape extends Component {
     private _enableGeneration = 0;
     private _initializingScene: RenderScene | null = null;
     private _physics: LandscapePhysics | null = null;
+    private _transformWarningIssued = false;
 
     /** Explicit world-space collision regions, independent of rendering LOD. */
     public get physics (): LandscapePhysics {
@@ -285,9 +279,7 @@ export class Landscape extends Component {
         return this._physics;
     }
 
-    private readonly _querySources = new Map<number, QuerySource>();
     private readonly _queryOutput = new Float32Array(8);
-    private _nextQuerySource = 1;
 
     @serializable
     private _queryCacheCapacity = 64;
@@ -321,24 +313,16 @@ export class Landscape extends Component {
             throw new Error('Query source requires a valid node');
         }
         this._validateQueryRadius(preloadRadius);
-        const id = this._nextQuerySource++;
-        this._querySources.set(id, { node, radius: preloadRadius, status: LandscapeQueryStatus.NotReady });
-        return id;
+        this._ensureRuntime();
+        return this._runtime ? this._runtime.addQuerySource(node, preloadRadius) : 0;
     }
 
     public setQuerySourceRadius (id: number, preloadRadius: number): boolean {
         this._validateQueryRadius(preloadRadius);
-        const source = this._querySources.get(id);
-        if (!source) {
-            return false;
-        }
-        source.radius = preloadRadius;
-        source.status = LandscapeQueryStatus.NotReady;
-        return true;
+        return this._runtime ? this._runtime.setQuerySourceRadius(id, preloadRadius) : false;
     }
 
     public removeQuerySource (id: number): void {
-        this._querySources.delete(id);
         this._runtime?.removeQuerySource(id);
     }
 
@@ -348,8 +332,7 @@ export class Landscape extends Component {
      * Sources retry automatically as they move, shrink, or other sources release tiles.
      */
     public getQuerySourceStatus (id: number): LandscapeQueryStatus {
-        const source = this._querySources.get(id);
-        return source ? this._syncQuerySource(id, source) : LandscapeQueryStatus.Miss;
+        return this._runtime ? this._runtime.getQuerySourceStatus(id) as LandscapeQueryStatus : LandscapeQueryStatus.Miss;
     }
 
     public isQuerySourceReady (id: number): boolean {
@@ -381,21 +364,6 @@ export class Landscape extends Component {
         if (radius < 0) {
             throw new RangeError('Query radius must be nonnegative');
         }
-    }
-
-    private _syncQuerySource (id: number, source: QuerySource): LandscapeQueryStatus {
-        if (!isValid(source.node, true)) {
-            this.removeQuerySource(id);
-            return LandscapeQueryStatus.Miss;
-        }
-        if (!this._runtime || !this.enabledInHierarchy || !source.node.activeInHierarchy) {
-            this._runtime?.removeQuerySource(id);
-            source.status = LandscapeQueryStatus.NotReady;
-        } else {
-            const position = source.node.worldPosition;
-            source.status = this._runtime.setQuerySource(id, position.x, position.z, source.radius);
-        }
-        return source.status;
     }
 
     /** Initial view resources admitted by normal LOD/capacity limits have finished loading and composition; stays true during later streaming. */
@@ -573,16 +541,19 @@ export class Landscape extends Component {
         this._appliedDebugFlags = flags;
     }
 
-    public onLoad (): void {
+    private _ensureRuntime (): void {
+        if (this._runtime) {
+            return;
+        }
         if (JSB && typeof jsb !== 'undefined' && jsb.LandscapeInstance) {
             this._runtime = new jsb.LandscapeInstance();
         } else if (!JSB) {
-            if (director.root!.device.gfxAPI !== API.WEBGL2) {
-                warn('[Landscape] Requires WebGL2; rendering, queries and physics were not started');
-                return;
-            }
             this._runtime = new LandscapeInstance();
         }
+    }
+
+    public onLoad (): void {
+        this._ensureRuntime();
     }
 
     public onEnable (): void {
@@ -659,11 +630,19 @@ export class Landscape extends Component {
             return;
         }
         this._syncDebugData();
-        for (const [id, source] of this._querySources) {
-            this._syncQuerySource(id, source);
-        }
         if (!this._runtime.isInitialized()) {
             return;
+        }
+        if (!this._transformWarningIssued) {
+            const m = this.node.worldMatrix;
+            const translationOnly = Math.abs(m.m00 - 1) <= 1e-5 && Math.abs(m.m05 - 1) <= 1e-5 && Math.abs(m.m10 - 1) <= 1e-5
+                && Math.abs(m.m01) <= 1e-5 && Math.abs(m.m02) <= 1e-5 && Math.abs(m.m03) <= 1e-5
+                && Math.abs(m.m04) <= 1e-5 && Math.abs(m.m06) <= 1e-5 && Math.abs(m.m07) <= 1e-5
+                && Math.abs(m.m08) <= 1e-5 && Math.abs(m.m09) <= 1e-5 && Math.abs(m.m11) <= 1e-5;
+            if (!translationOnly) {
+                this._transformWarningIssued = true;
+                warn(`[Landscape] "${this.node.name}" has an unsupported world transform. Only translation is supported, including parent transforms.`);
+            }
         }
         this._runtime.update();
     }
@@ -686,10 +665,9 @@ export class Landscape extends Component {
         director.off(DirectorEvent.BEFORE_DRAW, this._beforeDraw, this);
         this._physics?._destroy();
         if (this._runtime) {
-            this._runtime.onDisable();
+            this._runtime.destroy();
         }
         this._runtime = null;
-        this._querySources.clear();
     }
 
     /**

@@ -2,6 +2,7 @@
 import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { RenderTexture, Texture2D } from '../asset/assets';
 import { AABB, Frustum, intersect } from '../core/geometry';
+import { isValid } from '../core/data/object';
 import { Color } from '../core/math';
 import { error, warn } from '../core/platform/debug';
 import { director } from '../game/director';
@@ -21,6 +22,11 @@ import { LandscapeSchedule } from './Schedule';
 import { LandscapeRenderer } from './Renderer';
 import * as config from './Config';
 
+interface QuerySource {
+    node: Node;
+    radius: number;
+}
+
 interface PassSelection {
     frustum: Readonly<Frustum>;
     shadow: boolean;
@@ -33,6 +39,7 @@ interface PassSelection {
 export interface LandscapeInstanceInterface {
     onEnable(node: Node, lodQualityScale: number, queryCacheCapacity: number): boolean | Promise<boolean>;
     onDisable(): void;
+    destroy(): void;
     isInitialized(): boolean;
     isReady(): boolean;
     update(): void;
@@ -47,7 +54,8 @@ export interface LandscapeInstanceInterface {
     getVTAtlas(): Texture2D | RenderTexture | null;
     addDecal(x: number, z: number, size: number, layer: number): number;
     removeDecal(id: number): boolean;
-    setQuerySource(id: number, x: number, z: number, radius: number): number;
+    addQuerySource(node: Node, radius: number): number;
+    setQuerySourceRadius(id: number, radius: number): boolean;
     removeQuerySource(id: number): void;
     getQuerySourceStatus(id: number): number;
     sampleSurface(x: number, z: number, output: Float32Array): number;
@@ -73,6 +81,9 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     private _globalColorStrength = 0.1;
     private _globalColorMap: Texture2D | null = null;
     private readonly _passes: PassSelection[] = [];
+    // Registrations survive disable/re-enable; destroy releases their node references.
+    private readonly _querySources = new Map<number, QuerySource>();
+    private _nextQuerySource = 1;
 
     public async onEnable (node: Node, lodQualityScale: number, queryCacheCapacity: number): Promise<boolean> {
         if (director.root!.device.gfxAPI !== API.WEBGL2) {
@@ -86,6 +97,10 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         const generation = this._generation;
         const scene = node.scene?.renderScene;
         if (!scene || !this._assetPath) {
+            return false;
+        }
+        if (!LandscapeInstance.isTranslationOnly(node)) {
+            error('[Landscape] Only translation is supported; initialization failed');
             return false;
         }
         const asset = new LandscapeAsset();
@@ -104,6 +119,12 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                     this.onDisable();
                     error('[Landscape] WebGL2 resource initialization failed; Landscape was not started');
                 }
+                return false;
+            }
+            // The node or its ancestors may change while Web resources load.
+            if (!LandscapeInstance.isTranslationOnly(node)) {
+                this.onDisable();
+                error('[Landscape] Only translation is supported; initialization failed');
                 return false;
             }
             const schedule = new LandscapeSchedule(asset, renderer, lodQualityScale);
@@ -157,6 +178,11 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         this._passes.length = 0;
     }
 
+    public destroy (): void {
+        this.onDisable();
+        this._querySources.clear();
+    }
+
     public isInitialized (): boolean {
         return this._renderer !== null;
     }
@@ -203,6 +229,9 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     public update (): void {
         if (!this._renderer) {
             return;
+        }
+        for (const id of this._querySources.keys()) {
+            this.getQuerySourceStatus(id);
         }
         this._query!.update();
         const camera = this.pickMainCamera();
@@ -314,29 +343,55 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         return this._renderer !== null && this._renderer.removeDecal(id);
     }
 
-    private queryTransformValid (): boolean {
-        const m = this._node!.worldMatrix;
+    private static isTranslationOnly (node: Node): boolean {
+        const m = node.worldMatrix;
         const values = [m.m00, m.m01, m.m02, m.m03, m.m04, m.m05, m.m06, m.m07, m.m08, m.m09, m.m10, m.m11];
         return values.every((value, i) => Math.abs(value - (i === 0 || i === 5 || i === 10 ? 1 : 0)) <= 1e-5);
     }
 
-    public setQuerySource (id: number, x: number, z: number, radius: number): LandscapeQueryStatus {
-        if (!this._renderer) {
-            return LandscapeQueryStatus.NOT_READY;
+    public addQuerySource (node: Node, radius: number): number {
+        if (!isValid(node, true) || radius < 0 || this._nextQuerySource > 0xFFFFFFFF) {
+            return 0;
         }
-        if (!this.queryTransformValid()) {
-            this.removeQuerySource(id);
-            return LandscapeQueryStatus.ERROR;
+        const id = this._nextQuerySource++;
+        this._querySources.set(id, { node, radius });
+        return id;
+    }
+
+    public setQuerySourceRadius (id: number, radius: number): boolean {
+        const source = this._querySources.get(id);
+        if (!source || radius < 0) {
+            return false;
         }
-        const origin = this._node!.worldPosition;
-        return this._query!.addSource(id, { x: x - origin.x, z: z - origin.z }, radius);
+        source.radius = radius;
+        return true;
     }
 
     public removeQuerySource (id: number): void {
+        this._querySources.delete(id);
         this._query?.removeSource(id);
     }
+
     public getQuerySourceStatus (id: number): LandscapeQueryStatus {
-        return this._query ? this._query.getSourceStatus(id) : LandscapeQueryStatus.NOT_READY;
+        const source = this._querySources.get(id);
+        if (!source) {
+            return LandscapeQueryStatus.MISS;
+        }
+        if (!isValid(source.node, true)) {
+            this.removeQuerySource(id);
+            return LandscapeQueryStatus.MISS;
+        }
+        if (!this._renderer || !source.node.activeInHierarchy) {
+            this._query?.removeSource(id);
+            return LandscapeQueryStatus.NOT_READY;
+        }
+        if (!LandscapeInstance.isTranslationOnly(this._node!)) {
+            this._query!.removeSource(id);
+            return LandscapeQueryStatus.ERROR;
+        }
+        const position = source.node.worldPosition;
+        const origin = this._node!.worldPosition;
+        return this._query!.addSource(id, { x: position.x - origin.x, z: position.z - origin.z }, source.radius);
     }
 
     public sampleSurface (x: number, z: number, output: Float32Array): LandscapeQueryStatus {
@@ -346,7 +401,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         if (!this._renderer) {
             return LandscapeQueryStatus.NOT_READY;
         }
-        if (!this.queryTransformValid()) {
+        if (!LandscapeInstance.isTranslationOnly(this._node!)) {
             return LandscapeQueryStatus.ERROR;
         }
         const origin = this._node!.worldPosition;

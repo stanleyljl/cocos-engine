@@ -5,6 +5,7 @@ import { LandscapeData } from '../../cocos/landscape/Data';
 import { LandscapeQueryTile } from '../../cocos/landscape/Data';
 import { LandscapeQuery, LandscapeQueryStatus as RuntimeStatus } from '../../cocos/landscape/Query';
 import * as config from '../../cocos/landscape/Config';
+import { LandscapeInstance } from '../../cocos/landscape/LandscapeInstance';
 
 function fixture () {
     const terrain = new Landscape();
@@ -12,34 +13,45 @@ function fixture () {
     let active = true;
     Object.defineProperty(node, 'activeInHierarchy', { get: () => active });
     Object.defineProperty(terrain, 'enabledInHierarchy', { get: () => true });
-    const native = {
-        setQuerySource: jest.fn(() => Status.NotReady),
-        removeQuerySource: jest.fn(),
+    const query = {
+        addSource: jest.fn(() => Status.NotReady),
+        removeSource: jest.fn(),
+        update: jest.fn(),
+        destroy: jest.fn(),
+    };
+    const runtime = Object.assign(new LandscapeInstance(), {
         sampleSurface: jest.fn((_x: number, _z: number, output: Float32Array) => {
             output.set([1, 12, 3, 0, 1, 0, 7, 0.75]);
             return Status.Hit;
         }),
         isInitialized: jest.fn(() => false),
-        onDisable: jest.fn(),
-    };
-    (terrain as unknown as { _runtime: typeof native })._runtime = native;
-    return { terrain, node, native, deactivate: () => { active = false; } };
+    });
+    const origin = { worldMatrix: node.worldMatrix.clone(), worldPosition: new Vec3() };
+    const initialize = () => Object.assign(runtime, {
+        _node: origin,
+        _scene: { cameras: [], removeLandscape: jest.fn() },
+        _renderer: { destroy: jest.fn() },
+        _query: query,
+    });
+    initialize();
+    (terrain as unknown as { _runtime: typeof runtime })._runtime = runtime;
+    return { terrain, node, runtime, query, initialize, deactivate: () => { active = false; } };
 }
 
 describe('Landscape CPU surface query API', () => {
     test('registration follows the node, updates radius and releases its handle', () => {
-        const { terrain, node, native } = fixture();
+        const { terrain, node, query } = fixture();
         node.setPosition(4, 10, 8);
         const id = terrain.addQuerySource(node, 32);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
-        expect(native.setQuerySource).toHaveBeenLastCalledWith(id, 4, 8, 32);
+        expect(query.addSource).toHaveBeenLastCalledWith(id, { x: 4, z: 8 }, 32);
         node.setPosition(6, 20, 9);
         expect(terrain.setQuerySourceRadius(id, 48)).toBe(true);
-        native.setQuerySource.mockReturnValue(Status.Hit);
+        query.addSource.mockReturnValue(Status.Hit);
         expect(terrain.isQuerySourceReady(id)).toBe(true);
-        expect(native.setQuerySource).toHaveBeenLastCalledWith(id, 6, 9, 48);
+        expect(query.addSource).toHaveBeenLastCalledWith(id, { x: 6, z: 9 }, 48);
         terrain.removeQuerySource(id);
-        expect(native.removeQuerySource).toHaveBeenCalledWith(id);
+        expect(query.removeSource).toHaveBeenCalledWith(id);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.Miss);
         expect(terrain.setQuerySourceRadius(id, 8)).toBe(false);
         terrain.onDestroy();
@@ -47,17 +59,17 @@ describe('Landscape CPU surface query API', () => {
     });
 
     test('capacity rejection is distinct from loading and the same source can recover', () => {
-        const { terrain, node, native } = fixture();
+        const { terrain, node, query } = fixture();
         const id = terrain.addQuerySource(node, 64);
-        native.setQuerySource.mockReturnValue(Status.OutOfCapacity);
+        query.addSource.mockReturnValue(Status.OutOfCapacity);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.OutOfCapacity);
         expect(terrain.isQuerySourceReady(id)).toBe(false);
         expect(terrain.setQuerySourceRadius(id, 16)).toBe(true);
-        native.setQuerySource.mockReturnValue(Status.NotReady);
+        query.addSource.mockReturnValue(Status.NotReady);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
-        expect(native.setQuerySource).toHaveBeenLastCalledWith(id, 0, 0, 16);
+        expect(query.addSource).toHaveBeenLastCalledWith(id, { x: 0, z: 0 }, 16);
         expect(terrain.isQuerySourceReady(id)).toBe(false);
-        native.setQuerySource.mockReturnValue(Status.Hit);
+        query.addSource.mockReturnValue(Status.Hit);
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.Hit);
         expect(terrain.isQuerySourceReady(id)).toBe(true);
         terrain.onDestroy();
@@ -65,20 +77,54 @@ describe('Landscape CPU surface query API', () => {
     });
 
     test('inactive and destroyed sources stop protecting the CPU cache', () => {
-        const { terrain, node, native, deactivate } = fixture();
+        const { terrain, node, query, deactivate } = fixture();
         const id = terrain.addQuerySource(node, 0);
         terrain.getQuerySourceStatus(id);
         deactivate();
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
-        expect(native.removeQuerySource).toHaveBeenCalledWith(id);
+        expect(query.removeSource).toHaveBeenCalledWith(id);
         node.destroy();
         expect(terrain.getQuerySourceStatus(id)).toBe(Status.Miss);
         expect(terrain.setQuerySourceRadius(id, 8)).toBe(false);
         terrain.onDestroy();
     });
 
+    test('disable retains registrations and destroy clears them', () => {
+        const { terrain, node, runtime, query, initialize } = fixture();
+        const id = terrain.addQuerySource(node, 16);
+        runtime.update();
+        expect(query.addSource).toHaveBeenLastCalledWith(id, { x: 0, z: 0 }, 16);
+        expect(query.addSource.mock.invocationCallOrder[0]).toBeLessThan(query.update.mock.invocationCallOrder[0]);
+        terrain.onDisable();
+        expect(query.destroy).toHaveBeenCalledTimes(1);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
+        expect(terrain.setQuerySourceRadius(id, 32)).toBe(true);
+        node.setPosition(4, 0, 8);
+        initialize();
+        runtime.update();
+        expect(query.addSource).toHaveBeenLastCalledWith(id, { x: 4, z: 8 }, 32);
+        terrain.onDestroy();
+        expect(runtime.getQuerySourceStatus(id)).toBe(RuntimeStatus.MISS);
+        expect(runtime.setQuerySourceRadius(id, 8)).toBe(false);
+        node.destroy();
+    });
+
+    test('registration before onLoad survives onLoad', () => {
+        const terrain = new Landscape();
+        const node = new Node();
+        const id = terrain.addQuerySource(node, 16);
+        expect(id).toBeGreaterThan(0);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
+        terrain.onLoad();
+        expect(terrain.setQuerySourceRadius(id, 32)).toBe(true);
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.NotReady);
+        terrain.onDestroy();
+        expect(terrain.getQuerySourceStatus(id)).toBe(Status.Miss);
+        node.destroy();
+    });
+
     test('query reuses the result and does not change it when data is unavailable', () => {
-        const { terrain, node, native } = fixture();
+        const { terrain, node, runtime } = fixture();
         const output = new LandscapeSurfaceResult();
         const position = output.position;
         const normal = output.normal;
@@ -88,22 +134,22 @@ describe('Landscape CPU surface query API', () => {
         expect(output.normal).toBe(normal);
         expect(output.surfaceType).toBe(7);
         expect(output.surfaceWeight).toBe(0.75);
-        const buffer = native.sampleSurface.mock.calls[0][2];
-        native.sampleSurface.mockImplementation((_x, _z, data) => {
+        const buffer = runtime.sampleSurface.mock.calls[0][2];
+        runtime.sampleSurface.mockImplementation((_x, _z, data) => {
             data.fill(-99);
             return Status.NotReady;
         });
         expect(terrain.sampleSurface(new Vec3(2, 0, 4), output)).toBe(Status.NotReady);
-        expect(native.sampleSurface.mock.calls[1][2]).toBe(buffer);
+        expect(runtime.sampleSurface.mock.calls[1][2]).toBe(buffer);
         expect(output.height).toBe(12);
         expect(output.surfaceType).toBe(7);
-        expect(native.sampleSurface).toHaveBeenCalledTimes(2);
+        expect(runtime.sampleSurface).toHaveBeenCalledTimes(2);
         terrain.onDestroy();
         node.destroy();
     });
 
-    test('invalid budgets and radii are rejected and disabled/native-free query is nonblocking', () => {
-        const { terrain, node, native } = fixture();
+    test('invalid budgets and radii are rejected and disabled/runtime-free query is nonblocking', () => {
+        const { terrain, node, runtime } = fixture();
         expect(() => terrain.addQuerySource(node, -1)).toThrow(RangeError);
         for (const capacity of [-1, 0, 1.5, 4097]) {
             expect(() => { terrain.queryCacheCapacity = capacity; }).toThrow(RangeError);
@@ -114,7 +160,7 @@ describe('Landscape CPU surface query API', () => {
         }
         terrain.queryCacheCapacity = 16;
         expect(terrain.queryCacheCapacity).toBe(16);
-        native.isInitialized.mockReturnValue(true);
+        runtime.isInitialized.mockReturnValue(true);
         expect(() => { terrain.queryCacheCapacity = 32; }).toThrow();
         const id = terrain.addQuerySource(node);
         terrain.onDestroy();

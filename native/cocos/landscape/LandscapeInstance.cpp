@@ -57,12 +57,16 @@ namespace landscape {
 LandscapeInstance::LandscapeInstance() = default;
 
 LandscapeInstance::~LandscapeInstance() {
-    onDisable();
+    destroy();
 }
 
 bool LandscapeInstance::onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity) {
     if (node == nullptr || _renderer != nullptr || lodQualityScale <= 0.0F ||
         queryCacheCapacity == 0 || queryCacheCapacity > 4096) {
+        return false;
+    }
+    if (!isTranslationOnly(node)) {
+        CC_LOG_ERROR("[Landscape] Only translation is supported; initialization failed");
         return false;
     }
     _lodQualityScale = lodQualityScale;
@@ -147,6 +151,11 @@ void LandscapeInstance::onDisable() {
     _node = nullptr;
 }
 
+void LandscapeInstance::destroy() {
+    onDisable();
+    _querySources.clear();
+}
+
 uint32_t LandscapeInstance::addDecal(float x, float z, float size, uint32_t layer) {
     const uint32_t id = _renderer ? _renderer->addDecal(x, z, size, layer) : 0;
     if (id == 0) {
@@ -164,7 +173,12 @@ void LandscapeInstance::update() {
     if (!_renderer) {
         return;
     }
-    _query->update(); // No camera or render-readiness dependency.
+    for (auto source = _querySources.begin(); source != _querySources.end();) {
+        const uint32_t id = source->first;
+        ++source;
+        getQuerySourceStatus(id);
+    }
+    _query->update();
     auto *camera = pickMainCamera();
     if (!camera) {
         return;
@@ -184,11 +198,8 @@ void LandscapeInstance::addPass(const geometry::Frustum &frustum, bool shadow) {
     _schedule->addPass(frustum, !shadow);
 }
 
-bool LandscapeInstance::queryTransformValid() const {
-    if (!_node) {
-        return false;
-    }
-    const auto &m = _node->getWorldMatrix();
+bool LandscapeInstance::isTranslationOnly(Node *node) {
+    const auto &m = node->getWorldMatrix();
     for (uint32_t i = 0; i < 12; ++i) {
         const float expected = (i == 0 || i == 5 || i == 10) ? 1.0F : 0.0F;
         if (std::abs(m.m[i] - expected) > 1e-5F) {
@@ -198,26 +209,54 @@ bool LandscapeInstance::queryTransformValid() const {
     return true;
 }
 
-uint32_t LandscapeInstance::setQuerySource(uint32_t id, float worldX, float worldZ, float radius) {
-    if (!_query || !_node) {
-        return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+uint32_t LandscapeInstance::addQuerySource(Node *node, float radius) {
+    if (!isObjectValid(node, true) || radius < 0.0F || _nextQuerySource > UINT32_MAX) {
+        return 0;
     }
-    if (!queryTransformValid()) {
-        removeQuerySource(id);
-        return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    const auto id = static_cast<uint32_t>(_nextQuerySource++);
+    _querySources.emplace(id, QuerySource{IntrusivePtr<Node>(node), radius});
+    return id;
+}
+
+bool LandscapeInstance::setQuerySourceRadius(uint32_t id, float radius) {
+    const auto source = _querySources.find(id);
+    if (source == _querySources.end() || radius < 0.0F) {
+        return false;
     }
-    const auto &origin = _node->getWorldPosition();
-    return static_cast<uint32_t>(_query->addSource(id, {worldX - origin.x, worldZ - origin.z}, radius));
+    source->second.radius = radius;
+    return true;
 }
 
 void LandscapeInstance::removeQuerySource(uint32_t id) {
+    _querySources.erase(id);
     if (_query) {
         _query->removeSource(id);
     }
 }
 
-uint32_t LandscapeInstance::getQuerySourceStatus(uint32_t id) const {
-    return static_cast<uint32_t>(_query ? _query->getSourceStatus(id) : LandscapeQueryStatus::NOT_READY);
+uint32_t LandscapeInstance::getQuerySourceStatus(uint32_t id) {
+    const auto source = _querySources.find(id);
+    if (source == _querySources.end()) {
+        return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
+    }
+    auto *node = source->second.node.get();
+    if (!isObjectValid(node, true)) {
+        removeQuerySource(id);
+        return static_cast<uint32_t>(LandscapeQueryStatus::MISS);
+    }
+    if (!_renderer || !node->isActiveInHierarchy()) {
+        if (_query) {
+            _query->removeSource(id);
+        }
+        return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
+    }
+    if (!isTranslationOnly(_node.get())) {
+        _query->removeSource(id);
+        return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
+    }
+    const auto &position = node->getWorldPosition();
+    const auto &origin = _node->getWorldPosition();
+    return static_cast<uint32_t>(_query->addSource(id, {position.x - origin.x, position.z - origin.z}, source->second.radius));
 }
 
 uint32_t LandscapeInstance::sampleSurface(float worldX, float worldZ, Float32Array output) {
@@ -227,7 +266,7 @@ uint32_t LandscapeInstance::sampleSurface(float worldX, float worldZ, Float32Arr
     if (!_asset || !_node) {
         return static_cast<uint32_t>(LandscapeQueryStatus::NOT_READY);
     }
-    if (!queryTransformValid()) {
+    if (!isTranslationOnly(_node.get())) {
         return static_cast<uint32_t>(LandscapeQueryStatus::ERROR);
     }
     const auto &origin = _node->getWorldPosition();
