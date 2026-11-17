@@ -66,7 +66,7 @@ ccstd::vector<NodeAddress> Quadtree::requests() const {
             return true;
         }
         // Request the first missing node on each branch before its descendants.
-        if (!node.ready) {
+        if (!node.ready()) {
             missingNodes.push_back(address);
             return false;
         }
@@ -90,7 +90,7 @@ ccstd::vector<NodeAddress> Quadtree::requests() const {
 }
 
 bool Quadtree::publish(NodeAddress address, VTGridMapping material) {
-    if (!isTarget(address)) {
+    if (!isInTargetTree(address)) {
         return false;
     }
     auto *node = findNode(address);
@@ -102,13 +102,12 @@ bool Quadtree::publish(NodeAddress address, VTGridMapping material) {
     }
     if (address.level < _data.maxTileLevel) {
         const auto *parent = find(address.ancestor(address.level + 1));
-        if (!parent->ready) {
+        if (!parent->ready()) {
             return false;
         }
     }
-    _needsRenderSelection |= !node->ready;
+    _needsRenderSelection |= !node->ready();
     node->material = std::move(material);
-    node->ready = true;
     if (node->renderable) {
         _changedNodes.insert(address.key());
     }
@@ -143,7 +142,7 @@ bool Quadtree::selectRenderables() {
                 continue;
             }
             const bool childrenReady = std::all_of(node->children.get(), node->children.get() + 4, [](const Node &child) {
-                return child.ready;
+                return child.ready();
             });
             if (!childrenReady) {
                 continue;
@@ -197,7 +196,7 @@ bool Quadtree::selectRenderables() {
 bool Quadtree::sectorRootsReady() const {
     for (uint32_t z = 0; z < _data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < _data.sectorsX; ++x) {
-            if (!find({_data.maxTileLevel, x, z})->ready) {
+            if (!find({_data.maxTileLevel, x, z})->ready()) {
                 return false;
             }
         }
@@ -235,7 +234,7 @@ const Quadtree::Node *Quadtree::findRenderable(NodeAddress address) const {
     return node;
 }
 
-bool Quadtree::isTarget(NodeAddress address) const {
+bool Quadtree::isInTargetTree(NodeAddress address) const {
     if (!find(address)) {
         return false;
     }
@@ -251,6 +250,30 @@ bool Quadtree::isTarget(NodeAddress address) const {
 LandscapeRegion Quadtree::region(NodeAddress address) const {
     const float size = std::ldexp(_data.sectorSize, static_cast<int>(address.level) - static_cast<int>(_data.maxTileLevel));
     return {address.x * size, address.z * size, size};
+}
+
+bool Quadtree::morphRangeTooSmall(const QuadNode &node) const {
+    const auto address = node.address();
+    if (address.level == _data.maxTileLevel) {
+        return false;
+    }
+    // Use the geometry bounds, including the source height range used during morphing.
+    const auto area = region(address);
+    const auto &camera = _localCameraPosition;
+    const float x = std::max(std::abs(area.x - camera.x), std::abs(area.x + area.size - camera.x));
+    const float y = std::max(std::abs(node.minY - camera.y), std::abs(node.maxY - camera.y));
+    const float z = std::max(std::abs(area.z - camera.z), std::abs(area.z + area.size - camera.z));
+    const float start = _lodMorphRanges[address.level + 1].start;
+    return x * x + y * y + z * z > start * start;
+}
+
+float Quadtree::distanceSquared(NodeAddress address) const {
+    const auto bounds = heightRange(address);
+    const auto area = region(address);
+    const float x = std::max({area.x - _localCameraPosition.x, _localCameraPosition.x - area.x - area.size, 0.0F});
+    const float y = std::max({bounds.minY - _localCameraPosition.y, _localCameraPosition.y - bounds.maxY, 0.0F});
+    const float z = std::max({area.z - _localCameraPosition.z, _localCameraPosition.z - area.z - area.size, 0.0F});
+    return x * x + y * y + z * z;
 }
 
 void Quadtree::forEachNode(const std::function<bool(const Node &)> &visit) const {
@@ -316,7 +339,7 @@ void Quadtree::buildRoot(Node &node, NodeAddress address) {
     node.children = std::make_unique<Node[]>(4);
     HeightRange bounds{std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
     for (uint32_t q = 0; q < 4; ++q) {
-        const auto addressOfChild = child(address, q);
+        const auto addressOfChild = address.child(q);
         buildRoot(node.children[q], addressOfChild);
         if (contains(addressOfChild)) {
             bounds.minY = std::min(bounds.minY, node.children[q].geometry.minY);
@@ -338,7 +361,7 @@ void Quadtree::updateTargetNode(Node &node) {
     if (!refine && address.level > 0) {
         const float range = _lodMorphRanges[address.level - 1].end;
         for (uint32_t q = 0; q < 4; ++q) {
-            if (distanceSquared(child(address, q)) <= range * range) {
+            if (distanceSquared(address.child(q)) <= range * range) {
                 refine = true;
                 break;
             }
@@ -351,16 +374,12 @@ void Quadtree::updateTargetNode(Node &node) {
     if (!node.children) {
         node.children = std::make_unique<Node[]>(4);
         for (uint32_t q = 0; q < 4; ++q) {
-            node.children[q].geometry = geometry(child(address, q));
+            node.children[q].geometry = geometry(address.child(q));
         }
     }
     for (uint32_t q = 0; q < 4; ++q) {
         updateTargetNode(node.children[q]);
     }
-}
-
-NodeAddress Quadtree::child(NodeAddress address, uint32_t quadrant) {
-    return {address.level - 1, address.x * 2 + (quadrant & 1U), address.z * 2 + (quadrant >> 1U)};
 }
 
 Quadtree::Node *Quadtree::findNode(NodeAddress address) {
@@ -393,15 +412,6 @@ HeightRange Quadtree::heightRange(NodeAddress address) const {
         return {bounds.minY, bounds.maxY};
     }
     return _heightRanges[address.level][static_cast<size_t>(address.z) * _data.nodesX(address.level) + address.x];
-}
-
-float Quadtree::distanceSquared(NodeAddress address) const {
-    const auto bounds = heightRange(address);
-    const auto area = region(address);
-    const float x = std::max({area.x - _localCameraPosition.x, _localCameraPosition.x - area.x - area.size, 0.0F});
-    const float y = std::max({bounds.minY - _localCameraPosition.y, _localCameraPosition.y - bounds.maxY, 0.0F});
-    const float z = std::max({area.z - _localCameraPosition.z, _localCameraPosition.z - area.z - area.size, 0.0F});
-    return x * x + y * y + z * z;
 }
 
 NodeAddress Quadtree::renderableAt(uint32_t x, uint32_t z) const {

@@ -39,6 +39,18 @@ class TextureBase;
 namespace cc::landscape {
 class VTRenderer;
 
+// Scoped to one admission scan; caches immutable inputs, never capacity decisions.
+class VTCapacityQuery {
+public:
+    VTCapacityQuery(const VTRenderer &renderer, const LandscapeResidency &residency);
+    bool canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources);
+
+private:
+    const VTRenderer &_renderer;
+    const LandscapeResidency &_residency;
+    ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> _pageSources;
+};
+
 // GPU page table consumed by terrain draws. Each grid owns 256 consecutive
 // RG8 entries (physical slot, VT level); allocation and uploads live together.
 class VTPageTable {
@@ -98,10 +110,11 @@ public:
     void destroy();
 
     // Page residency and composition.
-    // Reservation inputs are unique addresses, collected by LandscapeSchedule.
-    bool canReserve(const ccstd::vector<VTPageAddress> &pages) const;
-    bool reserve(const ccstd::vector<VTPageAddress> &pages);
-    uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
+    VTCapacityQuery capacityQuery() const { return VTCapacityQuery(*this, *_residency); }
+    bool canFit(const ccstd::vector<VTPageAddress> &pages) const;
+    void request(VTPageAddress address);
+    void release(VTPageAddress address);
+    bool update(uint32_t maxPages);
     void invalidate();
     // Invalidate intersecting cached pages, including their filtering gutters.
     void invalidate(LandscapeRegion region);
@@ -132,11 +145,17 @@ public:
     gfx::Sampler *sampler() const { return _sampler; }
 
 protected:
-    // CPU residency operations; runtime callers use init() and renderPages().
+    // CPU residency operations; runtime callers use init() and update().
     bool initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity = config::VT_PAGE_COUNT);
     void publish(uint32_t slot);
+    bool applyRequests();
 
 private:
+    struct Request {
+        VTPageAddress address;
+        uint32_t count{0};
+    };
+    uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
     bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
     int allocate(VTPageAddress address);
     uint32_t sourceLevel(float size) const;
@@ -146,6 +165,11 @@ private:
     VTPageLayout _layout;
     const ccstd::vector<ccstd::vector<HeightRange>> *_heightRanges{nullptr}; // Borrowed immutable asset metadata.
 
+    LandscapeResidency *_residency{nullptr}; // Borrowed; initialized before runtime work.
+    ccstd::unordered_map<uint64_t, Request> _requests;
+    bool _requestsDirty{false};
+    // Owns one reference per source until update() reconciles composition demand.
+    ccstd::vector<NodeAddress> _sourceRequests;
     uint64_t _reservation{0}; // Advances per successful reservation, not per rendered frame.
     ccstd::vector<Page> _pages;
     ccstd::vector<uint32_t> _reservedSlots;

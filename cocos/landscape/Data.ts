@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import type { Vec3 } from '../core/math';
 import { Vec4 } from '../core/math';
+import { assert } from '../core/platform/debug';
 import * as config from './Config';
 
 export interface LandscapePoint {
@@ -80,6 +81,11 @@ export class NodeAddress {
     public ancestor (level: number): NodeAddress {
         const scale = 2 ** (level - this.level);
         return new NodeAddress(level, Math.floor(this.x / scale), Math.floor(this.z / scale));
+    }
+
+    public child (quadrant: number): NodeAddress {
+        assert(this.level > 0 && quadrant >= 0 && quadrant < 4);
+        return new NodeAddress(this.level - 1, this.x * 2 + (quadrant & 1), this.z * 2 + (quadrant >> 1));
     }
 }
 

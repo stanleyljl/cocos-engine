@@ -86,6 +86,7 @@ struct NodeAddress {
     static NodeAddress fromKey(uint64_t key);
     // targetLevel must be an ancestor (>= level), within geometry LOD limits.
     NodeAddress ancestor(uint32_t targetLevel) const;
+    NodeAddress child(uint32_t quadrant) const;
 };
 
 // Shared key encoding for geometry nodes, source tiles and VT pages.

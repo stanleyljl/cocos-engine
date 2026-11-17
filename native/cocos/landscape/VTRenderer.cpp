@@ -42,6 +42,34 @@
 #include "scene/RenderWindow.h"
 
 namespace cc::landscape {
+VTCapacityQuery::VTCapacityQuery(const VTRenderer &renderer, const LandscapeResidency &residency)
+: _renderer(renderer)
+, _residency(residency) {}
+
+bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources) {
+    if (!_residency.canFit(sources) || !_renderer.canFit(pages)) {
+        return false;
+    }
+    ccstd::unordered_set<uint64_t> retained;
+    for (const auto source : sources) {
+        retained.insert(source.key());
+    }
+    // Each page must fit alongside retained node sources, even after detail settings change.
+    for (const auto page : pages) {
+        const auto [entry, inserted] = _pageSources.try_emplace(page.key());
+        if (inserted) {
+            _renderer.selectSources(page, true, true).appendTo(entry->second);
+        }
+        const auto additional = std::count_if(entry->second.begin(), entry->second.end(), [&](NodeAddress source) {
+            return retained.count(source.key()) == 0;
+        });
+        if (retained.size() + additional > _residency.layerCount()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 VTPageTable::VTPageTable() = default;
 
 VTPageTable::~VTPageTable() = default;
@@ -199,11 +227,19 @@ bool VTRenderer::init(const LandscapeAsset &asset, LandscapeResidency &residency
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] VT atlas: %ux%u %s pages=%zu", atlasSize, atlasSize, _compressor ? "ASTC 4x4" : "RGBA8", _pages.size());
 #endif
+    _residency = &residency;
     _batch.reserve(_pages.size());
     return true;
 }
 
 void VTRenderer::destroy() {
+    for (const auto source : _sourceRequests) {
+        _residency->release(source);
+    }
+    _sourceRequests.clear();
+    _requests.clear();
+    _requestsDirty = false;
+    _residency = nullptr;
     _compressor.reset();
     _mipGenerator.reset();
     _composer.reset();
@@ -218,7 +254,7 @@ void VTRenderer::destroy() {
     _refineFarDetail = true;
 }
 
-bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
+bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages) const {
     if (pages.size() > _pages.size()) {
         return false;
     }
@@ -234,8 +270,68 @@ bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
     return true;
 }
 
-bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
-    if (!canReserve(pages)) {
+void VTRenderer::request(VTPageAddress address) {
+    const auto [entry, inserted] = _requests.try_emplace(address.key(), Request{address, 0});
+    ++entry->second.count;
+    _requestsDirty |= inserted;
+}
+
+void VTRenderer::release(VTPageAddress address) {
+    const auto entry = _requests.find(address.key());
+    CC_ASSERT(entry != _requests.end());
+    if (--entry->second.count == 0) {
+        _requests.erase(entry);
+        _requestsDirty = true;
+    }
+}
+
+bool VTRenderer::update(uint32_t budget) {
+    if (!applyRequests()) {
+        return false;
+    }
+    ccstd::vector<VTPageAddress> pages;
+
+    // Reconcile before Residency.update(), so retained inputs never lose their slots.
+    for (const auto source : _sourceRequests) {
+        _residency->release(source);
+    }
+    _sourceRequests.clear();
+    ccstd::unordered_set<uint64_t> keys;
+    for (const auto slot : _reservedSlots) {
+        const auto page = _pages[slot].address;
+        if (!needsComposition(page)) {
+            continue;
+        }
+        ccstd::vector<NodeAddress> inputs;
+        selectSources(page, _refineFarDetail, _triplanarEnabled).appendTo(inputs);
+        if (!_residency->canRequest(inputs)) {
+            continue;
+        }
+        pages.push_back(page);
+        for (const auto source : inputs) {
+            if (keys.insert(source.key()).second) {
+                _residency->request(source);
+                _sourceRequests.push_back(source);
+            }
+        }
+    }
+    // Keep this batch pinned through Residency.update() and GPU submission.
+    renderPages(*_residency, pages, budget);
+    return true;
+}
+
+bool VTRenderer::applyRequests() {
+    if (!_requestsDirty) {
+        return true;
+    }
+    ccstd::vector<VTPageAddress> pages;
+    for (const auto &entry : _requests) {
+        pages.push_back(entry.second.address);
+    }
+    std::sort(pages.begin(), pages.end(), [](VTPageAddress a, VTPageAddress b) {
+        return a.key() < b.key();
+    });
+    if (!canFit(pages)) {
         return false;
     }
     ++_reservation;
@@ -262,6 +358,7 @@ bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
         _pages[slot].lastReserved = _reservation;
         _reservedSlots[i] = static_cast<uint32_t>(slot);
     }
+    _requestsDirty = false;
     return true;
 }
 
@@ -269,8 +366,7 @@ uint32_t VTRenderer::renderPages(LandscapeResidency &residency, const ccstd::vec
     if (maxPages == 0) {
         return 0;
     }
-    // The scheduler supplies pages of loaded nodes, including invalidated ready
-    // pages. Compose only when every shared page input is resident as well.
+    // Compose each demanded page once, only when all of its inputs are resident.
     _batch.clear();
     for (const auto address : pages) {
         const uint32_t slot = _lookup.at(address.key());
@@ -353,7 +449,7 @@ void VTRenderer::invalidate(LandscapeRegion changed) {
 }
 
 bool VTRenderer::ready() const {
-    return !_reservedSlots.empty() && std::all_of(_reservedSlots.begin(), _reservedSlots.end(), [this](uint32_t slot) { return _pages[slot].state == PageState::READY; });
+    return !_requestsDirty && !_reservedSlots.empty() && std::all_of(_reservedSlots.begin(), _reservedSlots.end(), [this](uint32_t slot) { return _pages[slot].state == PageState::READY; });
 }
 
 bool VTRenderer::needsComposition(VTPageAddress address) const {

@@ -1,9 +1,10 @@
 import * as config from '../../cocos/landscape/Config';
 import { Vec3 } from '../../cocos/core/math';
 import type { LandscapeAsset } from '../../cocos/landscape/Asset';
-import { HeightRange, LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageLayout } from '../../cocos/landscape/Data';
+import { HeightRange, LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from '../../cocos/landscape/Data';
+import { LandscapeResidency } from '../../cocos/landscape/Residency';
 import { Quadtree } from '../../cocos/landscape/Quadtree';
-import { PageState, VTPage, VTRenderer } from '../../cocos/landscape/VTRenderer';
+import { PageState, VTPage, VTCapacityQuery, VTRenderer } from '../../cocos/landscape/VTRenderer';
 
 function requireCondition (condition: boolean, message: string): void {
     if (!condition) {
@@ -22,8 +23,8 @@ function mapping (address: NodeAddress): VTGridMapping {
 }
 
 // Match the native CPU fixture. Supply only CPU state; accidental GPU calls fail.
-// Reservations, eviction, lookup and invalidation still run production methods.
-function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; slots: () => number[]; pages: () => VTPage[] } {
+// Demand reconciliation, eviction, lookup and invalidation run production methods.
+function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; reserve: (addresses: VTPageAddress[]) => boolean; slots: () => number[]; pages: () => VTPage[] } {
     const state = {
         _data: data,
         _heightRanges: Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: data.sectorSize * 2 }))),
@@ -32,11 +33,128 @@ function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRend
         _reservedSlots: [] as number[],
         _lookup: new Map<string, number>(),
         _reservation: 0,
+        _requests: new Map(),
+        _requestsDirty: false,
     };
     const renderer: VTRenderer = Object.assign(Object.create(VTRenderer.prototype), state);
     const cpu = renderer as unknown as typeof state;
-    return { renderer, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
+    let demands: VTPageAddress[] = [];
+    const reserve = (addresses: VTPageAddress[]): boolean => {
+        if (!renderer.canFit(addresses)) {
+            return false;
+        }
+        demands.forEach((address) => renderer.release(address));
+        addresses.forEach((address) => renderer.request(address));
+        demands = addresses;
+        return renderer['applyRequests']();
+    };
+    return { renderer, reserve, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
 }
+
+test('reused page sources still check capacity against the current retained set', () => {
+    const first = new NodeAddress(0, 0, 0);
+    const second = new NodeAddress(0, 1, 0);
+    const input = new NodeAddress(0, 2, 0);
+    const page = new VTPageAddress(0, 0, 0);
+    const selectSources = jest.fn(() => {
+        const result = new VTPageSources();
+        result.splat = input;
+        result.normals.fill(input);
+        return result;
+    });
+    const residency = {
+        canFit: (sources: NodeAddress[]): boolean => sources.length <= 2,
+        layerCount: (): number => 2,
+    } as LandscapeResidency;
+    const pages = {
+        canFit: (): boolean => true,
+        selectSources,
+    } as unknown as VTRenderer;
+    const capacity = new VTCapacityQuery(pages, residency);
+    expect(capacity.canPrepare([page], [first])).toBe(true);
+    // The old page must now be rejected, although its source list is reusable.
+    expect(capacity.canPrepare([page], [first, second])).toBe(false);
+    // A retained source can also satisfy the page's composition demand.
+    expect(capacity.canPrepare([page], [first, input])).toBe(true);
+    expect(selectSources).toHaveBeenCalledTimes(1);
+    expect(selectSources).toHaveBeenCalledWith(page, true, true);
+    expect(new VTCapacityQuery(pages, residency).canPrepare([page], [first])).toBe(true);
+    expect(selectSources).toHaveBeenCalledTimes(2);
+});
+
+test('VT admission checks per-page headroom without reserving resources', () => {
+    const data = cacheData(3, 1, 1);
+    const residency = new LandscapeResidency();
+    residency['_data'] = data;
+    residency['_capacity'] = 2;
+    const { renderer, slots } = pageFixture(data, 2);
+    renderer['_residency'] = residency;
+    const capacity = renderer.capacityQuery();
+    const first = new NodeAddress(0, 1, 0);
+    const second = new NodeAddress(0, 2, 0);
+    const input = new NodeAddress(0, 0, 0);
+    const page = new VTPageAddress(0, 0, 0);
+    const other = new VTPageAddress(0, 3, 0);
+    expect(capacity.canPrepare([page], [first])).toBe(true);
+    expect(capacity.canPrepare([page], [first, second])).toBe(false);
+    expect(capacity.canPrepare([page], [first, input])).toBe(true);
+    // Pages compose in batches: their combined input footprint need not fit at once.
+    expect(capacity.canPrepare([page, other], [first])).toBe(true);
+    expect(capacity.canPrepare([page, other, new VTPageAddress(0, 4, 0)], [first])).toBe(false);
+    expect(capacity.canPrepare([page], [first, second, input])).toBe(false);
+    expect(capacity.canPrepare([new VTPageAddress(4, 0, 0)], [first])).toBe(false);
+    expect(capacity.canPrepare([page], [new NodeAddress(4, 0, 0)])).toBe(false);
+    expect(slots()).toHaveLength(0);
+    expect(residency['_requests'].size).toBe(0);
+});
+
+test('shared source demands retain uploaded data until the last release', () => {
+    const data = cacheData(3, 1, 1);
+    const residency = new LandscapeResidency();
+    residency['_data'] = data;
+    residency['_capacity'] = 1;
+    const source = new NodeAddress(3, 0, 0);
+    residency.request(source);
+    residency.request(source);
+    expect(residency.canRequest([source, source])).toBe(true);
+    expect(residency['applyRequests']()).toBe(true);
+    residency['_slots'].get(source.key())!.ready = true;
+    const layer = residency.resident(source);
+    residency.release(source);
+    expect(residency['applyRequests']()).toBe(true);
+    expect(residency.ready()).toBe(true);
+    expect(residency.resident(source)).toBe(layer);
+    residency.release(source);
+    residency.request(source);
+    expect(residency['applyRequests']()).toBe(true);
+    expect(residency.resident(source)).toBe(layer);
+    residency.release(source);
+    expect(residency['applyRequests']()).toBe(true);
+    expect(residency.resident(source)).toBe(-1);
+});
+
+test('shared page demands deduplicate work and survive partial release and same-frame changes', () => {
+    const { renderer, slots, pages } = pageFixture(cacheData(3, 1, 1), 1);
+    const page = new VTPageAddress(3, 0, 0);
+    renderer.request(page);
+    renderer.request(page);
+    expect(renderer['applyRequests']()).toBe(true);
+    expect(slots()).toHaveLength(1);
+    pages()[slots()[0]].state = PageState.READY;
+    const slot = renderer.resolve(page);
+    renderer.release(page);
+    expect(renderer['applyRequests']()).toBe(true);
+    expect(renderer.ready()).toBe(true);
+    expect(renderer.resolve(page)).toBe(slot);
+    renderer.release(page);
+    renderer.request(page);
+    expect(renderer['applyRequests']()).toBe(true);
+    expect(renderer.ready()).toBe(true);
+    expect(renderer.resolve(page)).toBe(slot);
+    renderer.release(page);
+    expect(renderer['applyRequests']()).toBe(true);
+    expect(renderer.resolve(page)).toBe(-1);
+});
 
 test('sector dimensions must be powers of two', () => {
     const data = cacheData(8, 1, 1);
@@ -135,7 +253,7 @@ function checkCut (tree: Quadtree, data: LandscapeData): void {
         }
     }
     tree.forEachRenderable((node) => {
-        if (!node.children || !node.children.every((child) => child.ready)) {
+        if (!node.children || !node.children.every((child) => child.ready())) {
             return;
         }
         const address = node.geometry.address();
@@ -201,14 +319,14 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                     tree.updateTarget(new Vec3(x, y, z), Vec3.ZERO);
                     let cancelled = 0;
                     for (const address of previous) {
-                        if (!tree.isTarget(address)) {
+                        if (!tree.isInTargetTree(address)) {
                             requireCondition(!tree.publish(address, mapping(address)), 'Retired completion resurrected a node');
                             ++cancelled;
                         }
                     }
                     let completed = 0;
                     for (const address of tree.requests()) {
-                        if (completed < budget && !tree.find(address)!.ready) {
+                        if (completed < budget && !tree.find(address)!.ready()) {
                             requireCondition(tree.publish(address, mapping(address)), 'Resource publication');
                             ++completed;
                         }
@@ -224,7 +342,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                         return true;
                     });
                     tree.forEachRenderable((node) => draw.push(`${node.geometry.address().key()}:${node.edgeMask}`));
-                    const requests = tree.requests().map((address) => `${address.key()}:${Number(tree.find(address)!.ready)},`).join('');
+                    const requests = tree.requests().map((address) => `${address.key()}:${Number(tree.find(address)!.ready())},`).join('');
                     trace.push(`frame ${cancelled} ${completed} ${Number(tree.renderSelectionChanged())} target=${list(target)} draw=${list(draw)} changed=${list([...tree.changedNodes()])} requests=${requests}`);
                 }
             } else if (command === 'replace') {
@@ -241,7 +359,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                 const renderer = pages!.renderer;
                 if (command === 'reserve') {
                     const addresses = Array.from({ length: values[0] }, (_, i) => new VTPageAddress(values[i * 3 + 1], values[i * 3 + 2], values[i * 3 + 3]));
-                    trace.push(`accepted ${Number(renderer.reserve(addresses))}`);
+                    trace.push(`accepted ${Number(pages!.reserve(addresses))}`);
                 } else if (command === 'compose') {
                     // Simulate completion after GPU submission, as native publishPages does.
                     const updates = pages!.slots().filter((slot) => pages!.pages()[slot].state !== PageState.READY).slice(0, values[0]);
@@ -415,54 +533,54 @@ compose 1
 ready 1 reserved=0, slots=3:0:0:2:0,0:0:0:0:-1,0:0:0:0:-1,0:0:0:0:-1,0:0:0:0:-1,
 reserve 5 3 0 0 2 0 0 2 1 0 2 0 1 2 1 1
 accepted 1
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:1:-1,2:1:0:1:-1,2:0:1:1:-1,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:1:-1,2:0:1:1:-1,2:1:0:1:-1,2:1:1:1:-1,
 compose 0
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:1:-1,2:1:0:1:-1,2:0:1:1:-1,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:1:-1,2:0:1:1:-1,2:1:0:1:-1,2:1:1:1:-1,
 compose 1
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:2:1,2:1:0:1:-1,2:0:1:1:-1,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:2:1,2:0:1:1:-1,2:1:0:1:-1,2:1:1:1:-1,
 compose 1
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:2:1,2:1:0:2:2,2:0:1:1:-1,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:2:1,2:0:1:2:2,2:1:0:1:-1,2:1:1:1:-1,
 compose 1
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:2:1,2:1:0:2:2,2:0:1:2:3,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:2:1,2:0:1:2:2,2:1:0:2:3,2:1:1:1:-1,
 reserve 6 3 0 0 2 0 0 2 1 0 2 0 1 2 1 1 0 0 0
 accepted 0
-ready 0 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:2:1,2:1:0:2:2,2:0:1:2:3,2:1:1:1:-1,
+ready 0 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:2:1,2:0:1:2:2,2:1:0:2:3,2:1:1:1:-1,
 compose 1
-ready 1 reserved=0,1,2,3,4, slots=3:0:0:2:0,2:0:0:2:1,2:1:0:2:2,2:0:1:2:3,2:1:1:2:4,
+ready 1 reserved=1,2,3,4,0, slots=3:0:0:2:0,2:0:0:2:1,2:0:1:2:2,2:1:0:2:3,2:1:1:2:4,
 reserve 4 2 0 0 2 1 0 2 0 1 2 1 1
 accepted 1
-ready 1 reserved=1,2,3,4, slots=3:0:0:2:-1,2:0:0:2:1,2:1:0:2:2,2:0:1:2:3,2:1:1:2:4,
+ready 1 reserved=1,2,3,4, slots=3:0:0:2:-1,2:0:0:2:1,2:0:1:2:2,2:1:0:2:3,2:1:1:2:4,
 invalidate
-ready 0 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:3:1,2:1:0:3:2,2:0:1:3:3,2:1:1:3:4,
+ready 0 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:3:1,2:0:1:3:2,2:1:0:3:3,2:1:1:3:4,
 compose 2
-ready 0 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:2:1,2:1:0:2:2,2:0:1:3:3,2:1:1:3:4,
+ready 0 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:2:1,2:0:1:2:2,2:1:0:3:3,2:1:1:3:4,
 compose 2
-ready 1 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:2:1,2:1:0:2:2,2:0:1:2:3,2:1:1:2:4,
+ready 1 reserved=1,2,3,4, slots=3:0:0:3:-1,2:0:0:2:1,2:0:1:2:2,2:1:0:2:3,2:1:1:2:4,
 reserve 2 0 0 0 0 1 0
 accepted 1
-ready 0 reserved=0,1, slots=0:0:0:1:-1,0:1:0:1:-1,2:1:0:2:-1,2:0:1:2:-1,2:1:1:2:-1,
+ready 0 reserved=0,1, slots=0:0:0:1:-1,0:1:0:1:-1,2:0:1:2:-1,2:1:0:2:-1,2:1:1:2:-1,
 compose 1
-ready 0 reserved=0,1, slots=0:0:0:2:0,0:1:0:1:-1,2:1:0:2:-1,2:0:1:2:-1,2:1:1:2:-1,
+ready 0 reserved=0,1, slots=0:0:0:2:0,0:1:0:1:-1,2:0:1:2:-1,2:1:0:2:-1,2:1:1:2:-1,
 invalidate
-ready 0 reserved=0,1, slots=0:0:0:3:0,0:1:0:1:-1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 0 reserved=0,1, slots=0:0:0:3:0,0:1:0:1:-1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 compose 2
-ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 reserve 1 0 0 0
 accepted 1
-ready 1 reserved=0, slots=0:0:0:2:0,0:1:0:2:-1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 1 reserved=0, slots=0:0:0:2:0,0:1:0:2:-1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 invalidate 0.96 0.25 0.02
-ready 0 reserved=0, slots=0:0:0:3:0,0:1:0:3:-1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 0 reserved=0, slots=0:0:0:3:0,0:1:0:3:-1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 reserve 2 0 0 0 0 1 0
 accepted 1
-ready 0 reserved=0,1, slots=0:0:0:3:0,0:1:0:3:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 0 reserved=0,1, slots=0:0:0:3:0,0:1:0:3:1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 compose 2
-ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 reserve 1 4 0 0
 accepted 0
-ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 reserve 1 0 8 0
 accepted 0
-ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:1:0:3:-1,2:0:1:3:-1,2:1:1:3:-1,
+ready 1 reserved=0,1, slots=0:0:0:2:0,0:1:0:2:1,2:0:1:3:-1,2:1:0:3:-1,2:1:1:3:-1,
 map 4096 1 1 0 0 0
 page 0:16:16
 map 4096 1 1 1 13 0

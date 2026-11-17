@@ -46,10 +46,11 @@ public:
         QuadNode geometry;
         VTGridMapping material;
         std::unique_ptr<Node[]> children;
-        bool refined{false}; // Target subdivision; children survive until render selection.
-        bool ready{false};
-        bool renderable{false};
         uint8_t edgeMask{0}; // Left/right/bottom/top: 00 same or boundary, 01 coarser, 10 finer; valid when renderable.
+        bool refined{false}; // Target subdivision; children survive until render selection.
+        bool renderable{false};
+
+        bool ready() const { return !material.pages.empty(); }
     };
 
     void init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
@@ -73,12 +74,16 @@ public:
     // Node queries.
     const Node *find(NodeAddress address) const;
     const Node *findRenderable(NodeAddress address) const;
-    bool isTarget(NodeAddress address) const;
+    bool isInTargetTree(NodeAddress address) const;
     // Includes management levels above sector roots.
     LandscapeRegion region(NodeAddress address) const;
     const Vec3 &localCameraPosition() const { return _localCameraPosition; }
     const Vec3 &worldOrigin() const { return _worldOrigin; }
     const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
+
+    // Geometry diagnostics.
+    bool morphRangeTooSmall(const QuadNode &node) const;
+    float distanceSquared(NodeAddress address) const;
 
     // Traversal: boolean callbacks return false to prune descendants.
     void forEachNode(const std::function<bool(const Node &)> &visit) const;
@@ -90,14 +95,12 @@ private:
     void initLodMorphRanges(float lodQualityScale);
     void buildRoot(Node &node, NodeAddress address);
     void updateTargetNode(Node &node);
-    static NodeAddress child(NodeAddress address, uint32_t quadrant);
     Node *findNode(NodeAddress address);
     bool contains(NodeAddress address) const;
 
     // Bounds and morph edges.
     QuadNode geometry(NodeAddress address) const;
     HeightRange heightRange(NodeAddress address) const;
-    float distanceSquared(NodeAddress address) const;
     NodeAddress renderableAt(uint32_t x, uint32_t z) const;
     uint8_t computeEdgeMask(NodeAddress address) const;
 

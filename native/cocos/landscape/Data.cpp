@@ -58,6 +58,11 @@ NodeAddress NodeAddress::ancestor(uint32_t targetLevel) const {
     return {targetLevel, x >> shift, z >> shift};
 }
 
+NodeAddress NodeAddress::child(uint32_t quadrant) const {
+    assert(level > 0 && quadrant < 4);
+    return {level - 1, x * 2 + (quadrant & 1U), z * 2 + (quadrant >> 1U)};
+}
+
 void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
     // Return each input once, in sampling order. Base-precision normal entries
     // share one tile, which may also provide the splat data.

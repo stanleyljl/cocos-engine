@@ -5,6 +5,11 @@ import { LandscapeAsset, TileData } from './Asset';
 import { LandscapeData, NodeAddress, NodeKey } from './Data';
 import * as config from './Config';
 
+interface Request {
+    address: NodeAddress;
+    count: number;
+}
+
 interface Slot {
     layer: number;
     ready: boolean;
@@ -28,6 +33,8 @@ export class LandscapeResidency {
     private _splatSampler!: Sampler;
     private _slots = new Map<NodeKey, Slot>();
     private _working: readonly NodeAddress[] = [];
+    private readonly _requests = new Map<NodeKey, Request>();
+    private _requestsDirty = false;
     private readonly _inFlight = new Set<NodeKey>();
 
     public init (device: Device, asset: LandscapeAsset, layerCount: number, heightUnorm: boolean): boolean {
@@ -107,26 +114,58 @@ export class LandscapeResidency {
         this._heightUnorm = false;
         this._slots.clear();
         this._working = [];
+        this._requests.clear();
+        this._requestsDirty = false;
         this._inFlight.clear();
     }
 
-    public canReserve (sources: readonly NodeAddress[]): boolean {
+    public canFit (sources: readonly NodeAddress[]): boolean {
         return sources.length <= this._capacity && sources.every((source) => source.level >= this._data.minTileLevel
             && source.level <= this._data.maxTileLevel && source.x >= 0 && source.z >= 0
             && source.x < this._data.nodesX(source.level) && source.z < this._data.nodesZ(source.level));
     }
 
-    public reserve (sources: readonly NodeAddress[]): boolean {
-        if (!this.canReserve(sources)) {
+    // Each demand contributes one reference; physical work is shared by address.
+    public request (source: NodeAddress): void {
+        const entry = this._requests.get(source.key());
+        if (entry) {
+            ++entry.count;
+        } else {
+            this._requests.set(source.key(), { address: source, count: 1 });
+            this._requestsDirty = true;
+        }
+    }
+
+    public release (source: NodeAddress): void {
+        const entry = this._requests.get(source.key());
+        if (!entry) {
+            throw new Error('Landscape source demand must be acquired before release');
+        }
+        if (--entry.count === 0) {
+            this._requests.delete(source.key());
+            this._requestsDirty = true;
+        }
+    }
+
+    public canRequest (sources: readonly NodeAddress[]): boolean {
+        const unique = new Map(sources.map((source) => [source.key(), source]));
+        const additional = Array.from(unique.keys()).filter((key) => !this._requests.has(key)).length;
+        return this.canFit(Array.from(unique.values())) && this._requests.size + additional <= this._capacity;
+    }
+
+    private applyRequests (): boolean {
+        if (!this._requestsDirty) {
+            return true;
+        }
+        const sources = Array.from(this._requests.values(), (entry) => entry.address);
+        sources.sort((a, b) => a.level - b.level || a.x - b.x || a.z - b.z);
+        if (!this.canFit(sources)) {
             return false;
         }
         const next = new Map<NodeKey, Slot>();
         const used = new Uint8Array(this._capacity);
         for (const source of sources) {
             const key = source.key();
-            if (next.has(key)) {
-                return false;
-            }
             const previous = this._slots.get(key);
             const slot = previous ? { ...previous } : { layer: this._capacity, ready: false };
             next.set(key, slot);
@@ -147,11 +186,12 @@ export class LandscapeResidency {
             used[layer] = 1;
         }
         this._slots = next;
-        this._working = sources.slice();
+        this._working = sources;
+        this._requestsDirty = false;
         return true;
     }
 
-    public loadReserved (): boolean {
+    private loadRequested (): boolean {
         const MAX_IN_FLIGHT = 8;
         const heightFormat = this._heightUnorm ? Format.R16UI : Format.RG8;
         if (this._asset.loadingFailed()) {
@@ -173,7 +213,10 @@ export class LandscapeResidency {
         return !this._asset.loadingFailed();
     }
 
-    public update (budget: number): void {
+    public update (budget: number): boolean {
+        if (this._asset.loadingFailed() || !this.applyRequests()) {
+            return false;
+        }
         for (let count = 0; count < budget; ++count) {
             const tile = this._asset.takeReadyTile();
             if (!tile) {
@@ -182,6 +225,7 @@ export class LandscapeResidency {
             this._inFlight.delete(tile.key);
             this.uploadTile(tile);
         }
+        return this.loadRequested();
     }
 
     public resident (source: NodeAddress): number {
@@ -200,8 +244,8 @@ export class LandscapeResidency {
     }
 
     public ready (): boolean {
-        for (const slot of this._slots.values()) {
-            if (!slot.ready) {
+        for (const key of this._requests.keys()) {
+            if (!this._slots.get(key)?.ready) {
                 return false;
             }
         }

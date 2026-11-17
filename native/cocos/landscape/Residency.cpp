@@ -80,6 +80,8 @@ void LandscapeResidency::destroy() {
     _capacity = 0;
     _slots.clear();
     _working.clear();
+    _requests.clear();
+    _requestsDirty = false;
     _heightUnorm = false;
     _inFlight.clear();
     _asset = nullptr;
@@ -91,7 +93,7 @@ void LandscapeResidency::destroy() {
     _device = nullptr;
 }
 
-bool LandscapeResidency::canReserve(const ccstd::vector<NodeAddress> &sources) const {
+bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources) const {
     if (sources.size() > _capacity) {
         return false;
     }
@@ -103,8 +105,46 @@ bool LandscapeResidency::canReserve(const ccstd::vector<NodeAddress> &sources) c
     return true;
 }
 
-bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
-    if (!canReserve(sources)) {
+void LandscapeResidency::request(NodeAddress source) {
+    const auto [entry, inserted] = _requests.try_emplace(source.key(), Request{source, 0});
+    ++entry->second.count;
+    _requestsDirty |= inserted;
+}
+
+void LandscapeResidency::release(NodeAddress source) {
+    const auto entry = _requests.find(source.key());
+    CC_ASSERT(entry != _requests.end());
+    if (--entry->second.count == 0) {
+        _requests.erase(entry);
+        _requestsDirty = true;
+    }
+}
+
+bool LandscapeResidency::canRequest(const ccstd::vector<NodeAddress> &sources) const {
+    ccstd::unordered_set<uint64_t> additional;
+    for (const auto source : sources) {
+        if (!validSource(source)) {
+            return false;
+        }
+        if (!_requests.count(source.key())) {
+            additional.insert(source.key());
+        }
+    }
+    return _requests.size() + additional.size() <= _capacity;
+}
+
+bool LandscapeResidency::applyRequests() {
+    if (!_requestsDirty) {
+        return true;
+    }
+    ccstd::vector<NodeAddress> sources;
+    for (const auto &entry : _requests) {
+        sources.push_back(entry.second.address);
+    }
+    std::sort(sources.begin(), sources.end(), [](NodeAddress a, NodeAddress b) {
+        return a.key() < b.key();
+    });
+    if (!canFit(sources)) {
         return false;
     }
     // Build the replacement before changing live ownership. Existing sources
@@ -114,9 +154,7 @@ bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
     for (const auto source : sources) {
         const auto previous = _slots.find(source.key());
         const Slot slot = previous == _slots.end() ? Slot{_capacity, false} : previous->second;
-        if (!next.emplace(source.key(), slot).second) {
-            return false;
-        }
+        next.emplace(source.key(), slot);
         if (slot.layer < _capacity) {
             used[slot.layer] = true;
         }
@@ -134,11 +172,12 @@ bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
         used[layer] = true;
     }
     _slots = std::move(next);
-    _working = sources;
+    _working = std::move(sources);
+    _requestsDirty = false;
     return true;
 }
 
-bool LandscapeResidency::loadReserved() {
+bool LandscapeResidency::loadRequested() {
     if (_asset->loadingFailed()) {
         return false;
     }
@@ -162,12 +201,16 @@ bool LandscapeResidency::loadReserved() {
     return !_asset->loadingFailed();
 }
 
-void LandscapeResidency::update(uint32_t budget) {
+bool LandscapeResidency::update(uint32_t budget) {
+    if (_asset->loadingFailed() || !applyRequests()) {
+        return false;
+    }
     LandscapeAsset::TileData tile;
     for (uint32_t count = 0; count < budget && _asset->takeReadyTile(tile); ++count) {
         _inFlight.erase(tile.key);
         uploadTile(tile.key, tile.height.data(), tile.splat.data(), tile.normal.data());
     }
+    return loadRequested();
 }
 
 int LandscapeResidency::resident(NodeAddress source) const {
@@ -187,7 +230,10 @@ Vec4 LandscapeResidency::shaderParams(const Tile &tile) const {
 }
 
 bool LandscapeResidency::ready() const {
-    return std::all_of(_slots.begin(), _slots.end(), [](const auto &e) { return e.second.ready; });
+    return std::all_of(_requests.begin(), _requests.end(), [this](const auto &entry) {
+        const auto slot = _slots.find(entry.first);
+        return slot != _slots.end() && slot->second.ready;
+    });
 }
 
 bool LandscapeResidency::initSlots(const LandscapeData &data, uint32_t layerCount) {

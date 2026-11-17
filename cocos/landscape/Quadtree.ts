@@ -14,7 +14,7 @@ export interface QuadtreeNode {
     readonly material: ReadonlyVTGridMapping;
     readonly children: readonly QuadtreeNode[] | null;
     readonly refined: boolean;
-    readonly ready: boolean;
+    ready(): boolean;
     readonly renderable: boolean;
     readonly edgeMask: number;
 }
@@ -24,9 +24,12 @@ class MutableQuadtreeNode implements QuadtreeNode {
     public material = new VTGridMapping();
     public children: MutableQuadtreeNode[] | null = null;
     public refined = false; // Target subdivision; children survive until render selection.
-    public ready = false;
     public renderable = false;
     public edgeMask = 0;
+
+    public ready (): boolean {
+        return this.material.pages.length > 0;
+    }
 }
 
 // Owns the target hierarchy, published mappings and balanced render selection.
@@ -82,7 +85,7 @@ export class Quadtree {
             if (address.level > this._data.maxTileLevel) {
                 return true;
             }
-            if (!node.ready) {
+            if (!node.ready()) {
                 missing.push(address);
                 return false;
             }
@@ -100,19 +103,18 @@ export class Quadtree {
 
     // Publish only after the source and complete mapping are ready.
     public publish (address: NodeAddress, material: VTGridMapping): boolean {
-        if (!this.isTarget(address)) {
+        if (!this.isInTargetTree(address)) {
             return false;
         }
         const node = this.findNode(address)!;
         if (address.level > this._data.maxTileLevel || material.pages.length === 0) {
             return false;
         }
-        if (address.level < this._data.maxTileLevel && !this.find(address.ancestor(address.level + 1))!.ready) {
+        if (address.level < this._data.maxTileLevel && !this.find(address.ancestor(address.level + 1))!.ready()) {
             return false;
         }
-        this._needsRenderSelection = this._needsRenderSelection || !node.ready;
+        this._needsRenderSelection = this._needsRenderSelection || !node.ready();
         node.material = material;
-        node.ready = true;
         if (node.renderable) {
             this._changedNodes.add(address.key());
         }
@@ -138,7 +140,7 @@ export class Quadtree {
         while (current.length) {
             const next: MutableQuadtreeNode[] = [];
             for (const node of current) {
-                if (!node.refined || !node.children!.every((child) => child.ready)) {
+                if (!node.refined || !node.children!.every((child) => child.ready())) {
                     continue;
                 }
                 if ((this.computeEdgeMask(node.geometry.address()) & 0x55) !== 0) {
@@ -191,7 +193,7 @@ export class Quadtree {
     public sectorRootsReady (): boolean {
         for (let z = 0; z < this._data.sectorsZ; ++z) {
             for (let x = 0; x < this._data.sectorsX; ++x) {
-                if (!this.find(new NodeAddress(this._data.maxTileLevel, x, z))!.ready) {
+                if (!this.find(new NodeAddress(this._data.maxTileLevel, x, z))!.ready()) {
                     return false;
                 }
             }
@@ -222,7 +224,7 @@ export class Quadtree {
         return node && node.renderable ? node : null;
     }
 
-    public isTarget (address: NodeAddress): boolean {
+    public isInTargetTree (address: NodeAddress): boolean {
         if (!this.find(address)) {
             return false;
         }
@@ -251,6 +253,32 @@ export class Quadtree {
 
     public lodMorphRanges (): readonly Readonly<MorphRange>[] {
         return this._lodMorphRanges;
+    }
+
+    // Geometry diagnostics.
+    public morphRangeTooSmall (node: Readonly<QuadNode>): boolean {
+        const address = node.address();
+        if (address.level === this._data.maxTileLevel) {
+            return false;
+        }
+        // Use the geometry bounds, including the source height range used during morphing.
+        const area = this.region(address);
+        const camera = this._localCameraPosition;
+        const x = Math.max(Math.abs(area.x - camera.x), Math.abs(area.x + area.size - camera.x));
+        const y = Math.max(Math.abs(node.minY - camera.y), Math.abs(node.maxY - camera.y));
+        const z = Math.max(Math.abs(area.z - camera.z), Math.abs(area.z + area.size - camera.z));
+        const start = this._lodMorphRanges[address.level + 1].start;
+        return x * x + y * y + z * z > start * start;
+    }
+
+    public distanceSquared (address: NodeAddress): number {
+        const bounds = this.heightRange(address);
+        const area = this.region(address);
+        const camera = this._localCameraPosition;
+        const x = Math.max(area.x - camera.x, camera.x - area.x - area.size, 0);
+        const y = Math.max(bounds.minY - camera.y, camera.y - bounds.maxY, 0);
+        const z = Math.max(area.z - camera.z, camera.z - area.z - area.size, 0);
+        return x * x + y * y + z * z;
     }
 
     // Traversal: boolean callbacks return false to prune descendants.
@@ -312,7 +340,7 @@ export class Quadtree {
         let minY = Number.MAX_VALUE;
         let maxY = -Number.MAX_VALUE;
         for (let q = 0; q < 4; ++q) {
-            const child = Quadtree.child(address, q);
+            const child = address.child(q);
             this.buildRoot(node.children[q], child);
             if (this.contains(child)) {
                 minY = Math.min(minY, node.children[q].geometry.minY);
@@ -332,7 +360,7 @@ export class Quadtree {
         if (!refine && address.level > 0) {
             const range = this._lodMorphRanges[address.level - 1].end;
             for (let q = 0; q < 4; ++q) {
-                if (this.distanceSquared(Quadtree.child(address, q)) <= range * range) {
+                if (this.distanceSquared(address.child(q)) <= range * range) {
                     refine = true;
                     break;
                 }
@@ -345,17 +373,13 @@ export class Quadtree {
         if (!node.children) {
             node.children = Array.from({ length: 4 }, (_, q) => {
                 const child = new MutableQuadtreeNode();
-                child.geometry = this.geometry(Quadtree.child(address, q));
+                child.geometry = this.geometry(address.child(q));
                 return child;
             });
         }
         for (const child of node.children) {
             this.updateTargetNode(child);
         }
-    }
-
-    private static child (address: NodeAddress, quadrant: number): NodeAddress {
-        return new NodeAddress(address.level - 1, address.x * 2 + (quadrant & 1), address.z * 2 + (quadrant >> 1));
     }
 
     private findNode (address: NodeAddress): MutableQuadtreeNode | null {
@@ -396,16 +420,6 @@ export class Quadtree {
             return { minY: bounds.minY, maxY: bounds.maxY };
         }
         return this._heightRanges[address.level][address.z * this._data.nodesX(address.level) + address.x];
-    }
-
-    private distanceSquared (address: NodeAddress): number {
-        const bounds = this.heightRange(address);
-        const area = this.region(address);
-        const camera = this._localCameraPosition;
-        const x = Math.max(area.x - camera.x, camera.x - area.x - area.size, 0);
-        const y = Math.max(bounds.minY - camera.y, camera.y - bounds.maxY, 0);
-        const z = Math.max(area.z - camera.z, camera.z - area.z - area.size, 0);
-        return x * x + y * y + z * z;
     }
 
     private renderableAt (x: number, z: number): NodeAddress {

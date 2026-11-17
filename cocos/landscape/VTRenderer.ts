@@ -11,6 +11,34 @@ import { VTPageComposer, VTPageInstance, VTPageMipGenerator } from './VTPageStag
 import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
 import * as config from './Config';
 
+// Scoped to one admission scan; caches immutable inputs, never capacity decisions.
+export class VTCapacityQuery {
+    private readonly _pageSources = new Map<NodeKey, NodeAddress[]>();
+
+    constructor (private readonly _renderer: VTRenderer, private readonly _residency: LandscapeResidency) {}
+
+    public canPrepare (pages: readonly VTPageAddress[], sources: readonly NodeAddress[]): boolean {
+        if (!this._residency.canFit(sources) || !this._renderer.canFit(pages)) {
+            return false;
+        }
+        const retained = new Set(sources.map((source) => source.key()));
+        // Each page must fit alongside retained node sources, even after detail settings change.
+        for (const page of pages) {
+            let inputs = this._pageSources.get(page.key());
+            if (!inputs) {
+                inputs = [];
+                this._renderer.selectSources(page, true, true).appendTo(inputs);
+                this._pageSources.set(page.key(), inputs);
+            }
+            const additional = inputs.filter((source) => !retained.has(source.key())).length;
+            if (retained.size + additional > this._residency.layerCount()) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 export class VTPageTable {
     private _texture: Texture | null = null;
     private _entries = new Uint8Array();
@@ -152,11 +180,21 @@ export class VTPage {
     }
 }
 
+interface Request {
+    address: VTPageAddress;
+    count: number;
+}
+
 export class VTRenderer {
     private _data!: LandscapeData;
     private _layout!: VTPageLayout;
     private _heightRanges!: readonly (readonly HeightRange[])[]; // Borrowed immutable asset metadata.
 
+    private _residency!: LandscapeResidency;
+    private readonly _requests = new Map<NodeKey, Request>();
+    private _requestsDirty = false;
+    // Owns one reference per source until the next update reconciles composition demand.
+    private _sourceRequests: NodeAddress[] = [];
     private _reservation = 0;
     private _pages: VTPage[] = [];
     private _reservedSlots: number[] = [];
@@ -177,6 +215,7 @@ export class VTRenderer {
         if (!residency.valid() || !materials.valid() || capacity < data.sectorsX * data.sectorsZ) {
             return false;
         }
+        this._residency = residency;
         this._data = data;
         this._heightRanges = asset.heightRanges();
         this._layout = new VTPageLayout(data.sectorSize);
@@ -200,6 +239,12 @@ export class VTRenderer {
     }
 
     public destroy (): void {
+        for (const source of this._sourceRequests) {
+            this._residency.release(source);
+        }
+        this._sourceRequests = [];
+        this._requests.clear();
+        this._requestsDirty = false;
         this._mipGenerator.destroy();
         this._composer.destroy();
         this._pageTable.destroy();
@@ -209,7 +254,11 @@ export class VTRenderer {
     }
 
     // Page residency and composition.
-    public canReserve (pages: readonly VTPageAddress[]): boolean {
+    public capacityQuery (): VTCapacityQuery {
+        return new VTCapacityQuery(this, this._residency);
+    }
+
+    public canFit (pages: readonly VTPageAddress[]): boolean {
         return pages.length <= this._pages.length && pages.every((page) => {
             const side = 2 ** (this._layout.rootLevel() - page.level);
             return page.level >= 0 && page.level <= this._layout.rootLevel() && page.x >= 0 && page.z >= 0
@@ -217,8 +266,68 @@ export class VTRenderer {
         });
     }
 
-    public reserve (pages: readonly VTPageAddress[]): boolean {
-        if (!this.canReserve(pages)) {
+    public request (address: VTPageAddress): void {
+        const entry = this._requests.get(address.key());
+        if (entry) {
+            ++entry.count;
+        } else {
+            this._requests.set(address.key(), { address, count: 1 });
+            this._requestsDirty = true;
+        }
+    }
+
+    public release (address: VTPageAddress): void {
+        const entry = this._requests.get(address.key());
+        if (!entry) {
+            throw new Error('Landscape VT demand must be acquired before release');
+        }
+        if (--entry.count === 0) {
+            this._requests.delete(address.key());
+            this._requestsDirty = true;
+        }
+    }
+
+    public update (budget: number): boolean {
+        if (!this.applyRequests()) {
+            return false;
+        }
+        const pages: VTPageAddress[] = [];
+        // Reconcile before Residency.update(), so retained inputs never lose their slots.
+        for (const source of this._sourceRequests) {
+            this._residency.release(source);
+        }
+        const sources = new Map<NodeKey, NodeAddress>();
+        for (const slot of this._reservedSlots) {
+            const page = this._pages[slot].address;
+            if (!this.needsComposition(page)) {
+                continue;
+            }
+            const inputs: NodeAddress[] = [];
+            this.selectSources(page, this._refineFarDetail, this._triplanarEnabled).appendTo(inputs);
+            if (!this._residency.canRequest(inputs)) {
+                continue;
+            }
+            pages.push(page);
+            for (const source of inputs) {
+                if (!sources.has(source.key())) {
+                    sources.set(source.key(), source);
+                    this._residency.request(source);
+                }
+            }
+        }
+        this._sourceRequests = Array.from(sources.values());
+        // Keep this batch pinned through Residency.update() and GPU submission.
+        this.renderPages(this._residency, pages, budget);
+        return true;
+    }
+
+    private applyRequests (): boolean {
+        if (!this._requestsDirty) {
+            return true;
+        }
+        const pages = Array.from(this._requests.values(), (entry) => entry.address);
+        pages.sort((a, b) => a.level - b.level || a.x - b.x || a.z - b.z);
+        if (!this.canFit(pages)) {
             return false;
         }
         ++this._reservation;
@@ -238,10 +347,11 @@ export class VTRenderer {
             this._pages[slot].lastReserved = this._reservation;
             this._reservedSlots[i] = slot;
         }
+        this._requestsDirty = false;
         return true;
     }
 
-    public renderPages (residency: LandscapeResidency, pages: readonly VTPageAddress[], maxPages: number): number {
+    private renderPages (residency: LandscapeResidency, pages: readonly VTPageAddress[], maxPages: number): number {
         if (!maxPages) {
             return 0;
         }
@@ -298,7 +408,7 @@ export class VTRenderer {
     }
 
     public ready (): boolean {
-        return this._reservedSlots.length > 0 && this._reservedSlots.every((slot) => this._pages[slot].state === PageState.READY);
+        return !this._requestsDirty && this._reservedSlots.length > 0 && this._reservedSlots.every((slot) => this._pages[slot].state === PageState.READY);
     }
 
     public needsComposition (address: VTPageAddress): boolean {

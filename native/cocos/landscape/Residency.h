@@ -38,9 +38,8 @@ class Sampler;
 namespace landscape {
 class LandscapeAsset;
 // Each physical slot holds a source tile's height, splat and normal data.
-// Physical slots are reserved BEFORE starting IO. In-flight work is bounded;
-// only the coordinator's exact working set may be uploaded. Source mapping and
-// shader bindings use exact resident tiles, with no missing-source fallback.
+// Demands share physical work by address. update() allocates slots, consumes
+// completed uploads and starts bounded IO; draws always use exact resident tiles.
 class LandscapeResidency {
 public:
     struct Tile {
@@ -52,13 +51,12 @@ public:
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
     void destroy();
     bool valid() const { return _heightArray && _splatArray && _normalArray; }
-    // Reservation inputs are unique addresses, collected by LandscapeSchedule.
-    bool canReserve(const ccstd::vector<NodeAddress> &sources) const;
-    // Reserve the whole working set or leave all current bindings untouched.
-    bool reserve(const ccstd::vector<NodeAddress> &sources);
-    // Submit missing sources asynchronously; update() consumes completed uploads.
-    bool loadReserved();
-    void update(uint32_t maxUploads);
+    bool canFit(const ccstd::vector<NodeAddress> &sources) const;
+    bool canRequest(const ccstd::vector<NodeAddress> &sources) const;
+    // Each demand contributes one reference; physical work is shared by address.
+    void request(NodeAddress source);
+    void release(NodeAddress source);
+    bool update(uint32_t maxUploads);
     int resident(NodeAddress source) const;
     Tile resolve(NodeAddress node) const;
     Vec4 shaderParams(const Tile &tile) const;
@@ -71,16 +69,22 @@ public:
     uint32_t layerCount() const { return _capacity; }
 
 protected:
-    // CPU reservation operations; runtime callers use init() and the upload path.
+    // CPU allocation operations; runtime callers use init() and update().
     bool initSlots(const LandscapeData &data, uint32_t layerCount);
     // Publish a reserved source only after all three texture uploads have been submitted.
     void publish(uint64_t key);
+    bool applyRequests();
 
 private:
+    struct Request {
+        NodeAddress address;
+        uint32_t count{0};
+    };
     struct Slot {
         uint32_t layer;
         bool ready{false};
     };
+    bool loadRequested();
     bool validSource(NodeAddress source) const;
     bool initTextures();
     void initSamplers();
@@ -100,6 +104,8 @@ private:
     uint32_t _capacity{0};
     ccstd::unordered_map<uint64_t, Slot> _slots;
     ccstd::vector<NodeAddress> _working;
+    ccstd::unordered_map<uint64_t, Request> _requests;
+    bool _requestsDirty{false};
     // Includes decoded tiles until update() consumes them, even if no longer reserved.
     ccstd::unordered_set<uint64_t> _inFlight;
 };

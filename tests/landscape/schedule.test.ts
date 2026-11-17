@@ -5,7 +5,7 @@ import { LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageSources
 import type { LandscapeRenderer, LandscapeRenderNode } from '../../cocos/landscape/Renderer';
 import { LandscapeResidency } from '../../cocos/landscape/Residency';
 import { LandscapeSchedule } from '../../cocos/landscape/Schedule';
-import { VTRenderer } from '../../cocos/landscape/VTRenderer';
+import { VTCapacityQuery, VTRenderer } from '../../cocos/landscape/VTRenderer';
 
 test('pass diagnostics preserve prepared draws, pending requests and change notifications', () => {
     const data = Object.assign(new LandscapeData(), { maxTileLevel: 1, sectorSize: 2, sectorsX: 1, sectorsZ: 1, heightScale: 1 });
@@ -57,40 +57,6 @@ test('pass diagnostics preserve prepared draws, pending requests and change noti
     expect(tree.requests().map((address) => address.key())).toEqual(requests);
 });
 
-test('reused page sources still check capacity against the current retained set', () => {
-    const first = new NodeAddress(0, 0, 0);
-    const second = new NodeAddress(0, 1, 0);
-    const input = new NodeAddress(0, 2, 0);
-    const page = new VTPageAddress(0, 0, 0);
-    const selectSources = jest.fn(() => {
-        const result = new VTPageSources();
-        result.splat = input;
-        result.normals.fill(input);
-        return result;
-    });
-    const residency = {
-        canReserve: (sources: NodeAddress[]): boolean => sources.length <= 2,
-        layerCount: (): number => 2,
-    } as LandscapeResidency;
-    const pages = {
-        canReserve: (): boolean => true,
-        selectSources,
-    } as unknown as VTRenderer;
-    const data = Object.assign(new LandscapeData(), { sectorsX: 1, sectorsZ: 1, sectorSize: 4 });
-    const asset = { data: () => data, heightRanges: () => [[{ minY: 0, maxY: 1 }]] } as unknown as LandscapeAsset;
-    const renderer = { residency: () => residency, vtRenderer: () => pages, setLodMorphRanges: jest.fn() } as unknown as LandscapeRenderer;
-    const schedule = new LandscapeSchedule(asset, renderer, 1);
-    const pageSources = new Map<string, NodeAddress[]>();
-    expect(schedule['canPrepare']({ sources: [first], pages: [page], mappingCount: 0 }, pageSources)).toBe(true);
-    // The old page must now be rejected, although its source list is reusable.
-    expect(schedule['canPrepare']({ sources: [first, second], pages: [page], mappingCount: 0 }, pageSources)).toBe(false);
-    // A retained source can also satisfy the page's composition demand.
-    expect(schedule['canPrepare']({ sources: [first, input], pages: [page], mappingCount: 0 }, pageSources)).toBe(true);
-    expect(selectSources).toHaveBeenCalledTimes(1);
-    expect(schedule['canPrepare']({ sources: [first], pages: [page], mappingCount: 0 }, new Map())).toBe(true);
-    expect(selectSources).toHaveBeenCalledTimes(2);
-});
-
 // Same deterministic IO/GPU boundaries as native schedule_test.cpp. The actual
 // scheduler, quadtree and mapping layout execute; paging.test covers allocation.
 test.each([false, true])('scheduling preserves delayed sources, cancellation, refresh and duplicate frames (triplanar=%s)', (triplanar) => {
@@ -110,23 +76,35 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
     let reserved: VTPageAddress[] = [];
     let loaded = new Map<string, boolean>();
     let composed = new Map<string, boolean>();
+    const sourceRequests = new Map<string, { address: NodeAddress; count: number }>();
+    const pageRequests = new Map<string, { address: VTPageAddress; count: number }>();
+    let inputs: NodeAddress[] = [];
+    let pagesDirty = false;
     const data = Object.assign(new LandscapeData(), { sectorsX: 2, sectorsZ: 1, maxTileLevel: 2, sectorSize: 4, heightScale: 1 });
     const ranges = Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: 1 })));
     const asset = { data: () => data, heightRanges: () => ranges, loadingFailed: () => false } as unknown as LandscapeAsset;
     const residency = {
-        canReserve: (sources: NodeAddress[]): boolean => sources.length <= sourceCapacity,
-        reserve: (sources: NodeAddress[]): boolean => {
-            expect(preparing).toBe(false);
-            expect(sources.length).toBeLessThanOrEqual(sourceCapacity);
-            working = sources.slice();
-            loaded = new Map(sources.map((address) => [address.key(), loaded.get(address.key()) ?? false]));
-            return true;
+        canFit: (sources: NodeAddress[]): boolean => sources.length <= sourceCapacity,
+        request: (address: NodeAddress): void => {
+            const entry = sourceRequests.get(address.key());
+            if (entry) {
+                ++entry.count;
+            } else {
+                sourceRequests.set(address.key(), { address, count: 1 });
+            }
         },
-        loadReserved: (): boolean => {
-            expect(preparing).toBe(false);
-            return true;
+        release: (address: NodeAddress): void => {
+            const entry = sourceRequests.get(address.key())!;
+            expect(entry).toBeDefined();
+            if (--entry.count === 0) {
+                sourceRequests.delete(address.key());
+            }
         },
-        update: (budget: number): void => {
+        canRequest: (sources: NodeAddress[]): boolean => new Set([...sourceRequests.keys(), ...sources.map((source) => source.key())]).size <= sourceCapacity,
+        update: (budget: number): boolean => {
+            working = [...sourceRequests.values()].map((entry) => entry.address).sort((a, b) => a.level - b.level || a.x - b.x || a.z - b.z);
+            expect(working.length).toBeLessThanOrEqual(sourceCapacity);
+            loaded = new Map(working.map((address) => [address.key(), loaded.get(address.key()) ?? false]));
             expect(preparing).toBe(true);
             ++updates;
             budget = Math.min(budget, uploads);
@@ -136,20 +114,33 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
                     --budget;
                 }
             }
+            return true;
         },
-        ready: (): boolean => [...loaded.values()].every(Boolean),
+        ready: (): boolean => [...sourceRequests.keys()].every((key) => loaded.get(key)),
         resolve: (node: NodeAddress) => ({ address: node, layer: loaded.get(node.key()) ? 0 : -1 }),
         layerCount: (): number => sourceCapacity,
     } as LandscapeResidency;
     const pages = {
-        canReserve: (addresses: VTPageAddress[]): boolean => addresses.length <= pageCapacity,
-        reserve: (addresses: VTPageAddress[]): boolean => {
-            expect(addresses.length).toBeLessThanOrEqual(pageCapacity);
-            reserved = addresses.slice();
-            composed = new Map(addresses.map((address) => [address.key(), composed.get(address.key()) ?? false]));
-            return true;
+        capacityQuery: (): VTCapacityQuery => new VTCapacityQuery(pages, residency),
+        canFit: (addresses: VTPageAddress[]): boolean => addresses.length <= pageCapacity,
+        request: (address: VTPageAddress): void => {
+            const entry = pageRequests.get(address.key());
+            if (entry) {
+                ++entry.count;
+            } else {
+                pageRequests.set(address.key(), { address, count: 1 });
+                pagesDirty = true;
+            }
         },
-        ready: (): boolean => reserved.length > 0 && [...composed.values()].every(Boolean),
+        release: (address: VTPageAddress): void => {
+            const entry = pageRequests.get(address.key())!;
+            expect(entry).toBeDefined();
+            if (--entry.count === 0) {
+                pageRequests.delete(address.key());
+                pagesDirty = true;
+            }
+        },
+        ready: (): boolean => !pagesDirty && reserved.length > 0 && [...composed.values()].every(Boolean),
         needsComposition: (address: VTPageAddress): boolean => !composed.get(address.key()),
         getTriplanarEnabled: (): boolean => triplanar,
         getRefineFarDetail: (): boolean => true,
@@ -170,20 +161,32 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
                 return true;
             },
         }),
-        renderPages: (_residency: LandscapeResidency, addresses: VTPageAddress[], budget: number): number => {
+        update: (budget: number): boolean => {
             expect(preparing).toBe(true);
-            if (residency.resolve(new NodeAddress(2, 0, 0)).layer < 0) {
-                return 0;
+            reserved = [...pageRequests.values()].map((entry) => entry.address).sort((a, b) => a.level - b.level || a.x - b.x || a.z - b.z);
+            expect(reserved.length).toBeLessThanOrEqual(pageCapacity);
+            composed = new Map(reserved.map((address) => [address.key(), composed.get(address.key()) ?? false]));
+            pagesDirty = false;
+            inputs.forEach((input) => residency.release(input));
+            inputs = [];
+            const input = new NodeAddress(2, 0, 0);
+            if (pages.ready() || !reserved.length || !residency.canRequest([input])) {
+                return true;
+            }
+            inputs.push(input);
+            residency.request(input);
+            if (residency.resolve(input).layer < 0) {
+                return true;
             }
             budget = Math.min(budget, compositions);
             let count = 0;
-            for (const address of addresses) {
+            for (const address of reserved) {
                 if (count < budget && !composed.get(address.key())) {
                     composed.set(address.key(), true);
                     ++count;
                 }
             }
-            return count;
+            return true;
         },
     } as unknown as VTRenderer;
     const draws = new Map<string, number>();
@@ -242,9 +245,9 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         const nodes: string[] = [];
         tree.forEachNode((node) => {
             if (node.geometry.level <= data.maxTileLevel) {
-                nodes.push(`${node.geometry.address().key()}:${Number(residency.resolve(node.geometry.address()).layer >= 0)}:${Number(node.ready)}:${Number(node.renderable)}`);
+                nodes.push(`${node.geometry.address().key()}:${Number(residency.resolve(node.geometry.address()).layer >= 0)}:${Number(node.ready())}:${Number(node.renderable)}`);
             }
-            if (node.ready) {
+            if (node.ready()) {
                 expect(residency.resolve(node.geometry.address()).layer).toBeGreaterThanOrEqual(0);
             }
             return true;

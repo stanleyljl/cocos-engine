@@ -52,6 +52,7 @@ struct Backend {
     uint32_t compositions{0};
     uint32_t updates{0};
     bool preparing{false};
+    LandscapeResidency *residency{nullptr};
     ccstd::vector<NodeAddress> working;
     ccstd::vector<VTPageAddress> pages;
     std::map<uint64_t, bool> loaded;
@@ -113,7 +114,8 @@ void Object::unroot() {
 
 namespace cc::landscape {
 LandscapeRenderer::LandscapeRenderer()
-: _residency(std::make_unique<LandscapeResidency>()), _vtRenderer(std::make_unique<VTRenderer>()) {}
+: _residency(std::make_unique<LandscapeResidency>())
+, _vtRenderer(std::make_unique<VTRenderer>()) {}
 LandscapeRenderer::~LandscapeRenderer() = default;
 DecalRenderer::~DecalRenderer() = default;
 MaterialLibrary::~MaterialLibrary() = default;
@@ -137,27 +139,47 @@ bool LandscapeRenderer::collectNodeModels(const QuadNode &, const LandscapeRegio
 }
 LandscapeAsset::LandscapeAsset() = default;
 LandscapeAsset::~LandscapeAsset() = default;
-LandscapeResidency::LandscapeResidency() : _capacity(backend.sourceCapacity) {}
+LandscapeResidency::LandscapeResidency()
+: _capacity(backend.sourceCapacity) {
+    backend.residency = this;
+}
 LandscapeResidency::~LandscapeResidency() = default;
-bool LandscapeResidency::canReserve(const ccstd::vector<NodeAddress> &sources) const {
+bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources) const {
     return sources.size() <= backend.sourceCapacity;
 }
-bool LandscapeResidency::reserve(const ccstd::vector<NodeAddress> &sources) {
-    require(!backend.preparing, "Rendering changed resource reservations");
-    require(canReserve(sources), "Scheduler exceeded source capacity");
-    backend.working = sources;
-    std::map<uint64_t, bool> next;
-    for (const auto address : sources) {
-        next[address.key()] = backend.loaded[address.key()];
+void LandscapeResidency::request(NodeAddress source) {
+    const auto [entry, inserted] = _requests.try_emplace(source.key(), Request{source, 0});
+    ++entry->second.count;
+}
+void LandscapeResidency::release(NodeAddress source) {
+    const auto entry = _requests.find(source.key());
+    require(entry != _requests.end(), "Source demand released twice");
+    if (--entry->second.count == 0) {
+        _requests.erase(entry);
     }
+}
+bool LandscapeResidency::canRequest(const ccstd::vector<NodeAddress> &sources) const {
+    ccstd::unordered_set<uint64_t> keys;
+    for (const auto &entry : _requests) {
+        keys.insert(entry.first);
+    }
+    for (const auto source : sources) {
+        keys.insert(source.key());
+    }
+    return keys.size() <= backend.sourceCapacity;
+}
+bool LandscapeResidency::update(uint32_t budget) {
+    backend.working.clear();
+    std::map<uint64_t, bool> next;
+    for (const auto &entry : _requests) {
+        backend.working.push_back(entry.second.address);
+        next[entry.first] = backend.loaded[entry.first];
+    }
+    std::sort(backend.working.begin(), backend.working.end(), [](NodeAddress a, NodeAddress b) {
+        return a.key() < b.key();
+    });
+    require(canFit(backend.working), "Scheduler exceeded source capacity");
     backend.loaded = std::move(next);
-    return true;
-}
-bool LandscapeResidency::loadReserved() {
-    require(!backend.preparing, "Rendering initiated asynchronous loading");
-    return true;
-}
-void LandscapeResidency::update(uint32_t budget) {
     require(backend.preparing, "Tick uploaded GPU resources");
     ++backend.updates;
     budget = std::min(budget, backend.uploads);
@@ -167,10 +189,12 @@ void LandscapeResidency::update(uint32_t budget) {
             --budget;
         }
     }
+    return true;
 }
 bool LandscapeResidency::ready() const {
-    return std::all_of(backend.loaded.begin(), backend.loaded.end(), [](const auto &entry) {
-        return entry.second;
+    return std::all_of(_requests.begin(), _requests.end(), [](const auto &entry) {
+        const auto found = backend.loaded.find(entry.first);
+        return found != backend.loaded.end() && found->second;
     });
 }
 LandscapeResidency::Tile LandscapeResidency::resolve(NodeAddress node) const {
@@ -190,26 +214,71 @@ bool VTPageTable::ensureCapacity(uint32_t) {
 VTPageComposer::~VTPageComposer() = default;
 VTPageMipGenerator::~VTPageMipGenerator() = default;
 VTPageCompressor::~VTPageCompressor() = default;
-VTRenderer::VTRenderer() = default;
+VTRenderer::VTRenderer()
+: _residency(backend.residency) {}
 VTRenderer::~VTRenderer() = default;
+VTCapacityQuery::VTCapacityQuery(const VTRenderer &renderer, const LandscapeResidency &residency)
+: _renderer(renderer)
+, _residency(residency) {}
+bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources) {
+    if (!_residency.canFit(sources) || !_renderer.canFit(pages)) {
+        return false;
+    }
+    // Match the boundary double's single shared composition input.
+    const NodeAddress input{2, 0, 0};
+    const bool retained = std::any_of(sources.begin(), sources.end(), [&](NodeAddress source) {
+        return source.key() == input.key();
+    });
+    return pages.empty() || sources.size() + (retained ? 0 : 1) <= _residency.layerCount();
+}
 void VTRenderer::setTriplanarEnabled(bool enabled) {
     _triplanarEnabled = enabled;
 }
-bool VTRenderer::canReserve(const ccstd::vector<VTPageAddress> &pages) const {
+bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages) const {
     return pages.size() <= backend.pageCapacity;
 }
-bool VTRenderer::reserve(const ccstd::vector<VTPageAddress> &pages) {
-    require(canReserve(pages), "Scheduler exceeded page capacity");
-    backend.pages = pages;
-    std::map<uint64_t, bool> next;
-    for (const auto page : pages) {
-        next[page.key()] = backend.composed[page.key()];
+void VTRenderer::request(VTPageAddress address) {
+    const auto [entry, inserted] = _requests.try_emplace(address.key(), Request{address, 0});
+    ++entry->second.count;
+    _requestsDirty |= inserted;
+}
+void VTRenderer::release(VTPageAddress address) {
+    const auto entry = _requests.find(address.key());
+    require(entry != _requests.end(), "Page demand released twice");
+    if (--entry->second.count == 0) {
+        _requests.erase(entry);
+        _requestsDirty = true;
     }
+}
+bool VTRenderer::update(uint32_t budget) {
+    require(backend.preparing, "Tick processed page tasks");
+    backend.pages.clear();
+    std::map<uint64_t, bool> next;
+    for (const auto &entry : _requests) {
+        backend.pages.push_back(entry.second.address);
+        next[entry.first] = backend.composed[entry.first];
+    }
+    std::sort(backend.pages.begin(), backend.pages.end(), [](VTPageAddress a, VTPageAddress b) {
+        return a.key() < b.key();
+    });
+    require(canFit(backend.pages), "Scheduler exceeded page capacity");
     backend.composed = std::move(next);
+    _requestsDirty = false;
+    auto &residency = *backend.residency;
+    for (const auto source : _sourceRequests) {
+        residency.release(source);
+    }
+    _sourceRequests.clear();
+    const NodeAddress input{2, 0, 0};
+    if (!ready() && !backend.pages.empty() && residency.canRequest({input})) {
+        residency.request(input);
+        _sourceRequests.push_back(input);
+        renderPages(residency, backend.pages, budget);
+    }
     return true;
 }
 bool VTRenderer::ready() const {
-    return !backend.pages.empty() && std::all_of(backend.composed.begin(), backend.composed.end(), [](const auto &entry) {
+    return !_requestsDirty && !backend.pages.empty() && std::all_of(backend.composed.begin(), backend.composed.end(), [](const auto &entry) {
         return entry.second;
     });
 }
@@ -354,7 +423,7 @@ void testCameraRotation() {
             for (uint32_t step = 0; step < 4096 && !complete; ++step) {
                 complete = true;
                 for (const auto address : tree.requests()) {
-                    if (!tree.find(address)->ready) {
+                    if (!tree.find(address)->ready()) {
                         require(tree.publish(address, mapping(address)), "Publish ready target nodes");
                         complete = false;
                     }
@@ -370,7 +439,7 @@ void testCameraRotation() {
         tree.forEachNode([&](const Quadtree::Node &node) {
             const auto key = node.geometry.address().key();
             nodes.emplace(key, &node);
-            if (node.ready) {
+            if (node.ready()) {
                 ready.insert(key);
             }
             return true;
@@ -384,8 +453,8 @@ void testCameraRotation() {
             for (const auto &entry : nodes) {
                 const auto *node = tree.find(NodeAddress::fromKey(entry.first));
                 require(node == entry.second, "Camera rotation retired an existing node or pending request");
-                require(node->ready == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
-                if (node->ready) {
+                require(node->ready() == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
+                if (node->ready()) {
                     require(node->material.pages.size() == 1 && node->material.pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
                 }
             }
@@ -482,9 +551,9 @@ int main(int argc, char **argv) {
         std::vector<std::string> nodes;
         tree.forEachNode([&](const Quadtree::Node &node) {
             if (node.geometry.level <= data.maxTileLevel) {
-                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(residency.resolve(node.geometry.address()).layer >= 0) + ":" + std::to_string(node.ready) + ":" + std::to_string(node.renderable));
+                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(residency.resolve(node.geometry.address()).layer >= 0) + ":" + std::to_string(node.ready()) + ":" + std::to_string(node.renderable));
             }
-            if (node.ready) {
+            if (node.ready()) {
                 require(residency.resolve(node.geometry.address()).layer >= 0, "Published geometry lost its source");
             }
             return true;

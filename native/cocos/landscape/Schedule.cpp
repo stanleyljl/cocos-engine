@@ -5,6 +5,7 @@
 #include <cmath>
 #include <utility>
 #include "base/Log.h"
+#include "base/Macros.h"
 #include "base/StringUtil.h"
 #include "core/geometry/AABB.h"
 #include "core/geometry/Frustum.h"
@@ -29,16 +30,14 @@ bool sameMapping(const VTGridMapping &a, const VTGridMapping &b) {
     });
 }
 
-bool sourcesFit(const ccstd::unordered_set<uint64_t> &retained, const ccstd::vector<NodeAddress> &inputs, uint32_t capacity) {
-    const auto additional = std::count_if(inputs.begin(), inputs.end(), [&](NodeAddress source) {
-        return retained.count(source.key()) == 0;
-    });
-    return retained.size() + additional <= capacity;
-}
 } // namespace
 
 LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, LandscapeRenderer &renderer, float lodQualityScale)
-: _asset(asset), _residency(renderer.residency()), _vtRenderer(renderer.vtRenderer()), _renderer(renderer), _quadtree(std::make_unique<Quadtree>()) {
+: _asset(asset)
+, _residency(renderer.residency())
+, _vtRenderer(renderer.vtRenderer())
+, _renderer(renderer)
+, _quadtree(std::make_unique<Quadtree>()) {
     _quadtree->init(asset, lodQualityScale);
     ccstd::vector<Vec4> morph(config::MAX_LOD_LEVELS);
     const auto &ranges = _quadtree->lodMorphRanges();
@@ -55,25 +54,20 @@ LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, LandscapeRenderer &r
 #endif
 }
 
-LandscapeSchedule::~LandscapeSchedule() = default;
+LandscapeSchedule::~LandscapeSchedule() {
+    submitRequests({});
+}
 
 void LandscapeSchedule::update(const Vec3 &camera, const Vec3 &origin) {
     _quadtree->updateTarget(camera, origin);
-    _needsMorphCheck |= _quadtree->viewChanged();
     _renderer.setViewPosition(camera);
-    if (_loadingStopped) {
-        return;
-    }
-    if (_asset.loadingFailed() || !prepareRequests() || !_residency.loadReserved()) {
-        stopLoading();
-    }
+    prepareRequests();
 }
 
 void LandscapeSchedule::prepareRenderData(uint32_t frame) {
     auto *previousMappings = _vtRenderer.pageTable().texture();
     prepareResources(frame);
     _quadtree->selectRenderables();
-    _needsMorphCheck |= _quadtree->renderSelectionChanged();
     _ready = _ready || isRenderStateStable();
     ccstd::vector<LandscapeRenderNode> updated;
     ccstd::vector<uint64_t> removed;
@@ -96,17 +90,13 @@ void LandscapeSchedule::beginPasses() {
 void LandscapeSchedule::addPass(const geometry::Frustum &frustum, bool includeNearby) {
     if (_activePassCount == _passes.size()) {
         _passes.emplace_back();
-        _needsMorphCheck = true;
     }
     auto &pass = _passes[_activePassCount++];
-    _needsMorphCheck |= pass.includeNearby != includeNearby;
     pass.includeNearby = includeNearby;
 
     for (size_t i = 0; i < pass.planes.size(); ++i) {
         const auto &plane = *frustum.planes[i];
-        const Vec4 value{plane.n.x, plane.n.y, plane.n.z, plane.d};
-        _needsMorphCheck |= pass.planes[i] != value;
-        pass.planes[i] = value;
+        pass.planes[i] = Vec4{plane.n.x, plane.n.y, plane.n.z, plane.d};
     }
 }
 
@@ -117,18 +107,11 @@ void LandscapeSchedule::collectPassModels(const geometry::Frustum &frustum, bool
 }
 
 void LandscapeSchedule::endPasses() {
-    _needsMorphCheck |= _activePassCount != _passes.size();
     _passes.resize(_activePassCount);
     checkMorphRanges();
 }
 
 bool LandscapeSchedule::isRenderStateStable() const {
-    if (_loadingStopped) {
-        return false;
-    }
-    if (_asset.loadingFailed()) {
-        return false;
-    }
     if (_requestsDirty) {
         return false;
     }
@@ -148,26 +131,11 @@ bool LandscapeSchedule::isRenderStateStable() const {
     return !_quadtree->renderSelectionChanged();
 }
 
-void LandscapeSchedule::visitDebugNodes(const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const {
-    _quadtree->cull([&](const Quadtree::Node &treeNode) {
-        const auto &node = treeNode.geometry;
-        const auto region = _quadtree->region(node.address());
-        const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + node.maxY) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z, region.size * 0.5F, (node.maxY - node.minY) * 0.5F, region.size * 0.5F};
-        if (!bounds.aabbFrustum(frustum)) {
-            return false;
-        }
-        if (treeNode.renderable) {
-            visit(node, region);
-        }
-        return true;
-    });
-}
-
-bool LandscapeSchedule::prepareRequests() {
+void LandscapeSchedule::prepareRequests() {
     _requestsDirty |= _quadtree->viewChanged() || _quadtree->renderSelectionChanged();
     const auto previousPendingCount = _pendingNodes.size();
     _pendingNodes.erase(std::remove_if(_pendingNodes.begin(), _pendingNodes.end(), [&](const PendingNode &pending) {
-        return !_quadtree->isTarget(pending.node);
+        return !_quadtree->isInTargetTree(pending.node);
     }), _pendingNodes.end());
     const bool requestsCancelled = _pendingNodes.size() != previousPendingCount;
     _requestsDirty |= requestsCancelled;
@@ -175,7 +143,7 @@ bool LandscapeSchedule::prepareRequests() {
     // Keep the input batch pinned while loading; only cancellation replaces it early.
     const bool sourceBatchLoaded = _residency.ready();
     if (!sourceBatchLoaded && !requestsCancelled) {
-        return true;
+        return;
     }
     const bool scanRequests = _requestsDirty && sourceBatchLoaded;
     if (scanRequests || requestsCancelled) {
@@ -185,28 +153,11 @@ bool LandscapeSchedule::prepareRequests() {
             schedulePendingNodes(resources, sectorRootsReady);
         }
 
-        // Commit the base reservation before adding temporary composition inputs.
-        // Cancellation can shrink it while loading, but never admits new requests.
-        if (!_vtRenderer.reserve(resources.pages)) {
-            return false;
-        }
-        if (!_residency.reserve(resources.sources)) {
-            return false;
-        }
-        _reservedResources = std::move(resources);
+        submitRequests(std::move(resources));
         if (scanRequests) {
             _requestsDirty = false;
-            if (!sectorRootsReady && _pendingNodes.empty()) {
-                return false;
-            }
         }
     }
-
-    // Shared VT inputs use the remaining source capacity; node sources stay pinned.
-    if (_vtRenderer.ready()) {
-        return true;
-    }
-    return _residency.reserve(compositionSources());
 }
 
 LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
@@ -214,7 +165,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
     ccstd::unordered_set<uint64_t> sourceKeys;
     ccstd::unordered_set<uint64_t> pageKeys;
     _quadtree->forEachNode([&](const Quadtree::Node &node) {
-        if (!node.ready) {
+        if (!node.ready()) {
             return true;
         }
         ++resources.mappingCount;
@@ -236,7 +187,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
     for (const auto &pending : _pendingNodes) {
         appendResources(resources, pending);
         // A replacement shares the ready node's page-table entry.
-        if (!_quadtree->find(pending.node)->ready) {
+        if (!_quadtree->find(pending.node)->ready()) {
             ++resources.mappingCount;
         }
     }
@@ -246,8 +197,7 @@ LandscapeSchedule::Resources LandscapeSchedule::collectResources() const {
 void LandscapeSchedule::schedulePendingNodes(Resources &resources, bool sectorRootsReady) {
     const auto &data = _asset.data();
     const VTPageLayout layout(data.sectorSize);
-    // Worst-case source lists are fixed within this admission pass; capacity checks are not.
-    ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> pageSources;
+    auto capacity = _vtRenderer.capacityQuery();
     ccstd::unordered_set<uint64_t> pendingNodeKeys;
     for (const auto &pending : _pendingNodes) {
         pendingNodeKeys.insert(pending.node.key());
@@ -257,26 +207,26 @@ void LandscapeSchedule::schedulePendingNodes(Resources &resources, bool sectorRo
         if (pendingNodeKeys.count(request.key())) {
             continue;
         }
-        if (!sectorRootsReady && (node.ready || request.level != data.maxTileLevel)) {
+        if (!sectorRootsReady && (node.ready() || request.level != data.maxTileLevel)) {
             continue;
         }
         PendingNode pending;
         pending.node = request;
-        if (!node.ready && request.level == data.maxTileLevel) {
+        if (!node.ready() && request.level == data.maxTileLevel) {
             // Reserve full coarse coverage before admitting finer requests.
             pending.material.pages = {{layout.rootLevel(), request.x, request.z}};
         } else {
             pending.material = layout.buildGridMapping(data, request, node.geometry.minY, node.geometry.maxY, _quadtree->localCameraPosition());
         }
-        if (node.ready && sameMapping(node.material, pending.material)) {
+        if (node.ready() && sameMapping(node.material, pending.material)) {
             continue;
         }
         auto candidateResources = resources;
         appendResources(candidateResources, pending);
-        if (!canPrepare(candidateResources, pageSources)) {
+        if (!capacity.canPrepare(candidateResources.pages, candidateResources.sources)) {
             continue;
         }
-        candidateResources.mappingCount += node.ready ? 0U : 1U;
+        candidateResources.mappingCount += node.ready() ? 0U : 1U;
         if (!_vtRenderer.pageTable().canFit(candidateResources.mappingCount)) {
             continue;
         }
@@ -306,112 +256,57 @@ void LandscapeSchedule::appendResources(Resources &resources, const PendingNode 
     }
 }
 
-bool LandscapeSchedule::canPrepare(const Resources &resources, ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> &pageSources) const {
-    if (!_residency.canReserve(resources.sources)) {
-        return false;
-    }
-    if (!_vtRenderer.canReserve(resources.pages)) {
-        return false;
-    }
-    ccstd::unordered_set<uint64_t> retained;
+void LandscapeSchedule::submitRequests(Resources resources) {
+    ccstd::unordered_set<uint64_t> sources;
+    ccstd::unordered_set<uint64_t> pages;
     for (const auto source : resources.sources) {
-        retained.insert(source.key());
+        sources.insert(source.key());
     }
-    // Reserve room for each page's worst-case composition footprint, including
-    // far detail and triplanar projection. Composition inputs can then be streamed in bounded batches.
     for (const auto page : resources.pages) {
-        const auto [entry, inserted] = pageSources.try_emplace(page.key());
-        if (inserted) {
-            _vtRenderer.selectSources(page, true, true).appendTo(entry->second);
-        }
-        if (!sourcesFit(retained, entry->second, _residency.layerCount())) {
-            return false;
+        pages.insert(page.key());
+    }
+    for (const auto source : _requestedResources.sources) {
+        if (!sources.erase(source.key())) {
+            _residency.release(source);
         }
     }
-    return true;
-}
-
-ccstd::vector<NodeAddress> LandscapeSchedule::compositionSources() const {
-    auto sources = _reservedResources.sources;
-    ccstd::unordered_set<uint64_t> sourceKeys;
-    for (const auto source : sources) {
-        sourceKeys.insert(source.key());
-    }
-    for (const auto page : _reservedResources.pages) {
-        if (!_vtRenderer.needsComposition(page)) {
-            continue;
-        }
-        ccstd::vector<NodeAddress> inputs;
-        _vtRenderer.selectSources(page, _vtRenderer.getRefineFarDetail(), _vtRenderer.getTriplanarEnabled()).appendTo(inputs);
-        if (!sourcesFit(sourceKeys, inputs, _residency.layerCount())) {
-            continue;
-        }
-        for (const auto source : inputs) {
-            if (sourceKeys.insert(source.key()).second) {
-                sources.push_back(source);
-            }
+    for (const auto page : _requestedResources.pages) {
+        if (!pages.erase(page.key())) {
+            _vtRenderer.release(page);
         }
     }
-    return sources;
+    for (const auto source : resources.sources) {
+        if (sources.count(source.key())) {
+            _residency.request(source);
+        }
+    }
+    for (const auto page : resources.pages) {
+        if (pages.count(page.key())) {
+            _vtRenderer.request(page);
+        }
+    }
+    _requestedResources = std::move(resources);
 }
 
 void LandscapeSchedule::prepareResources(uint32_t frame) {
-    if (_loadingStopped) {
-        return;
-    }
     if (_lastUpdateFrame && *_lastUpdateFrame == frame) {
         return;
     }
     _lastUpdateFrame = frame;
-    if (_asset.loadingFailed()) {
-        stopLoading();
+    if (!_vtRenderer.pageTable().ensureCapacity(_requestedResources.mappingCount)) {
         return;
     }
-
-    if (!_vtRenderer.pageTable().ensureCapacity(_reservedResources.mappingCount)) {
-        return;
-    }
-    _residency.update(config::PAGE_UPLOAD_BUDGET);
-    composeNodes();
-    if (!publishNodes()) {
-        stopLoading();
-    }
-    // Selection can retire retained descendants after this stage; release their reservations next tick.
+    // VT submits source demand first; newly uploaded inputs compose on the next frame.
+    [[maybe_unused]] const bool pagesUpdated = _vtRenderer.update(config::VT_PAGE_UPDATE_BUDGET);
+    CC_ASSERT(pagesUpdated);
+    [[maybe_unused]] const bool sourcesUpdated = _residency.update(config::PAGE_UPLOAD_BUDGET);
+    CC_ASSERT(sourcesUpdated);
+    publishNodes();
+    // Selection can retire retained descendants after this stage; release their demands next tick.
     _requestsDirty |= _quadtree->viewChanged();
 }
 
-void LandscapeSchedule::composeNodes() {
-    if (_vtRenderer.ready()) {
-        return;
-    }
-    ccstd::unordered_set<uint64_t> eligiblePageKeys;
-    _quadtree->forEachNode([&](const Quadtree::Node &node) {
-        // Ready pages may have been invalidated by material or decal changes.
-        if (node.ready) {
-            for (const auto page : node.material.pages) {
-                eligiblePageKeys.insert(page.key());
-            }
-        }
-        return true;
-    });
-    for (const auto &pending : _pendingNodes) {
-        if (_residency.resolve(pending.node).layer < 0) {
-            continue;
-        }
-        for (const auto page : pending.material.pages) {
-            eligiblePageKeys.insert(page.key());
-        }
-    }
-    ccstd::vector<VTPageAddress> pages;
-    for (const auto page : _reservedResources.pages) {
-        if (eligiblePageKeys.count(page.key())) {
-            pages.push_back(page);
-        }
-    }
-    _vtRenderer.renderPages(_residency, pages, config::VT_PAGE_UPDATE_BUDGET);
-}
-
-bool LandscapeSchedule::publishNodes() {
+void LandscapeSchedule::publishNodes() {
     for (auto it = _pendingNodes.begin(); it != _pendingNodes.end();) {
         if (_residency.resolve(it->node).layer < 0) {
             ++it;
@@ -424,29 +319,37 @@ bool LandscapeSchedule::publishNodes() {
             ++it;
             continue;
         }
-        if (!_quadtree->publish(it->node, std::move(it->material))) {
-            return false;
-        }
+        [[maybe_unused]] const bool published = _quadtree->publish(it->node, std::move(it->material));
+        CC_ASSERT(published);
         it = _pendingNodes.erase(it);
         _requestsDirty = true;
     }
-    return true;
 }
 
-void LandscapeSchedule::stopLoading() {
-    _loadingStopped = true;
-    CC_LOG_ERROR("[Landscape] Tile loading stopped; re-enable the landscape to reload.");
+void LandscapeSchedule::visitDebugNodes(const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const {
+    _quadtree->cull([&](const Quadtree::Node &treeNode) {
+        const auto &node = treeNode.geometry;
+        const auto region = _quadtree->region(node.address());
+        const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + node.maxY) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z, region.size * 0.5F, (node.maxY - node.minY) * 0.5F, region.size * 0.5F};
+        if (!bounds.aabbFrustum(frustum)) {
+            return false;
+        }
+        if (treeNode.renderable) {
+            visit(node, region);
+        }
+        return true;
+    });
 }
 
 void LandscapeSchedule::checkMorphRanges() {
 #if CC_LANDSCAPE_DEBUG
-    if (!_needsMorphCheck || !_quadtree->sectorRootsReady()) {
+    if (!_quadtree->sectorRootsReady()) {
         return;
     }
     bool morphRangeWarning = false;
     _quadtree->forEachRenderable([&](const Quadtree::Node &node) {
         if (!morphRangeWarning) {
-            morphRangeWarning = morphRangeTooSmall(node.geometry);
+            morphRangeWarning = _quadtree->morphRangeTooSmall(node.geometry) && isMorphCheckVisible(node.geometry.address());
         }
     });
     if (morphRangeWarning != _lastMorphRangeWarning) {
@@ -457,37 +360,20 @@ void LandscapeSchedule::checkMorphRanges() {
         }
         _lastMorphRangeWarning = morphRangeWarning;
     }
-    _needsMorphCheck = false;
 #endif
 }
 
-bool LandscapeSchedule::morphRangeTooSmall(const QuadNode &node) const {
-    const auto address = node.address();
-    const auto &data = _asset.data();
+bool LandscapeSchedule::isMorphCheckVisible(NodeAddress address) const {
     const auto &ranges = _quadtree->lodMorphRanges();
-    const auto &camera = _quadtree->localCameraPosition();
-    const auto &origin = _quadtree->worldOrigin();
-    // Diagnose insufficient morph distance only for visible/nearby draws.
-    if (address.level == data.maxTileLevel) {
-        return false;
-    }
-    const auto area = _quadtree->region(address);
-    const float x = std::max(std::abs(area.x - camera.x), std::abs(area.x + area.size - camera.x));
-    const float y = std::max(std::abs(node.minY - camera.y), std::abs(node.maxY - camera.y));
-    const float z = std::max(std::abs(area.z - camera.z), std::abs(area.z + area.size - camera.z));
-    const float start = ranges[address.level + 1].start;
-    if (x * x + y * y + z * z <= start * start) {
-        return false;
-    }
-    const auto bounds = _asset.heightRanges()[address.level][static_cast<size_t>(address.z) * data.nodesX(address.level) + address.x];
-    const float dx = std::max({area.x - camera.x, camera.x - area.x - area.size, 0.0F});
-    const float dy = std::max({bounds.minY - camera.y, camera.y - bounds.maxY, 0.0F});
-    const float dz = std::max({area.z - camera.z, camera.z - area.z - area.size, 0.0F});
-    const float distanceSq = dx * dx + dy * dy + dz * dz;
+    const float distanceSq = _quadtree->distanceSquared(address);
     const float range = ranges[address.level].end;
     if (distanceSq > range * range) {
         return false;
     }
+    const auto &data = _asset.data();
+    const auto area = _quadtree->region(address);
+    const auto bounds = _asset.heightRanges()[address.level][static_cast<size_t>(address.z) * data.nodesX(address.level) + address.x];
+    const auto &origin = _quadtree->worldOrigin();
     const Vec3 center{area.x + area.size * 0.5F + origin.x, (bounds.minY + bounds.maxY) * 0.5F + origin.y, area.z + area.size * 0.5F + origin.z};
     const Vec3 extent{area.size * 0.5F, (bounds.maxY - bounds.minY) * 0.5F, area.size * 0.5F};
     const float nearbyRange = ranges[std::min(1U, data.maxTileLevel)].end;

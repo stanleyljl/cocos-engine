@@ -146,6 +146,24 @@ class ResidencyFixture final : public LandscapeResidency {
 public:
     using LandscapeResidency::initSlots;
     using LandscapeResidency::publish;
+    using LandscapeResidency::applyRequests;
+    bool reserve(const ccstd::vector<NodeAddress> &addresses) {
+        if (!canFit(addresses)) {
+            return false;
+        }
+        for (const auto address : _demands) {
+            release(address);
+        }
+        for (const auto address : addresses) {
+            request(address);
+        }
+        _demands = addresses;
+        return applyRequests();
+    }
+
+private:
+    ccstd::vector<NodeAddress> _demands;
+
 };
 
 class VTResidencyFixture final : public VTRenderer {
@@ -159,6 +177,24 @@ public:
         return VTRenderer::initPages(data, ranges, capacity);
     }
     using VTRenderer::publish;
+    using VTRenderer::applyRequests;
+    bool reserve(const ccstd::vector<VTPageAddress> &addresses) {
+        if (!canFit(addresses)) {
+            return false;
+        }
+        for (const auto address : _demands) {
+            release(address);
+        }
+        for (const auto address : addresses) {
+            request(address);
+        }
+        _demands = addresses;
+        return applyRequests();
+    }
+
+private:
+    ccstd::vector<VTPageAddress> _demands;
+
 };
 
 class VTPageTableFixture final : public VTPageTable {
@@ -306,7 +342,7 @@ void selectAndCheckChanges(Quadtree &tree) {
         const auto address = node.geometry.address();
         const auto old = previous.find(address.key());
         const auto edges = node.edgeMask;
-        require(node.ready, "Selected node is not ready");
+        require(node.ready(), "Selected node is not ready");
         if (old == previous.end() || old->second != edges) {
             require(tree.changedNodes().count(address.key()) != 0, "Morph neighbor notification was lost");
         }
@@ -319,7 +355,7 @@ void completeTarget(Quadtree &tree, const LandscapeData &data) {
     for (uint32_t step = 0; step < 4096; ++step) {
         bool loaded = false;
         for (const auto &request : tree.requests()) {
-            if (!tree.find(request)->ready) {
+            if (!tree.find(request)->ready()) {
                 require(tree.publish(request, testMapping(request)), "Parent must precede child readiness");
                 loaded = true;
             }
@@ -473,6 +509,63 @@ void testExactPageLifecycle() {
     std::cout << "PASS: exact VT lookup, atomic admission, partial completion, refresh and capacity\n";
 }
 
+void testVTCapacityQuery() {
+    const auto data = cacheData(3);
+    ResidencyFixture residency;
+    require(residency.initSlots(data, 2), "capacity query source cache init");
+    VTResidencyFixture pages;
+    require(pages.initPages(data, 2), "capacity query page cache init");
+    VTCapacityQuery capacity(pages, residency);
+    const NodeAddress first{0, 1, 0};
+    const NodeAddress second{0, 2, 0};
+    const NodeAddress input{0, 0, 0};
+    const VTPageAddress page{0, 0, 0};
+    const VTPageAddress other{0, 3, 0};
+    require(capacity.canPrepare({page}, {first}), "single-page headroom rejected");
+    require(!capacity.canPrepare({page}, {first, second}), "cached inputs reused a stale capacity decision");
+    require(capacity.canPrepare({page}, {first, input}), "retained source was counted twice");
+    require(capacity.canPrepare({page, other}, {first}), "independently streamed page inputs were combined");
+    require(!capacity.canPrepare({page, other, {0, 4, 0}}, {first}), "page capacity overflow accepted");
+    require(!capacity.canPrepare({page}, {first, second, input}), "source capacity overflow accepted");
+    require(!capacity.canPrepare({{4, 0, 0}}, {first}), "invalid page accepted");
+    require(!capacity.canPrepare({page}, {{4, 0, 0}}), "invalid source accepted");
+    require(pages.reservedSlots().empty() && residency.ready() && residency.resident(first) < 0, "capacity query reserved resources");
+}
+
+void testSharedDemands() {
+    ResidencyFixture residency;
+    require(residency.initSlots(cacheData(3), 1), "source demand cache init");
+    const NodeAddress source{3, 0, 0};
+    residency.request(source);
+    residency.request(source);
+    require(residency.canRequest({source}) && residency.applyRequests(), "duplicate sources must share capacity");
+    residency.publish(source.key());
+    const int layer = residency.resident(source);
+    residency.release(source);
+    require(residency.applyRequests() && residency.ready() && residency.resident(source) == layer, "one release cancelled another source demand");
+    residency.release(source);
+    residency.request(source);
+    require(residency.applyRequests() && residency.resident(source) == layer, "same-frame changes reloaded a retained source");
+    residency.release(source);
+    require(residency.applyRequests() && residency.resident(source) < 0, "last source demand did not release its slot");
+
+    VTResidencyFixture pages;
+    require(pages.initPages(cacheData(3), 1), "page demand cache init");
+    const VTPageAddress page{3, 0, 0};
+    pages.request(page);
+    pages.request(page);
+    require(pages.applyRequests() && pages.reservedSlots().size() == 1, "duplicate pages must share one task");
+    pages.publish(pages.reservedSlots().front());
+    const int slot = pages.resolve(page);
+    pages.release(page);
+    require(pages.applyRequests() && pages.ready() && pages.resolve(page) == slot, "one release cancelled another page demand");
+    pages.release(page);
+    pages.request(page);
+    require(pages.applyRequests() && pages.ready() && pages.resolve(page) == slot, "same-frame changes recomposed a ready page");
+    pages.release(page);
+    require(pages.applyRequests() && pages.resolve(page) < 0, "last page demand remained active");
+}
+
 void testPageRefreshAndReuse() {
     VTResidencyFixture pages;
     require(pages.initPages(cacheData(3), 2), "refresh cache init");
@@ -531,9 +624,9 @@ void testRegionalInvalidation() {
     const VTPageAddress unfinished{0, 0, 1};
     require(pages.reserve({changed, gutter, distant, unfinished}), "reserve regional pages");
     const auto changedSlot = pages.reservedSlots()[0];
-    const auto gutterSlot = pages.reservedSlots()[1];
-    const auto distantSlot = pages.reservedSlots()[2];
-    const auto unfinishedSlot = pages.reservedSlots()[3];
+    const auto unfinishedSlot = pages.reservedSlots()[1];
+    const auto gutterSlot = pages.reservedSlots()[2];
+    const auto distantSlot = pages.reservedSlots()[3];
     publishPages(pages, {changedSlot, gutterSlot, distantSlot});
     require(pages.reserve({changed, distant, unfinished}), "cache neighboring page outside working set");
     // The decal ends before X=1, but is still inside the neighboring page's gutter.
@@ -596,7 +689,7 @@ void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = f
     for (const auto key : keys) {
         const auto address = NodeAddress::fromKey(key);
         const auto &node = *selection.find(address);
-        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready; })) {
+        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready(); })) {
             continue;
         }
         const uint32_t x = address.x << address.level;
@@ -698,7 +791,7 @@ public:
             return true;
         }
         for (const auto &entry : tree.requests()) {
-            if (tree.find(entry)->ready) {
+            if (tree.find(entry)->ready()) {
                 continue;
             }
             if (reserve(entry)) {
@@ -733,12 +826,12 @@ public:
     void check() const {
         checkCut(tree, data);
         tree.forEachNode([&](const Quadtree::Node &node) {
-            if (!node.ready) {
+            if (!node.ready()) {
                 return true;
             }
             const auto address = node.geometry.address();
             if (address.level < data.maxTileLevel) {
-                require(tree.find(address.ancestor(address.level + 1))->ready, "Ready ancestor invariant violated");
+                require(tree.find(address.ancestor(address.level + 1))->ready(), "Ready ancestor invariant violated");
             }
             const auto source = address.ancestor(std::max(address.level, data.minTileLevel));
             require(residency.resident(source) >= 0, "Ready node lost its exact height source");
@@ -761,7 +854,7 @@ public:
             material.push_back({address.level, address.x, address.z});
         };
         tree.forEachNode([&](const Quadtree::Node &node) {
-            if (node.ready) {
+            if (node.ready()) {
                 add(node.geometry.address());
             }
             return true;
@@ -769,7 +862,7 @@ public:
         if (demand) {
             add(*demand);
         }
-        if (!residency.canReserve(required) || !pages.canReserve(material)) {
+        if (!residency.canFit(required) || !pages.canFit(material)) {
             return false;
         }
         require(residency.reserve(required) && pages.reserve(material), "Validated reservation failed");
@@ -862,7 +955,7 @@ void testSingleRoot() {
                 if (tree.find(node->children[q].geometry.address())) {
                     mask |= static_cast<uint8_t>(1U << q);
                 } else {
-                    require(!node->children[q].children && !node->children[q].ready, "Empty sector must not allocate descendants or load resources");
+                    require(!node->children[q].children && !node->children[q].ready(), "Empty sector must not allocate descendants or load resources");
                 }
             }
             return mask;
@@ -926,7 +1019,7 @@ void testReadySelection() {
     require(!tree.publish({0, 7, 0}, testMapping({0, 7, 0})), "Child became ready before its ancestor");
     auto &sector = *tree.find({3, 0, 0});
     for (uint32_t q = 0; q < 4; ++q) {
-        require(!sector.children[q].ready, "New target nodes must start unready");
+        require(!sector.children[q].ready(), "New target nodes must start unready");
     }
     selectAndCheckChanges(tree);
     require(renderableKeys(tree) == roots, "Unpublished children must not replace the parent");
@@ -939,14 +1032,14 @@ void testReadySelection() {
     const auto fourth = sector.children[3].geometry.address();
     require(tree.publish(fourth, testMapping(fourth)), "Publish last sibling");
     selectAndCheckChanges(tree);
-    require(sector.ready && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
+    require(sector.ready() && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
     checkCut(tree, data);
     // Load only one sector deeply. Neighbor roots stay coarse, so selection must
     // retain coarse render nodes despite ready fine resources at the boundary.
     for (uint32_t round = 0; round < 4; ++round) {
         for (const auto &request : tree.requests()) {
             const auto owner = request.ancestor(data.maxTileLevel);
-            if (owner.x == 0 && owner.z == 0 && !tree.find(request)->ready) {
+            if (owner.x == 0 && owner.z == 0 && !tree.find(request)->ready()) {
                 require(tree.publish(request, testMapping(request)), "Load fine boundary resources");
             }
         }
@@ -954,7 +1047,7 @@ void testReadySelection() {
         checkCut(tree, data);
         checkStitchedEdges(tree, data);
     }
-    require(tree.find({0, 7, 0})->ready && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
+    require(tree.find({0, 7, 0})->ready() && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
     require(targetKeys(tree) == target, "Resource readiness rewrote the distance target");
     completeTarget(tree, data);
     checkCut(tree, data);
@@ -962,10 +1055,10 @@ void testReadySelection() {
     require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
     applyView(tree, {});
     selectAndCheckChanges(tree);
-    require(renderableKeys(tree) == roots && !sector.children && sector.ready, "Coarsening must retain the parent and reclaim descendants");
+    require(renderableKeys(tree) == roots && !sector.children && sector.ready(), "Coarsening must retain the parent and reclaim descendants");
     applyView(tree, near);
     const NodeAddress pending{2, 0, 0};
-    require(tree.find(pending) && !tree.find(pending)->ready, "Prepare moving-view load");
+    require(tree.find(pending) && !tree.find(pending)->ready(), "Prepare moving-view load");
     applyView(tree, {});
     selectAndCheckChanges(tree);
     require(!tree.find(pending) && !tree.publish(pending, testMapping(pending)), "Retired request resurrected an obsolete node");
@@ -994,7 +1087,7 @@ void testUpdateStages() {
     // selection is needed to request the next generation of resources.
     for (uint32_t level = 0; level < data.maxTileLevel; ++level) {
         for (const auto &request : tree.requests()) {
-            if (!tree.find(request)->ready) {
+            if (!tree.find(request)->ready()) {
                 require(tree.publish(request, testMapping(request)), "Prepare descendants before selecting draws");
             }
         }
@@ -1193,14 +1286,14 @@ void testMaterialPublication() {
     auto *node = tree.find(address);
     const auto oldMaterial = node->material;
     auto replacement = testMapping(address.ancestor(data.maxTileLevel));
-    require(node->ready && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
+    require(node->ready() && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
     tree.clearChangedNodes();
     require(tree.publish(address, replacement), "Material refresh publication failed");
     require(renderableKeys(tree) == before && tree.changedNodes().size() == 1 && tree.changedNodes().count(address.key()), "Material refresh changed topology or missed notification");
     require(node->material.pages.front().key() == replacement.pages.front().key(), "New mapping was not published");
     ccstd::unordered_set<uint64_t> refresh;
     for (const auto &request : tree.requests()) {
-        if (tree.find(request)->ready) {
+        if (tree.find(request)->ready()) {
             require(refresh.insert(request.key()).second, "Duplicate material refresh request");
         }
     }
@@ -1232,7 +1325,7 @@ void testDistanceTargets() {
         require(tree.selectRenderables(), "Select draws after updating the distance target");
         ccstd::unordered_set<uint64_t> splits;
         for (const auto &candidate : tree.requests()) {
-            if (!tree.find(candidate)->ready) {
+            if (!tree.find(candidate)->ready()) {
                 splits.insert(candidate.ancestor(data.maxTileLevel).key());
             }
         }
@@ -1650,14 +1743,14 @@ std::string pagingParityTrace() {
                 tree.updateTarget(camera, cc::Vec3::ZERO);
                 uint32_t cancelled = 0;
                 for (const auto address : previous) {
-                    if (!tree.isTarget(address)) {
+                    if (!tree.isInTargetTree(address)) {
                         require(!tree.publish(address, testMapping(address)), "Retired completion resurrected a node");
                         ++cancelled;
                     }
                 }
                 uint32_t completed = 0;
                 for (const auto address : tree.requests()) {
-                    if (completed < budget && !tree.find(address)->ready) {
+                    if (completed < budget && !tree.find(address)->ready()) {
                         require(tree.publish(address, testMapping(address)), "Parity publication failed");
                         ++completed;
                     }
@@ -1683,7 +1776,7 @@ std::string pagingParityTrace() {
                 trace << "frame " << cancelled << ' ' << completed << ' ' << tree.renderSelectionChanged();
                 trace << " target=" << parityList(target) << " draw=" << parityList(draw) << " changed=" << parityList(changed) << " requests=";
                 for (const auto address : tree.requests()) {
-                    trace << parityAddress(address) << ':' << tree.find(address)->ready << ',';
+                    trace << parityAddress(address) << ':' << tree.find(address)->ready() << ',';
                 }
                 trace << '\n';
             }
@@ -1802,6 +1895,8 @@ int main(int argc, char **argv) {
     testSectorCountLimit();
     testHeightReservations();
     testExactPageLifecycle();
+    testVTCapacityQuery();
+    testSharedDemands();
     testPageRefreshAndReuse();
     testRegionalInvalidation();
     testCapacityLimitedTransitions();

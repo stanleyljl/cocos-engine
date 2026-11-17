@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/Config.h"
 #include "landscape/Data.h"
@@ -65,22 +64,19 @@ private:
     };
 
     // Resource requests.
-    bool prepareRequests();
+    void prepareRequests();
     Resources collectResources() const;
     void schedulePendingNodes(Resources &resources, bool sectorRootsReady);
     void appendResources(Resources &resources, const PendingNode &pending) const;
-    bool canPrepare(const Resources &resources, ccstd::unordered_map<uint64_t, ccstd::vector<NodeAddress>> &pageSources) const;
-    ccstd::vector<NodeAddress> compositionSources() const;
+    void submitRequests(Resources resources);
 
     // Resource preparation.
     void prepareResources(uint32_t frame);
-    void composeNodes();
-    bool publishNodes();
-    void stopLoading();
+    void publishNodes();
 
     // Morph diagnostics.
     void checkMorphRanges();
-    bool morphRangeTooSmall(const QuadNode &node) const;
+    bool isMorphCheckVisible(NodeAddress address) const;
 
     // Borrowed dependencies outlive Schedule; Quadtree is owned here.
     LandscapeAsset &_asset;
@@ -90,18 +86,15 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
 
     bool _ready{false};
-    bool _loadingStopped{false};
     std::optional<uint32_t> _lastUpdateFrame;
     // Retry after view/selection changes, cancellation or publication, not capacity rejection.
     bool _requestsDirty{true};
     ccstd::vector<PendingNode> _pendingNodes;
-    // Retained while loading; temporary composition inputs belong to Residency.
-    Resources _reservedResources;
+    // Admission snapshot; temporary composition inputs are owned by VT.
+    Resources _requestedResources;
 
     ccstd::vector<Pass> _passes;
     size_t _activePassCount{0};
-    // Invalidated by camera, selection or pass changes.
-    bool _needsMorphCheck{true};
 #if CC_LANDSCAPE_DEBUG
     bool _lastMorphRangeWarning{false};
 #endif

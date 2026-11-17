@@ -23,7 +23,8 @@ struct LandscapePhysicsResources::Impl {
 #endif
 };
 
-LandscapePhysicsResources::LandscapePhysicsResources() : _impl(std::make_unique<Impl>()) {}
+LandscapePhysicsResources::LandscapePhysicsResources()
+: _impl(std::make_unique<Impl>()) {}
 LandscapePhysicsResources::~LandscapePhysicsResources() {
     destroy();
 }
