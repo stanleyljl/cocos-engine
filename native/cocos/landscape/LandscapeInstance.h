@@ -70,11 +70,16 @@ public:
     bool onEnable(Node *node, float lodQualityScale, uint32_t queryCacheCapacity);
     void onDisable();
     void destroy();
-    // Once per tick, after camera controllers: advance queries, target state and streaming.
+    // Once per tick, after camera controllers: queries and shared main-camera demand.
     void update();
 
-    // Render preparation only, after the pipeline has updated its light frusta; does not tick.
+    bool isVisible(const scene::Camera &camera) const;
+    // Once before all cameras, while the render command buffer is recording.
+    void prepareRenderData();
+    // Per camera, after its light frusta are updated. Shared geometry stays unchanged.
     void preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData);
+    // Once after all cameras, to finalize the collected morph diagnostics.
+    void endPasses();
     const ccstd::vector<const scene::Model *> &getPassModels(const geometry::Frustum &frustum, bool shadow) const;
     void onGlobalPipelineStateChanged();
 

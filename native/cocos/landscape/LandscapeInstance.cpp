@@ -287,21 +287,28 @@ uint32_t LandscapeInstance::sampleSurface(float worldX, float worldZ, Float32Arr
     return static_cast<uint32_t>(result.status);
 }
 
-void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
-    _passCount = 0;
-    if (!_renderer) {
-        return;
-    }
+bool LandscapeInstance::isVisible(const scene::Camera &camera) const {
     const auto layer = _node->getLayer();
-    // UI/other cameras that hide terrain must not prepare its rendering resources.
-    if ((camera.getVisibility() & layer) != layer) {
-        return;
-    }
+    return (camera.getVisibility() & layer) == layer;
+}
+
+void LandscapeInstance::prepareRenderData() {
     _schedule->prepareRenderData(Root::getInstance()->getFrameCount());
     _schedule->beginPasses();
+}
+
+void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
+    _passCount = 0;
+    if (!isVisible(camera)) {
+        return;
+    }
     addPass(camera.getFrustum(), false);
     const uint32_t cascadesToDeduplicate = addShadowPasses(sceneData);
     collectPassModels(cascadesToDeduplicate);
+}
+
+void LandscapeInstance::endPasses() {
+    _schedule->endPasses();
 }
 
 uint32_t LandscapeInstance::addShadowPasses(const pipeline::PipelineSceneData &sceneData) {
@@ -342,7 +349,6 @@ void LandscapeInstance::collectPassModels(uint32_t cascadesToDeduplicate) {
         _schedule->collectPassModels(*pass.frustum, pass.shadow, pass.models);
     }
     removeCSMDuplicates(cascadesToDeduplicate);
-    _schedule->endPasses();
 }
 
 void LandscapeInstance::removeCSMDuplicates(uint32_t cascadeCount) {
@@ -425,6 +431,7 @@ void LandscapeInstance::setAssetPath(const ccstd::string &manifestPath) {
 }
 
 scene::Camera *LandscapeInstance::pickMainCamera() const {
+    // All render cameras share LOD, VT, morph and decal fade from this camera.
     if (_scene == nullptr) {
         return nullptr;
     }

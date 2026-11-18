@@ -27,6 +27,8 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#include "base/Log.h"
+#include "base/StringUtil.h"
 #include "landscape/Asset.h"
 
 namespace cc::landscape {
@@ -323,6 +325,14 @@ void Quadtree::initLodMorphRanges(float lodQualityScale) {
         range = {start, end};
         weight *= config::LOD_DISTANCE_RATIO;
     }
+
+#if CC_LANDSCAPE_DEBUG
+    ccstd::string message = "[Landscape] LOD ranges:";
+    for (size_t level = 0; level < _lodMorphRanges.size(); ++level) {
+        message += StringUtil::format(" [LOD%u: %.1f,%.1f]", static_cast<uint32_t>(level), _lodMorphRanges[level].start, _lodMorphRanges[level].end);
+    }
+    CC_LOG_INFO("%s", message.c_str());
+#endif
 }
 
 void Quadtree::buildRoot(Node &node, NodeAddress address) {

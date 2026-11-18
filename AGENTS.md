@@ -63,11 +63,13 @@
 - When multiple change types are involved, list all required steps in execution order: restart the editor, rebuild the project, then recompile native code.
 - Include the applicable reminders in the final response, stating which steps have already been completed and which remain for the user.
 
-# Deferred Landscape work
+# Landscape multi-camera support
 
-- Multi-camera Landscape support is deferred until the user explicitly resumes it (recorded 2026-10-21). Do not implement it as part of unrelated refactoring.
-- Current limitations: LOD selection uses one main camera; the committed Quadtree, morph camera parameters, decal visibility/fade and resource reservations are shared rather than independent per view.
-- Proposed direction to evaluate when resumed: keep the committed Quadtree, draw instances and morph/decal view state per view; share height data, TilePagePool and VT atlas; aggregate resource demands across views before scheduling to avoid mutual eviction. Shadow passes should use their owning view's LOD and morph. Preserve existing single-camera behavior and morph transitions. Confirm whether the use case is camera switching, shared-LOD secondary views or simultaneous independent views before choosing the scope.
+- Shared-LOD multi-camera rendering is implemented in the existing TS and native Forward/Deferred pipeline integration (2026-11-18). Runtime LOD uses the first perspective camera in the scene; Web scene editing uses the enabled SCENE_VIEW camera. Secondary cameras may be perspective or orthographic.
+- All cameras share the committed Quadtree, draw models, VT/source resources, main-camera morph parameters and decal distance visibility/fade. Each camera collects its own main and shadow pass models using its frusta; CSM duplicate removal is local to that camera.
+- After command recording begins and before the camera loop, prepare each visible Landscape once through prepareRenderData. Inside the loop, preparePasses only collects that camera's models; after the loop, endPasses finalizes the accumulated morph diagnostics. Preserve this preparation/collection boundary and existing morph transitions.
+- Independent per-camera LOD, morph, decal distance state and resource demands are not supported. Do not expand to independent-view scheduling as part of unrelated changes; secondary views intentionally inherit main-camera detail.
+- The Landscape demo toggles an orthographic overview with M or the mobile debug panel's M 小地图 button. It fits the terrain asset bounds and renders in the upper-left viewport with equal padding on all sides without becoming the LOD camera. F11 toggles the VT atlas at its existing position.
 
 # Progress communication
 

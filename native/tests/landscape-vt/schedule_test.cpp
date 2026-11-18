@@ -518,8 +518,8 @@ int main(int argc, char **argv) {
         }
         require(command == "frame", "Unknown scheduling command");
         cc::Vec3 camera;
-        bool repeat;
-        row >> camera.x >> camera.y >> camera.z >> backend.uploads >> backend.compositions >> repeat;
+        bool extraCamera;
+        row >> camera.x >> camera.y >> camera.z >> backend.uploads >> backend.compositions >> extraCamera;
         std::map<uint64_t, uint8_t> committed;
         tree.forEachRenderable([&](const Quadtree::Node &node) {
             committed.emplace(node.geometry.address().key(), node.edgeMask);
@@ -532,13 +532,21 @@ int main(int argc, char **argv) {
         require(afterTick == committed, "Tick changed committed draws or morph edges");
         backend.preparing = true;
         schedule.prepareRenderData(++frame);
-        if (repeat) {
-            const auto updates = backend.updates;
-            schedule.prepareRenderData(frame);
-            require(updates == backend.updates, "Duplicate frame performed resource work");
-        }
+        backend.preparing = false;
+        const auto updates = backend.updates;
         schedule.beginPasses();
+        for (uint32_t view = 0; view < 1U + static_cast<uint32_t>(extraCamera); ++view) {
+            cc::geometry::Frustum frustum;
+            for (auto *plane : frustum.planes) {
+                plane->n.set(1, 0, 0);
+                plane->d = 100000.0F + static_cast<float>(view);
+            }
+            ccstd::vector<const cc::scene::Model *> models;
+            schedule.addPass(frustum, false);
+            schedule.collectPassModels(frustum, false, models);
+        }
         schedule.endPasses();
+        require(updates == backend.updates, "Camera passes performed resource work");
         const bool coverage = tree.sectorRootsReady();
         std::map<uint64_t, uint8_t> selected;
         tree.forEachRenderable([&](const Quadtree::Node &node) {
@@ -584,5 +592,5 @@ int main(int argc, char **argv) {
     // Triplanar changes composition inputs, not the distance-based page allocation.
     require(settledState == expectedStates.back() + '\n', "Native settled scheduling differs from the shared TS/C++ baseline; inspect --dump-parity");
     testCameraRotation();
-    std::cout << "PASS: shared scheduling, delayed resources, cancellation, material refresh and repeated frames\n";
+    std::cout << "PASS: shared scheduling, delayed resources, cancellation, material refresh and shared camera passes\n";
 }

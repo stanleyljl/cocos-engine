@@ -4,7 +4,6 @@
 #include <array>
 #include <functional>
 #include <memory>
-#include <optional>
 #include "base/std/container/vector.h"
 #include "landscape/Config.h"
 #include "landscape/Data.h"
@@ -71,7 +70,7 @@ private:
     void submitRequests(Resources resources);
 
     // Resource preparation.
-    void prepareResources(uint32_t frame);
+    void prepareResources();
     void publishNodes();
 
     // Morph diagnostics.
@@ -86,7 +85,6 @@ private:
     std::unique_ptr<Quadtree> _quadtree;
 
     bool _ready{false};
-    std::optional<uint32_t> _lastUpdateFrame;
     // Retry after view/selection changes, cancellation or publication, not capacity rejection.
     bool _requestsDirty{true};
     ccstd::vector<PendingNode> _pendingNodes;
@@ -95,8 +93,6 @@ private:
 
     ccstd::vector<Pass> _passes;
     size_t _activePassCount{0};
-#if CC_LANDSCAPE_DEBUG
     bool _lastMorphRangeWarning{false};
-#endif
 };
 } // namespace cc::landscape

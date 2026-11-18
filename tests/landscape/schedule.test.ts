@@ -59,7 +59,7 @@ test('pass diagnostics preserve prepared draws, pending requests and change noti
 
 // Same deterministic IO/GPU boundaries as native schedule_test.cpp. The actual
 // scheduler, quadtree and mapping layout execute; paging.test covers allocation.
-test.each([false, true])('scheduling preserves delayed sources, cancellation, refresh and duplicate frames (triplanar=%s)', (triplanar) => {
+test.each([false, true])('scheduling preserves delayed sources, cancellation, refresh and shared camera passes (triplanar=%s)', (triplanar) => {
     const lines = PARITY_CASES.trimStart().split(/\r?\n/).filter((line) => line && !line.startsWith('#'));
     const [capacityCommand, sourceLimit, pageLimit] = lines.shift()!.split(' ');
     expect(capacityCommand).toBe('capacity');
@@ -195,6 +195,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         vtRenderer: () => pages,
         setLodMorphRanges: jest.fn(),
         setViewPosition: jest.fn(),
+        collectNodeModels: () => true,
         prepareRenderData: (_frame: number, _previous: unknown, updated: readonly LandscapeRenderNode[], removed: readonly string[]): void => {
             expect(preparing).toBe(true);
             removed.forEach((key) => draws.delete(key));
@@ -217,7 +218,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
             continue;
         }
         expect(command).toBe('frame');
-        const [x, y, z, uploadBudget, compositionBudget, repeat] = parameters.map(Number);
+        const [x, y, z, uploadBudget, compositionBudget, extraCamera] = parameters.map(Number);
         uploads = uploadBudget;
         compositions = compositionBudget;
         const committed = new Map<string, number>();
@@ -228,13 +229,20 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
         expect(afterTick).toEqual(committed);
         preparing = true;
         schedule.prepareRenderData(++frame);
-        if (repeat) {
-            const before = updates;
-            schedule.prepareRenderData(frame);
-            expect(updates).toBe(before);
-        }
+        preparing = false;
+        const before = updates;
         schedule.beginPasses();
+        for (let view = 0; view < 1 + extraCamera; ++view) {
+            const frustum = new Frustum();
+            for (const plane of frustum.planes) {
+                plane.n.set(1, 0, 0);
+                plane.d = 100000 + view;
+            }
+            schedule.addPass(frustum, false);
+            schedule.collectPassModels(frustum, false, []);
+        }
         schedule.endPasses();
+        expect(updates).toBe(before);
         const coverage = tree.sectorRootsReady();
         const selected = new Map<string, number>();
         tree.forEachRenderable((node) => selected.set(node.geometry.address().key(), node.edgeMask));
@@ -267,7 +275,7 @@ test.each([false, true])('scheduling preserves delayed sources, cancellation, re
 const PARITY_CASES = String.raw`
 # source capacity, page capacity; fixed 2x1 sectors, level 2, size 4.
 capacity 24 24
-# frame: camera XYZ, source completions, page completions, repeat same frame.
+# frame: main camera XYZ, source completions, page completions, extra camera pass.
 frame 100 100 100 0 0 1
 frame 100 100 100 1 0 1
 frame 100 100 100 8 1 0

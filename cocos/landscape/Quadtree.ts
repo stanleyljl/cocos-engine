@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import { Vec3 } from '../core/math';
+import { log } from '../core/platform/debug';
 import type { LandscapeAsset } from './Asset';
 import * as config from './Config';
 import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, QuadNode, ReadonlyVTGridMapping, VTGridMapping } from './Data';
@@ -323,6 +324,13 @@ export class Quadtree {
             start += (end - start) * config.MORPH_START_RATIO;
             this._lodMorphRanges.push({ start, end });
             weight *= config.LOD_DISTANCE_RATIO;
+        }
+        if (config.LANDSCAPE_DEBUG) {
+            let message = '[Landscape] LOD ranges:';
+            this._lodMorphRanges.forEach((range, level) => {
+                message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
+            });
+            log(message);
         }
     }
 

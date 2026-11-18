@@ -32,6 +32,7 @@
 #include "../shadow/ShadowFlow.h"
 #include "ForwardFlow.h"
 #include "gfx-base/GFXDevice.h"
+#include "landscape/LandscapeInstance.h"
 #include "profiler/Profiler.h"
 #include "scene/Camera.h"
 #include "scene/RenderScene.h"
@@ -117,6 +118,7 @@ void ForwardPipeline::render(const ccstd::vector<scene::Camera *> &cameras) {
 
     ensureEnoughSize(cameras);
     decideProfilerCamera(cameras);
+    const auto landscapes = prepareLandscapes(cameras, true);
 
     for (auto *camera : cameras) {
         bool isCullingEnable = camera->isCullingEnabled();
@@ -131,6 +133,9 @@ void ForwardPipeline::render(const ccstd::vector<scene::Camera *> &cameras) {
         _fg.execute();
         _fg.reset();
         _pipelineUBO->incCameraUBOOffset();
+    }
+    for (auto *terrain : landscapes) {
+        terrain->endPasses();
     }
 
     if (enableOcclusionQuery) {

@@ -243,28 +243,39 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     }
 
     private pickMainCamera (): Camera | undefined {
-        // Scene editing uses the editor's view for LOD, VT and morph. Game
-        // preview and native runtime retain the single perspective-camera policy.
+        // All render cameras share LOD, VT, morph and decal fade from this camera.
+        // Scene editing uses the editor's view; runtime uses the first perspective camera.
         if (EDITOR_NOT_IN_PREVIEW) {
             return this._scene!.cameras.find((camera) => camera.enabled && camera.cameraUsage === CameraUsage.SCENE_VIEW);
         }
         return this._scene!.cameras.find((camera) => camera.projectionType === CameraProjection.PERSPECTIVE);
     }
 
-    public preparePasses (camera: Camera, sceneData: PipelineSceneData): void {
-        this._passes.length = 0;
-        if (!this._renderer) {
-            return;
-        }
+    public isVisible (camera: Camera): boolean {
         const layer = this._node!.layer;
-        if ((camera.visibility & layer) !== layer) {
-            return;
-        }
+        return (camera.visibility & layer) === layer;
+    }
+
+    // Once before all cameras, while the render command buffer is recording.
+    public prepareRenderData (): void {
         this._schedule!.prepareRenderData(director.getTotalFrames());
         this._schedule!.beginPasses();
+    }
+
+    // Per camera, after its light frusta are updated. Shared geometry stays unchanged.
+    public preparePasses (camera: Camera, sceneData: PipelineSceneData): void {
+        this._passes.length = 0;
+        if (!this.isVisible(camera)) {
+            return;
+        }
         this.addPass(camera.frustum, false);
         const cascades = this.addShadowPasses(sceneData);
         this.collectPassModels(cascades);
+    }
+
+    // Once after all cameras, to finalize the collected morph diagnostics.
+    public endPasses (): void {
+        this._schedule!.endPasses();
     }
 
     private collectPassModels (cascades: number): void {
@@ -286,7 +297,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 });
             }
         }
-        this._schedule!.endPasses();
     }
 
     private addPass (frustum: Readonly<Frustum>, shadow: boolean): void {

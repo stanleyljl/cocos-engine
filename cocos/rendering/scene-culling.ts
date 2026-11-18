@@ -30,6 +30,7 @@ import { ShadowType, CSMOptimizationMode } from '../render-scene/scene/shadows';
 import { PipelineSceneData } from './pipeline-scene-data';
 import { ShadowLayerVolume } from './shadow/csm-layers';
 import { AABB } from '../core/geometry';
+import type { LandscapeInstance } from '../landscape/LandscapeInstance';
 
 const _tempVec3 = new Vec3();
 const _sphere = geometry.Sphere.create(0, 0, 0, 1);
@@ -150,6 +151,22 @@ export function shadowCulling (camera: Camera, sceneData: PipelineSceneData, lay
             }
         }
     }
+}
+
+export function prepareLandscapes (cameras: readonly Camera[]): LandscapeInstance[] {
+    const prepared: LandscapeInstance[] = [];
+    for (const camera of cameras) {
+        if (!camera.scene) {
+            continue;
+        }
+        for (const landscape of camera.scene.landscapes) {
+            if (landscape.isVisible(camera) && !prepared.includes(landscape)) {
+                landscape.prepareRenderData();
+                prepared.push(landscape);
+            }
+        }
+    }
+    return prepared;
 }
 
 export function sceneCulling (sceneData: PipelineSceneData, pipelineUBO: PipelineUBO, camera: Camera): void {

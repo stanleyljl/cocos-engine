@@ -6,7 +6,6 @@
 #include <utility>
 #include "base/Log.h"
 #include "base/Macros.h"
-#include "base/StringUtil.h"
 #include "core/geometry/AABB.h"
 #include "core/geometry/Frustum.h"
 #include "landscape/Renderer.h"
@@ -45,13 +44,6 @@ LandscapeSchedule::LandscapeSchedule(LandscapeAsset &asset, LandscapeRenderer &r
         morph[i] = Vec4{ranges[i].start, ranges[i].end, 0, 0};
     }
     renderer.setLodMorphRanges(morph);
-#if CC_LANDSCAPE_DEBUG
-    ccstd::string message = "[Landscape] LOD ranges:";
-    for (size_t level = 0; level < ranges.size(); ++level) {
-        message += StringUtil::format(" [LOD%u: %.1f,%.1f]", static_cast<uint32_t>(level), ranges[level].start, ranges[level].end);
-    }
-    CC_LOG_INFO("%s", message.c_str());
-#endif
 }
 
 LandscapeSchedule::~LandscapeSchedule() {
@@ -66,7 +58,7 @@ void LandscapeSchedule::update(const Vec3 &camera, const Vec3 &origin) {
 
 void LandscapeSchedule::prepareRenderData(uint32_t frame) {
     auto *previousMappings = _vtRenderer.pageTable().texture();
-    prepareResources(frame);
+    prepareResources();
     _quadtree->selectRenderables();
     _ready = _ready || isRenderStateStable();
     ccstd::vector<LandscapeRenderNode> updated;
@@ -288,11 +280,7 @@ void LandscapeSchedule::submitRequests(Resources resources) {
     _requestedResources = std::move(resources);
 }
 
-void LandscapeSchedule::prepareResources(uint32_t frame) {
-    if (_lastUpdateFrame && *_lastUpdateFrame == frame) {
-        return;
-    }
-    _lastUpdateFrame = frame;
+void LandscapeSchedule::prepareResources() {
     if (!_vtRenderer.pageTable().ensureCapacity(_requestedResources.mappingCount)) {
         return;
     }

@@ -53,7 +53,6 @@ export class LandscapeSchedule {
 
     private _ready = false;
     private _destroyed = false;
-    private _lastUpdateFrame = -1;
     // Retry after view/selection changes, cancellation or publication, not capacity rejection.
     private _requestsDirty = true;
     private _pendingNodes: PendingNode[] = [];
@@ -73,13 +72,6 @@ export class LandscapeSchedule {
         const morph = Array.from({ length: config.MAX_LOD_LEVELS }, () => new Vec4());
         this._quadtree.lodMorphRanges().forEach((range, i) => morph[i].set(range.start, range.end, 0, 0));
         renderer.setLodMorphRanges(morph);
-        if (config.LANDSCAPE_DEBUG) {
-            let message = '[Landscape] LOD ranges:';
-            this._quadtree.lodMorphRanges().forEach((range, level) => {
-                message += ` [LOD${level}: ${range.start.toFixed(1)},${range.end.toFixed(1)}]`;
-            });
-            log(message);
-        }
     }
 
     public destroy (): void {
@@ -96,7 +88,7 @@ export class LandscapeSchedule {
 
     public prepareRenderData (frame: number): void {
         const previousMappings = this._vtRenderer.pageTable().texture();
-        this.prepareResources(frame);
+        this.prepareResources();
         this._quadtree.selectRenderables();
         this._ready = this._ready || this.isRenderStateStable();
         const updated: LandscapeRenderNode[] = [];
@@ -308,11 +300,7 @@ export class LandscapeSchedule {
     }
 
     // Resource preparation.
-    private prepareResources (frame: number): void {
-        if (this._lastUpdateFrame === frame) {
-            return;
-        }
-        this._lastUpdateFrame = frame;
+    private prepareResources (): void {
         if (!this._vtRenderer.pageTable().ensureCapacity(this._requestedResources.mappingCount)) {
             return;
         }

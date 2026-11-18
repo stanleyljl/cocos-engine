@@ -5,6 +5,7 @@
 #include "landscape/VTPageStages.h"
 #include "landscape/VTRenderer.h"
 #include "base/Log.h"
+#include "base/StringUtil.h"
 #include "base/std/container/unordered_map.h"
 #include "core/Root.h"
 #include "core/assets/Material.h"
@@ -34,8 +35,13 @@ Root *Root::getInstance() {
     std::abort();
 }
 LogLevel Log::slogLevel = LogLevel::INFO;
-void Log::logMessage(LogType, LogLevel, const char *, ...) {
-    std::abort();
+void Log::logMessage(LogType, LogLevel level, const char *, ...) {
+    if (level < LogLevel::INFO) {
+        std::abort();
+    }
+}
+ccstd::string StringUtil::format(const char *, ...) {
+    return {};
 }
 void gfx::Texture::initialize(const gfx::TextureInfo &) {
     std::abort();

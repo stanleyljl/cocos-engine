@@ -22,6 +22,7 @@
  THE SOFTWARE.
 ****************************************************************************/
 
+#include <algorithm>
 #include "base/std/container/array.h"
 
 #include "Define.h"
@@ -179,6 +180,23 @@ void shadowCulling(const RenderPipeline *pipeline, const scene::Camera *camera, 
     }
 }
 
+ccstd::vector<landscape::LandscapeInstance *> prepareLandscapes(const ccstd::vector<scene::Camera *> &cameras, bool cullingEnabledOnly) {
+    ccstd::vector<landscape::LandscapeInstance *> prepared;
+    for (const auto *camera : cameras) {
+        const auto *scene = camera->getScene();
+        if (!scene || (cullingEnabledOnly && !camera->isCullingEnabled())) {
+            continue;
+        }
+        for (auto *terrain : scene->getLandscapes()) {
+            if (terrain->isVisible(*camera) && std::find(prepared.begin(), prepared.end(), terrain) == prepared.end()) {
+                terrain->prepareRenderData();
+                prepared.push_back(terrain);
+            }
+        }
+    }
+    return prepared;
+}
+
 void sceneCulling(const RenderPipeline *pipeline, scene::Camera *camera) {
     CC_PROFILE(SceneCulling);
     PipelineSceneData *const sceneData = pipeline->getPipelineSceneData();
@@ -278,7 +296,7 @@ void sceneCulling(const RenderPipeline *pipeline, scene::Camera *camera) {
         }
     }
 
-    // Light frusta are ready. Terrain selects and prepares this camera's passes.
+    // Light frusta are ready. Collect this camera's passes from the shared terrain selection.
     for (auto *terrain : scene->getLandscapes()) {
         terrain->preparePasses(*camera, *sceneData);
         for (const auto *model : terrain->getPassModels(camera->getFrustum(), false)) {
