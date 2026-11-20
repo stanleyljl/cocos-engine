@@ -37,6 +37,7 @@ class TextureBase;
 }
 
 namespace cc::landscape {
+class LandscapeAsset;
 class VTRenderer;
 
 // Scoped to one admission scan; caches immutable inputs, never capacity decisions.
@@ -146,7 +147,7 @@ public:
 
 protected:
     // CPU residency operations; runtime callers use init() and update().
-    bool initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity = config::VT_PAGE_COUNT);
+    bool initPages(const LandscapeAsset &asset, uint32_t capacity = config::VT_PAGE_COUNT);
     void publish(uint32_t slot);
     bool applyRequests();
 
@@ -163,9 +164,9 @@ private:
 
     LandscapeData _data;
     VTPageLayout _layout;
-    const ccstd::vector<ccstd::vector<HeightRange>> *_heightRanges{nullptr}; // Borrowed immutable asset metadata.
-
+    const LandscapeAsset *_asset{nullptr}; // Borrowed; outlives this renderer.
     LandscapeResidency *_residency{nullptr}; // Borrowed; initialized before runtime work.
+
     ccstd::unordered_map<uint64_t, Request> _requests;
     bool _requestsDirty{false};
     // Owns one reference per source until update() reconciles composition demand.

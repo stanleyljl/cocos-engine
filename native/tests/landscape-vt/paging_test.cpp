@@ -174,13 +174,15 @@ private:
 
 class VTResidencyFixture final : public VTRenderer {
 public:
-    ccstd::vector<ccstd::vector<HeightRange>> ranges;
+    ccstd::vector<ccstd::vector<HeightRange>> &ranges() { return const_cast<ccstd::vector<ccstd::vector<HeightRange>> &>(_asset.heightRanges()); }
     bool initPages(const LandscapeData &data, uint32_t capacity = config::VT_PAGE_COUNT) {
-        ranges.resize(data.maxTileLevel + 1U);
+        const_cast<LandscapeData &>(_asset.data()) = data;
+        auto &heightRanges = ranges();
+        heightRanges.resize(data.maxTileLevel + 1U);
         for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
-            ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), HeightRange{0.0F, data.sectorSize * 2.0F});
+            heightRanges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), HeightRange{0.0F, data.sectorSize * 2.0F});
         }
-        return VTRenderer::initPages(data, ranges, capacity);
+        return VTRenderer::initPages(_asset, capacity);
     }
     using VTRenderer::publish;
     using VTRenderer::applyRequests;
@@ -199,6 +201,7 @@ public:
     }
 
 private:
+    LandscapeAsset _asset;
     ccstd::vector<VTPageAddress> _demands;
 
 };
@@ -1508,12 +1511,12 @@ void testCliffCulling() {
     data.sectorSize = 128.0F;
     VTResidencyFixture pages;
     require(pages.initPages(data), "Initialize cliff culling metadata");
-    for (auto &ranges : pages.ranges) {
+    for (auto &ranges : pages.ranges()) {
         std::fill(ranges.begin(), ranges.end(), HeightRange{100.0F, 100.0F});
     }
     // The same height span becomes gentle when averaged over a coarse region.
     for (uint32_t level = 0; level <= data.maxTileLevel; ++level) {
-        pages.ranges[level][static_cast<size_t>(2U >> level) * data.nodesX(level) + (8U >> level)] = HeightRange{100.0F, 164.0F};
+        pages.ranges()[level][static_cast<size_t>(2U >> level) * data.nodesX(level) + (8U >> level)] = HeightRange{100.0F, 164.0F};
     }
     require(!pages.selectSources({3, 0, 0}, true, true).triplanar, "Ordinary pages must use the XZ shader even when triplanar is enabled");
     require(pages.selectSources({0, 128, 32}, true, true).triplanar, "Fine cliff page must use triplanar");

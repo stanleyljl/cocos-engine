@@ -24,10 +24,11 @@ function mapping (address: NodeAddress): VTGridMapping {
 
 // Match the native CPU fixture. Supply only CPU state; accidental GPU calls fail.
 // Demand reconciliation, eviction, lookup and invalidation run production methods.
-function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; reserve: (addresses: VTPageAddress[]) => boolean; slots: () => number[]; pages: () => VTPage[] } {
+function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRenderer; ranges: HeightRange[][]; reserve: (addresses: VTPageAddress[]) => boolean; slots: () => number[]; pages: () => VTPage[] } {
+    const ranges = Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: data.sectorSize * 2 })));
     const state = {
         _data: data,
-        _heightRanges: Array.from({ length: data.maxTileLevel + 1 }, (_, level) => Array.from({ length: data.nodesX(level) * data.nodesZ(level) }, () => ({ minY: 0, maxY: data.sectorSize * 2 }))),
+        _asset: { data: () => data, heightRanges: () => ranges } as unknown as LandscapeAsset,
         _layout: new VTPageLayout(data.sectorSize),
         _pages: Array.from({ length: capacity }, () => new VTPage()),
         _reservedSlots: [] as number[],
@@ -48,7 +49,7 @@ function pageFixture (data: LandscapeData, capacity: number): { renderer: VTRend
         demands = addresses;
         return renderer['applyRequests']();
     };
-    return { renderer, reserve, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
+    return { renderer, ranges, reserve, slots: () => cpu._reservedSlots, pages: () => cpu._pages };
 }
 
 test('reused page sources still check capacity against the current retained set', () => {
@@ -208,8 +209,7 @@ test('triplanar height sources cover page interiors and gutters across sectors',
 
 test('CPU cliff estimates use height span and region size including gutters', () => {
     const data = Object.assign(cacheData(3, 2, 1), { sectorSize: 128 });
-    const { renderer } = pageFixture(data, 256);
-    const ranges = (renderer as unknown as { _heightRanges: HeightRange[][] })._heightRanges;
+    const { renderer, ranges } = pageFixture(data, 256);
     for (const levelRanges of ranges) {
         levelRanges.fill({ minY: 100, maxY: 100 });
     }

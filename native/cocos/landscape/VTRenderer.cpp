@@ -542,7 +542,8 @@ gfx::Texture *VTRenderer::normalRoughness() const {
     return _compressor ? _compressor->normalRoughness() : _composer->normal();
 }
 
-bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<ccstd::vector<HeightRange>> &heightRanges, uint32_t capacity) {
+bool VTRenderer::initPages(const LandscapeAsset &asset, uint32_t capacity) {
+    const auto &data = asset.data();
     if (capacity < static_cast<uint64_t>(data.sectorsX) * data.sectorsZ) {
         return false;
     }
@@ -551,7 +552,7 @@ bool VTRenderer::initPages(const LandscapeData &data, const ccstd::vector<ccstd:
     _lookup.clear();
     _reservation = 0;
     _data = data;
-    _heightRanges = &heightRanges;
+    _asset = &asset;
     _layout = VTPageLayout(data.sectorSize);
     _pages.resize(capacity);
     return true;
@@ -567,7 +568,7 @@ bool VTRenderer::initResources(const LandscapeAsset &asset, LandscapeResidency &
     _composer = std::make_unique<VTPageComposer>();
     _mipGenerator = std::make_unique<VTPageMipGenerator>();
     const uint32_t side = atlasSize / config::VT_PAGE_RES;
-    if (!initPages(asset.data(), asset.heightRanges(), side * side) || !_pageTable.ensureCapacity(1) ||
+    if (!initPages(asset, side * side) || !_pageTable.ensureCapacity(1) ||
         !_composer->init(asset, residency, materials, decals, atlasSize, compressed) || !_mipGenerator->init(*_composer, compressed)) {
         return false;
     }
@@ -633,9 +634,10 @@ bool VTRenderer::hasCliff(LandscapeRegion region) const {
     const auto first = _data.nodeAtClamped(level, {region.x - border, region.z - border});
     const auto last = _data.nodeAtClamped(level, {region.x + region.size + border, region.z + region.size + border});
     const float heightThreshold = _data.nodeSize(level) * std::sqrt(1.0F / (config::TRIPLANAR_START_NORMAL_Y * config::TRIPLANAR_START_NORMAL_Y) - 1.0F);
+    const auto &ranges = _asset->heightRanges()[level];
     for (uint32_t z = first.z; z <= last.z; ++z) {
         for (uint32_t x = first.x; x <= last.x; ++x) {
-            const auto &range = (*_heightRanges)[level][static_cast<size_t>(z) * _data.nodesX(level) + x];
+            const auto &range = ranges[static_cast<size_t>(z) * _data.nodesX(level) + x];
             if (range.maxY - range.minY > heightThreshold) {
                 return true;
             }

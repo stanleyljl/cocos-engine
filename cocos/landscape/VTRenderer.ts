@@ -8,7 +8,7 @@ import { LandscapeResidency } from './Residency';
 import { MaterialLibrary } from './MaterialLibrary';
 import { DecalRenderer } from './DecalRenderer';
 import { VTPageComposer, VTPageInstance, VTPageMipGenerator } from './VTPageStages';
-import { HeightRange, LandscapeData, LandscapeRegion, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
+import { LandscapeData, LandscapeRegion, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
 import * as config from './Config';
 
 // Scoped to one admission scan; caches immutable inputs, never capacity decisions.
@@ -188,7 +188,7 @@ interface Request {
 export class VTRenderer {
     private _data!: LandscapeData;
     private _layout!: VTPageLayout;
-    private _heightRanges!: readonly (readonly HeightRange[])[]; // Borrowed immutable asset metadata.
+    private _asset!: LandscapeAsset; // Borrowed; outlives this renderer.
 
     private _residency!: LandscapeResidency;
     private readonly _requests = new Map<NodeKey, Request>();
@@ -217,7 +217,7 @@ export class VTRenderer {
         }
         this._residency = residency;
         this._data = data;
-        this._heightRanges = asset.heightRanges();
+        this._asset = asset;
         this._layout = new VTPageLayout(data.sectorSize);
         this._pages = Array.from({ length: capacity }, () => new VTPage());
         if (!this._pageTable.ensureCapacity(1) || !this._composer.init(asset, residency, materials, decals, atlasSize) || !this._mipGenerator.init(this._composer)) {
@@ -567,9 +567,10 @@ export class VTRenderer {
         const first = this._data.nodeAtClamped(level, { x: region.x - border, z: region.z - border });
         const last = this._data.nodeAtClamped(level, { x: region.x + region.size + border, z: region.z + region.size + border });
         const heightThreshold = this._data.nodeSize(level) * Math.sqrt(1 / (config.TRIPLANAR_START_NORMAL_Y * config.TRIPLANAR_START_NORMAL_Y) - 1);
+        const ranges = this._asset.heightRanges()[level];
         for (let z = first.z; z <= last.z; ++z) {
             for (let x = first.x; x <= last.x; ++x) {
-                const range = this._heightRanges[level][z * this._data.nodesX(level) + x];
+                const range = ranges[z * this._data.nodesX(level) + x];
                 if (range.maxY - range.minY > heightThreshold) {
                     return true;
                 }
