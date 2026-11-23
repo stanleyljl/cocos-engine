@@ -482,7 +482,7 @@ export abstract class RenderPipeline extends Asset implements IPipelineEvent, Pi
         this.emit(PipelineEventType.RENDER_FRAME_BEGIN, cameras);
         this._ensureEnoughSize(cameras);
         decideProfilerCamera(cameras);
-        const landscapes = prepareLandscapes(cameras);
+        prepareLandscapes(cameras);
 
         for (let i = 0; i < cameras.length; i++) {
             const camera = cameras[i];
@@ -497,9 +497,6 @@ export abstract class RenderPipeline extends Asset implements IPipelineEvent, Pi
                 }
                 this.emit(PipelineEventType.RENDER_CAMERA_END, camera);
             }
-        }
-        for (const landscape of landscapes) {
-            landscape.endPasses();
         }
         this.emit(PipelineEventType.RENDER_FRAME_END, cameras);
         this._commandBuffers[0].end();

@@ -120,6 +120,9 @@ struct VTGridMapping {
     static constexpr uint32_t CELL_COUNT = SIDE * SIDE;
     std::array<uint8_t, CELL_COUNT> cells{};
     ccstd::vector<VTPageAddress> pages;
+
+    bool operator==(const VTGridMapping &other) const;
+    bool operator!=(const VTGridMapping &other) const { return !(*this == other); }
 };
 
 // Source addresses for one material-page composition, independent of residency.

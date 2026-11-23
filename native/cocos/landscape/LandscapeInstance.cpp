@@ -195,7 +195,6 @@ void LandscapeInstance::addPass(const geometry::Frustum &frustum, bool shadow) {
     pass.frustum = &frustum;
     pass.shadow = shadow;
     pass.models.clear();
-    _schedule->addPass(frustum, !shadow);
 }
 
 bool LandscapeInstance::isTranslationOnly(Node *node) {
@@ -294,7 +293,6 @@ bool LandscapeInstance::isVisible(const scene::Camera &camera) const {
 
 void LandscapeInstance::prepareRenderData() {
     _schedule->prepareRenderData(Root::getInstance()->getFrameCount());
-    _schedule->beginPasses();
 }
 
 void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
@@ -305,10 +303,6 @@ void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipelin
     addPass(camera.getFrustum(), false);
     const uint32_t cascadesToDeduplicate = addShadowPasses(sceneData);
     collectPassModels(cascadesToDeduplicate);
-}
-
-void LandscapeInstance::endPasses() {
-    _schedule->endPasses();
 }
 
 uint32_t LandscapeInstance::addShadowPasses(const pipeline::PipelineSceneData &sceneData) {
@@ -358,7 +352,7 @@ void LandscapeInstance::removeCSMDuplicates(uint32_t cascadeCount) {
     ccstd::unordered_set<const scene::Model *> coveredShadowModels;
     // Match legacy shadowCulling: a model completely inside an earlier cascade
     // is omitted from later cascades. Intersecting the frustum is not sufficient.
-    // Each pass has independently culled the shared committed Quadtree.
+    // Each pass has independently culled the shared committed RenderTree.
     // Directional cascades follow the color pass; spot passes are never deduplicated.
     for (uint32_t i = 1; i <= cascadeCount; ++i) {
         auto &pass = _passes[i];
@@ -469,7 +463,7 @@ void LandscapeInstance::drawDebugBounds() {
     static_assert(sizeof(colors) / sizeof(colors[0]) == config::MAX_LOD_LEVELS,
                   "Provide a debug color for every supported LOD level");
     const Mat4 &world = _node->getWorldMatrix();
-    _schedule->visitDebugNodes(camera->getFrustum(), _node->getWorldPosition(), [&](const QuadNode &node, const LandscapeRegion &region) {
+    _schedule->forEachVisibleNode(camera->getFrustum(), _node->getWorldPosition(), [&](const QuadNode &node, const LandscapeRegion &region) {
         const float quadrantSize = region.size * 0.5F;
         const float nodeX = region.x;
         const float nodeZ = region.z;

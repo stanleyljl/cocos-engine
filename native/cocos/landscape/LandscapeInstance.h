@@ -78,8 +78,6 @@ public:
     void prepareRenderData();
     // Per camera, after its light frusta are updated. Shared geometry stays unchanged.
     void preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData);
-    // Once after all cameras, to finalize the collected morph diagnostics.
-    void endPasses();
     const ccstd::vector<const scene::Model *> &getPassModels(const geometry::Frustum &frustum, bool shadow) const;
     void onGlobalPipelineStateChanged();
 

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
-import { log } from '../core/platform/debug';
+import { error, log } from '../core/platform/debug';
 import { Address, BufferTextureCopy, Filter, Format, Sampler, SamplerInfo, Texture, TextureInfo, TextureType, TextureUsageBit } from '../gfx';
 import { director } from '../game/director';
 import { Texture2D } from '../asset/assets';
@@ -232,10 +232,27 @@ export class VTRenderer {
         sampler.addressV = Address.CLAMP;
         sampler.addressW = Address.CLAMP;
         this._sampler = director.root!.device.getSampler(sampler);
+        if (!this.validateRootCapacity()) {
+            error('[Landscape] Device capacity cannot compose sector roots');
+            this.destroy();
+            return false;
+        }
         if (config.LANDSCAPE_DEBUG) {
             log(`[Landscape] VT atlas: ${atlasSize}x${atlasSize} RGBA8 pages=${this._pages.length}`);
         }
         return true;
+    }
+
+    private validateRootCapacity (): boolean {
+        const rootPages: VTPageAddress[] = [];
+        const rootSources: NodeAddress[] = [];
+        for (let z = 0; z < this._data.sectorsZ; ++z) {
+            for (let x = 0; x < this._data.sectorsX; ++x) {
+                rootPages.push(new VTPageAddress(this._layout.rootLevel(), x, z));
+                rootSources.push(new NodeAddress(this._data.maxTileLevel, x, z));
+            }
+        }
+        return this.capacityQuery().canPrepare(rootPages, rootSources);
     }
 
     public destroy (): void {

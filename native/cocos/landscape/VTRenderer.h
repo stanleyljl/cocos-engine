@@ -158,6 +158,7 @@ private:
     };
     uint32_t renderPages(LandscapeResidency &residency, const ccstd::vector<VTPageAddress> &pages, uint32_t maxPages);
     bool initResources(const LandscapeAsset &asset, LandscapeResidency &residency, const MaterialLibrary &materials, DecalRenderer &decals, uint32_t atlasSize, bool compressed);
+    bool validateRootCapacity() const;
     int allocate(VTPageAddress address);
     uint32_t sourceLevel(float size) const;
     bool hasCliff(LandscapeRegion region) const;

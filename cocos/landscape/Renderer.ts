@@ -3,7 +3,7 @@ import { Material, Texture2D } from '../asset/assets';
 import { RenderingSubMesh } from '../asset/assets/rendering-sub-mesh';
 import { AABB, Frustum, intersect } from '../core/geometry';
 import { Vec3, Vec4 } from '../core/math';
-import { error, log } from '../core/platform/debug';
+import { assert, error, log } from '../core/platform/debug';
 import { director } from '../game/director';
 import { CullMode, Format, FormatFeatureBit, Sampler, Texture } from '../gfx';
 import { Model } from '../render-scene/scene/model';
@@ -11,7 +11,7 @@ import { Pass } from '../render-scene/core/pass';
 import { RenderScene } from '../render-scene/core/render-scene';
 import { Node } from '../scene-graph/node';
 import { LandscapeAsset } from './Asset';
-import { LandscapeData, LandscapeDebugData, LandscapeGridParams, LandscapeRegion, NodeAddress, NodeKey, QuadNode, ReadonlyVTGridMapping, VTPageAddress, VTPageLayout } from './Data';
+import { LandscapeData, LandscapeDebugData, LandscapeGridParams, LandscapeRegion, NodeKey, QuadNode, ReadonlyVTGridMapping, VTPageLayout } from './Data';
 import { bindLandscapeModelTextures, DecalRenderer, setLandscapeInstanceAttribute } from './DecalRenderer';
 import { GridMesh } from './GridMesh';
 import { MaterialLibrary } from './MaterialLibrary';
@@ -28,7 +28,7 @@ export interface LandscapeRenderNode {
 interface GridDraw {
     model: Model;
     params: LandscapeGridParams; // Uploaded instance data, restored after material variants change.
-    mapping: number; // VTPageTable slot, allocated with the draw.
+    pageTableSlot: number; // Allocated with the draw.
 }
 
 function applyGridParams (model: Model, scratch: Float32Array, params: LandscapeGridParams): void {
@@ -121,25 +121,6 @@ export class LandscapeRenderer {
         if (!this._vt.init(asset, this._residency, this._materials, this._decals, this._atlasSize)) {
             return false;
         }
-        // Root coverage and each root's worst-case composition footprint must
-        // fit before publishing this renderer. Smaller devices retain the same rules.
-        const rootKeys = new Set<NodeKey>();
-        for (let z = 0; z < this._data.sectorsZ; ++z) {
-            for (let x = 0; x < this._data.sectorsX; ++x) {
-                rootKeys.add(new NodeAddress(this._data.maxTileLevel, x, z).key());
-            }
-        }
-        const layout = new VTPageLayout(this._data.sectorSize);
-        for (let z = 0; z < this._data.sectorsZ; ++z) {
-            for (let x = 0; x < this._data.sectorsX; ++x) {
-                const inputs: NodeAddress[] = [];
-                this._vt.selectSources(new VTPageAddress(layout.rootLevel(), x, z), true, true).appendTo(inputs);
-                if (rootKeys.size + inputs.filter((source) => !rootKeys.has(source.key())).length > layers) {
-                    error('[Landscape] Device capacity cannot compose sector roots');
-                    return false;
-                }
-            }
-        }
         this.bindRuntimeTextures();
         this.updateMaterialProperties();
         if (config.LANDSCAPE_DEBUG) {
@@ -171,7 +152,7 @@ export class LandscapeRenderer {
     }
 
     // Render data and pass collection.
-    public prepareRenderData (frame: number, previousMappings: Texture, updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
+    public prepareRenderData (frame: number, previousMappings: Texture, added: readonly LandscapeRenderNode[], updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
         if (previousMappings !== this._vt!.pageTable().texture()) {
             this.bindRuntimeTextures();
         }
@@ -180,8 +161,8 @@ export class LandscapeRenderer {
             this._decals.setEnabled(this._debugData.decal3DEnabled);
             this._decals.setWireframe(this._debugData.wireframe);
         }
-        if (updated.length || removed.length) {
-            this.syncTerrainModels(updated, removed);
+        if (added.length || updated.length || removed.length) {
+            this.syncTerrainModels(added, updated, removed);
         }
         if (this._materialsDirty) {
             this.refreshTerrainMaterials();
@@ -209,26 +190,26 @@ export class LandscapeRenderer {
             return !!intersect.aabbFrustum(bounds, frustum);
         }
         const draw = this._draws.get(address.key());
-        if (!draw) {
-            return false;
-        }
+        assert(draw !== undefined, '[Landscape] Renderable node must have a draw record');
         const model = draw.model;
+        assert(model != null, '[Landscape] Renderable node must have a model');
         const visible = intersect.aabbFrustum(model.worldBounds!, frustum);
         if (visible && model.enabled && (!shadow || model.castShadow)) {
             models.push(model);
         }
         if (this._debugData.decal3DEnabled) {
-            if (!visible) {
+            let decalsVisible = !!visible;
+            if (!decalsVisible) {
                 const bounds = model.worldBounds!.clone();
                 bounds.center.y += lift * 0.5;
                 bounds.halfExtents.y += lift * 0.5;
-                if (!intersect.aabbFrustum(bounds, frustum)) {
-                    return false;
-                }
+                decalsVisible = !!intersect.aabbFrustum(bounds, frustum);
             }
-            this._decals.collectPassModels(node, frustum, shadow, models);
+            if (decalsVisible) {
+                this._decals.collectPassModels(node, frustum, shadow, models);
+            }
         }
-        return true;
+        return false;
     }
 
     // Runtime settings.
@@ -320,7 +301,7 @@ export class LandscapeRenderer {
     }
 
     // Terrain models.
-    private syncTerrainModels (updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
+    private syncTerrainModels (added: readonly LandscapeRenderNode[], updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
         const table = this._vt!.pageTable();
         const changed: number[] = [];
         for (const key of removed) {
@@ -331,31 +312,36 @@ export class LandscapeRenderer {
             }
             this._decals.removeNode(key);
         }
-        for (const renderable of updated) {
+        const updateDraw = (renderable: LandscapeRenderNode, draw: GridDraw): void => {
             const key = renderable.geometry.address().key();
-            let draw = this._draws.get(key);
-            if (!draw) {
-                draw = { model: this._pool.pop() || this.createModel(), mapping: table.allocate(), params: new LandscapeGridParams() };
-                this._draws.set(key, draw);
-            }
-            if (table.update(draw.mapping, renderable.material, this._vt!)) {
-                changed.push(draw.mapping);
+            if (table.update(draw.pageTableSlot, renderable.material, this._vt!)) {
+                changed.push(draw.pageTableSlot);
             }
             const node = renderable.geometry;
-            const params = this.resolveGridParams(node, draw.mapping, renderable.edgeMask);
+            const params = this.resolveGridParams(node, draw.pageTableSlot, renderable.edgeMask);
             draw.params = params;
             this.updateModel(draw.model, node, params);
             const region = this._data.nodeRegion(node.address());
             this._decals.updateNode({ nodeKey: key, region, minY: node.minY, maxY: node.maxY, gridParams: params });
+        };
+        for (const renderable of added) {
+            const key = renderable.geometry.address().key();
+            const draw = { model: this._pool.pop() || this.createModel(), pageTableSlot: table.allocate(), params: new LandscapeGridParams() };
+            this._draws.set(key, draw);
+            updateDraw(renderable, draw);
+        }
+        for (const renderable of updated) {
+            const draw = this._draws.get(renderable.geometry.address().key())!;
+            updateDraw(renderable, draw);
         }
         table.upload(changed);
     }
 
-    private resolveGridParams (node: QuadNode, mapping: number, edgeMask: number): LandscapeGridParams {
+    private resolveGridParams (node: QuadNode, pageTableSlot: number, edgeMask: number): LandscapeGridParams {
         const result = new LandscapeGridParams();
         const region = this._data.nodeRegion(node.address());
         result.grid.set(region.x, region.z, region.size, node.level);
-        result.mapping.set(mapping, edgeMask, 0, 0);
+        result.mapping.set(pageTableSlot, edgeMask, 0, 0);
         const tile = this._residency.resolve(node.address());
         if (tile.layer < 0) {
             throw new Error('Landscape unprepared exact height source');
@@ -392,7 +378,7 @@ export class LandscapeRenderer {
     private recycleModel (draw: GridDraw): void {
         draw.model.enabled = false;
         this._pool.push(draw.model);
-        this._vt!.pageTable().release(draw.mapping);
+        this._vt!.pageTable().release(draw.pageTableSlot);
     }
 
     private forEachModel (visit: (model: Model) => void): void {

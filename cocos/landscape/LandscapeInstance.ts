@@ -259,7 +259,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
     // Once before all cameras, while the render command buffer is recording.
     public prepareRenderData (): void {
         this._schedule!.prepareRenderData(director.getTotalFrames());
-        this._schedule!.beginPasses();
     }
 
     // Per camera, after its light frusta are updated. Shared geometry stays unchanged.
@@ -271,11 +270,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         this.addPass(camera.frustum, false);
         const cascades = this.addShadowPasses(sceneData);
         this.collectPassModels(cascades);
-    }
-
-    // Once after all cameras, to finalize the collected morph diagnostics.
-    public endPasses (): void {
-        this._schedule!.endPasses();
     }
 
     private collectPassModels (cascades: number): void {
@@ -301,7 +295,6 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
 
     private addPass (frustum: Readonly<Frustum>, shadow: boolean): void {
         this._passes.push({ frustum, shadow, models: [] });
-        this._schedule!.addPass(frustum, !shadow);
     }
 
     private addShadowPasses (sceneData: PipelineSceneData): number {
@@ -444,7 +437,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         }
         const colors = [[1, 0.15, 0.15], [0.15, 0.9, 0.2], [0.2, 0.45, 1], [1, 0.9, 0.1], [1, 0.15, 0.9], [0.1, 0.9, 0.95], [0.65, 0.35, 0.85], [0.95, 0.55, 0.2], [0.9, 0.9, 0.9]].map(([r, g, b]) => new Color(r * 255, g * 255, b * 255, 255));
         const origin = this._node!.worldPosition;
-        this._schedule!.visitDebugNodes(camera.frustum, origin, (node, region) => {
+        this._schedule!.forEachVisibleNode(camera.frustum, origin, (node, region) => {
             const half = region.size * 0.5;
             for (let quadrant = 0; quadrant < 4; ++quadrant) {
                 const x = region.x + (quadrant & 1) * half;

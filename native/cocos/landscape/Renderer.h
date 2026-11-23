@@ -80,7 +80,7 @@ public:
     void destroy();
 
     // Render data and pass collection.
-    void prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
+    void prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
     bool collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
 
     // Runtime settings.
@@ -104,15 +104,15 @@ public:
 
 private:
     struct GridDraw {
-        // GPU state; geometry and mapping decisions belong to Quadtree.
-        int mapping{-1}; // VTPageTable slot; -1 means unallocated.
+        // GPU state; draw snapshots come from RenderTree, resource mappings from Schedule.
+        int pageTableSlot{-1}; // -1 means unallocated.
         IntrusivePtr<scene::Model> model;
         LandscapeGridParams params; // Uploaded instance data, restored after material variants change.
     };
 
     // Terrain models.
-    void syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
-    LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask);
+    void syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
+    LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t pageTableSlot, uint8_t edgeMask);
     void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
     IntrusivePtr<scene::Model> createModel();

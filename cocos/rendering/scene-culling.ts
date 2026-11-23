@@ -153,7 +153,7 @@ export function shadowCulling (camera: Camera, sceneData: PipelineSceneData, lay
     }
 }
 
-export function prepareLandscapes (cameras: readonly Camera[]): LandscapeInstance[] {
+export function prepareLandscapes (cameras: readonly Camera[]): void {
     const prepared: LandscapeInstance[] = [];
     for (const camera of cameras) {
         if (!camera.scene) {
@@ -166,7 +166,6 @@ export function prepareLandscapes (cameras: readonly Camera[]): LandscapeInstanc
             }
         }
     }
-    return prepared;
 }
 
 export function sceneCulling (sceneData: PipelineSceneData, pipelineUBO: PipelineUBO, camera: Camera): void {

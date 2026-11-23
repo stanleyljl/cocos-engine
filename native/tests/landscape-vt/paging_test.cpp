@@ -225,7 +225,7 @@ VTGridMapping testMapping(NodeAddress address) {
     return mapping;
 }
 
-class TreeFixture final : public Quadtree {
+class TreeFixture final : public TargetTree {
 public:
     void init(const LandscapeData &data, bool initializeResources = true) {
         ccstd::vector<ccstd::vector<HeightRange>> ranges(data.maxTileLevel + 1U);
@@ -237,7 +237,11 @@ public:
         // through the existing views, then exercise the public initialization path.
         const_cast<LandscapeData &>(asset.data()) = data;
         const_cast<ccstd::vector<ccstd::vector<HeightRange>> &>(asset.heightRanges()) = ranges;
-        Quadtree::init(asset);
+        TargetTree::init(asset);
+        _materials.clear();
+        _render = RenderTree{};
+        _changes = {};
+        _changed.clear();
         if (initializeResources) {
             for (uint32_t z = 0; z < data.sectorsZ; ++z) {
                 for (uint32_t x = 0; x < data.sectorsX; ++x) {
@@ -248,6 +252,85 @@ public:
             require(selectRenderables(), "Initial sector coverage");
         }
     }
+    bool updateTarget(const cc::Vec3 &camera, const cc::Vec3 &origin) {
+        _viewChanged = TargetTree::updateTarget(camera, origin);
+        return _viewChanged;
+    }
+    bool viewChanged() const { return _viewChanged; }
+    bool ready(NodeAddress address) const { return _materials.count(address.key()) != 0; }
+    const VTGridMapping &material(NodeAddress address) const { return _materials.at(address.key()); }
+    bool isInTargetTree(NodeAddress address) const { return find(address) != nullptr; }
+    bool publish(NodeAddress address, VTGridMapping mapping) {
+        if (!find(address) || address.level > data().maxTileLevel || mapping.pages.empty()) {
+            return false;
+        }
+        if (address.level < data().maxTileLevel && !ready(address.ancestor(address.level + 1))) {
+            return false;
+        }
+        _materials[address.key()] = std::move(mapping);
+        return true;
+    }
+    bool sectorRootsReady() const {
+        for (uint32_t z = 0; z < data().sectorsZ; ++z) {
+            for (uint32_t x = 0; x < data().sectorsX; ++x) {
+                if (!ready({data().maxTileLevel, x, z})) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    bool selectRenderables() {
+        _changes = _render.select(*this, [&](NodeAddress address) { return ready(address) ? &_materials.at(address.key()) : nullptr; });
+        _changed.insert(_changes.added.begin(), _changes.added.end());
+        _changed.insert(_changes.updated.begin(), _changes.updated.end());
+        _changed.insert(_changes.removed.begin(), _changes.removed.end());
+        for (auto it = _materials.begin(); it != _materials.end();) {
+            if (!find(NodeAddress::fromKey(it->first))) {
+                it = _materials.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return !_render.empty();
+    }
+    ccstd::vector<NodeAddress> requests() const {
+        ccstd::vector<NodeAddress> missing;
+        ccstd::vector<NodeAddress> refresh;
+        traverse([&](const Node &node) {
+            const auto address = node.geometry.address();
+            if (address.level > data().maxTileLevel) {
+                return true;
+            }
+            if (!ready(address)) {
+                missing.push_back(address);
+                return false;
+            }
+            if (findRenderable(address) || !node.children) {
+                refresh.push_back(address);
+            }
+            return node.children != nullptr;
+        });
+        const auto priority = [](NodeAddress a, NodeAddress b) { return a.key() < b.key(); };
+        std::sort(missing.begin(), missing.end(), priority);
+        std::sort(refresh.begin(), refresh.end(), priority);
+        missing.insert(missing.end(), refresh.begin(), refresh.end());
+        return missing;
+    }
+    const RenderTree::Node *findRenderable(NodeAddress address) const { return _render.findRenderable(address); }
+    void forEachRenderableNode(const std::function<void(const RenderTree::Node &)> &visit) const { _render.forEachRenderableNode(visit); }
+    void traverseRenderNodes(const std::function<bool(const RenderTree::Node &)> &visit) const { _render.traverse(visit); }
+    const ccstd::unordered_set<uint64_t> &changedNodes() const { return _changed; }
+    void clearChangedNodes() { _changed.clear(); }
+    bool renderSelectionChanged() const { return !_changes.added.empty() || !_changes.removed.empty(); }
+
+private:
+    RenderTree _render;
+    ccstd::unordered_map<uint64_t, VTGridMapping> _materials;
+    RenderTree::Changes _changes;
+    ccstd::unordered_set<uint64_t> _changed;
+    bool _viewChanged{false};
+
 };
 
 // Test inputs describe narrow camera frusta, not a second production tree.
@@ -256,9 +339,9 @@ struct CameraView {
     ccstd::vector<QuadNode> surface;
 };
 
-void applyView(Quadtree &tree, const CameraView &view) {
+void applyView(TreeFixture &tree, const CameraView &view) {
     ccstd::unordered_map<uint64_t, uint8_t> previous;
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         const auto address = node.geometry.address();
         previous.emplace(address.key(), node.edgeMask);
     });
@@ -278,7 +361,7 @@ void applyView(Quadtree &tree, const CameraView &view) {
             require(tree.changedNodes().count(entry.first) != 0, "Deleted target draw lost its retirement notification");
         }
     }
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         const auto address = node.geometry.address();
         const auto old = previous.find(address.key());
         const auto edges = node.edgeMask;
@@ -288,40 +371,40 @@ void applyView(Quadtree &tree, const CameraView &view) {
     });
 }
 
-// Compare topology independently of the material records now owned by Quadtree.
-ccstd::unordered_set<uint64_t> renderableKeys(const Quadtree &tree) {
+// Compare topology independently of the fixture-owned resource records.
+ccstd::unordered_set<uint64_t> renderableKeys(const TreeFixture &tree) {
     ccstd::unordered_set<uint64_t> result;
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         result.insert(node.geometry.address().key());
     });
     return result;
 }
 
-ccstd::unordered_set<uint64_t> targetKeys(const Quadtree &tree) {
+ccstd::unordered_set<uint64_t> targetKeys(const TreeFixture &tree) {
     ccstd::unordered_set<uint64_t> result;
-    tree.forEachNode([&](const Quadtree::Node &node) {
-        if (!node.refined) {
+    tree.traverse([&](const auto &node) {
+        if (!node.children) {
             result.insert(node.geometry.address().key());
         }
-        return node.refined;
+        return node.children != nullptr;
     });
     return result;
 }
 
 // Inspect coverage through public traversal rather than exposing engine internals.
-NodeAddress rootAddress(const Quadtree &tree) {
+NodeAddress rootAddress(const TreeFixture &tree) {
     NodeAddress root;
-    tree.forEachNode([&](const Quadtree::Node &node) {
+    tree.traverse([&](const auto &node) {
         root = node.geometry.address();
         return false;
     });
     return root;
 }
 
-NodeAddress renderableAt(const Quadtree &tree, uint32_t x, uint32_t z) {
+NodeAddress renderableAt(const TreeFixture &tree, uint32_t x, uint32_t z) {
     NodeAddress result;
     bool found = false;
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         const auto address = node.geometry.address();
         if ((x >> address.level) == address.x && (z >> address.level) == address.z) {
             require(!found, "Multiple render nodes cover the same point");
@@ -334,9 +417,9 @@ NodeAddress renderableAt(const Quadtree &tree, uint32_t x, uint32_t z) {
 }
 
 // Verify changed-node notifications independently of the production selection.
-void selectAndCheckChanges(Quadtree &tree) {
+void selectAndCheckChanges(TreeFixture &tree) {
     ccstd::unordered_map<uint64_t, uint8_t> previous;
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         const auto address = node.geometry.address();
         previous.emplace(address.key(), node.edgeMask);
     });
@@ -347,24 +430,24 @@ void selectAndCheckChanges(Quadtree &tree) {
             require(tree.changedNodes().count(entry.first) != 0, "Removed draw was not reported");
         }
     }
-    tree.forEachRenderable([&](const Quadtree::Node &node) {
+    tree.forEachRenderableNode([&](const auto &node) {
         const auto address = node.geometry.address();
         const auto old = previous.find(address.key());
         const auto edges = node.edgeMask;
-        require(node.ready(), "Selected node is not ready");
+        require(!node.material.pages.empty(), "Selected node is not ready");
         if (old == previous.end() || old->second != edges) {
             require(tree.changedNodes().count(address.key()) != 0, "Morph neighbor notification was lost");
         }
     });
 }
 
-void checkCut(const Quadtree &selection, const LandscapeData &data, bool target);
+void checkCut(const TreeFixture &selection, const LandscapeData &data, bool target);
 
-void completeTarget(Quadtree &tree, const LandscapeData &data) {
+void completeTarget(TreeFixture &tree, const LandscapeData &data) {
     for (uint32_t step = 0; step < 4096; ++step) {
         bool loaded = false;
         for (const auto &request : tree.requests()) {
-            if (!tree.find(request)->ready()) {
+            if (!tree.ready(request)) {
                 require(tree.publish(request, testMapping(request)), "Parent must precede child readiness");
                 loaded = true;
             }
@@ -664,7 +747,7 @@ void testRegionalInvalidation() {
 
 // Independent raster oracle: full coverage, no overlaps, 2:1 at EVERY cell
 // boundary, and no avoidable coarse draws. Does not use production edge masks.
-void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = false) {
+void checkCut(const TreeFixture &selection, const LandscapeData &d, bool target = false) {
     const auto keys = target ? targetKeys(selection) : renderableKeys(selection);
     const uint32_t w = d.sectorsX << d.maxTileLevel, h = d.sectorsZ << d.maxTileLevel;
     std::vector<int> cells(w * h, -1);
@@ -698,7 +781,7 @@ void checkCut(const Quadtree &selection, const LandscapeData &d, bool target = f
     for (const auto key : keys) {
         const auto address = NodeAddress::fromKey(key);
         const auto &node = *selection.find(address);
-        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [](const Quadtree::Node &child) { return child.ready(); })) {
+        if (!node.children || !std::all_of(node.children.get(), node.children.get() + 4, [&](const auto &child) { return selection.ready(child.geometry.address()); })) {
             continue;
         }
         const uint32_t x = address.x << address.level;
@@ -732,7 +815,7 @@ double sourceHeight(const LandscapeData &d, NodeAddress geometry, double x, doub
     return ((1 - tx) * stored(x0, z0) + tx * stored(x1, z0)) * (1 - tz) + ((1 - tx) * stored(x0, z1) + tx * stored(x1, z1)) * tz;
 }
 
-void checkStitchedEdges(const Quadtree &selection, const LandscapeData &d) {
+void checkStitchedEdges(const TreeFixture &selection, const LandscapeData &d) {
     ccstd::vector<QuadNode> nodes;
     for (const auto key : renderableKeys(selection)) {
         const auto n = NodeAddress::fromKey(key);
@@ -800,7 +883,7 @@ public:
             return true;
         }
         for (const auto &entry : tree.requests()) {
-            if (tree.find(entry)->ready()) {
+            if (tree.ready(entry)) {
                 continue;
             }
             if (reserve(entry)) {
@@ -834,17 +917,17 @@ public:
 
     void check() const {
         checkCut(tree, data);
-        tree.forEachNode([&](const Quadtree::Node &node) {
-            if (!node.ready()) {
+        tree.traverse([&](const auto &node) {
+            if (!tree.ready(node.geometry.address())) {
                 return true;
             }
             const auto address = node.geometry.address();
             if (address.level < data.maxTileLevel) {
-                require(tree.find(address.ancestor(address.level + 1))->ready(), "Ready ancestor invariant violated");
+                require(tree.ready(address.ancestor(address.level + 1)), "Ready ancestor invariant violated");
             }
             const auto source = address.ancestor(std::max(address.level, data.minTileLevel));
             require(residency.resident(source) >= 0, "Ready node lost its exact height source");
-            for (const auto page : node.material.pages) {
+            for (const auto page : tree.material(node.geometry.address()).pages) {
                 require(pages.resolve(page) >= 0, "Ready ancestor lost its material page");
             }
             return true;
@@ -862,8 +945,8 @@ public:
             }
             material.push_back({address.level, address.x, address.z});
         };
-        tree.forEachNode([&](const Quadtree::Node &node) {
-            if (node.ready()) {
+        tree.traverse([&](const auto &node) {
+            if (tree.ready(node.geometry.address())) {
                 add(node.geometry.address());
             }
             return true;
@@ -964,7 +1047,7 @@ void testSingleRoot() {
                 if (tree.find(node->children[q].geometry.address())) {
                     mask |= static_cast<uint8_t>(1U << q);
                 } else {
-                    require(!node->children[q].children && !node->children[q].ready(), "Empty sector must not allocate descendants or load resources");
+                    require(!node->children[q].children && !tree.ready(node->children[q].geometry.address()), "Empty sector must not allocate descendants or load resources");
                 }
             }
             return mask;
@@ -977,7 +1060,7 @@ void testSingleRoot() {
         }
         require(rootAddress(tree).level == d.maxTileLevel + levels, "Incorrect padded global root");
         uint32_t renderableCount = 0;
-        tree.cull([&](const Quadtree::Node &treeNode) {
+        tree.traverseRenderNodes([&](const auto &treeNode) {
             const auto node = treeNode.geometry.address();
             if (treeNode.renderable) {
                 ++renderableCount;
@@ -1028,7 +1111,7 @@ void testReadySelection() {
     require(!tree.publish({0, 7, 0}, testMapping({0, 7, 0})), "Child became ready before its ancestor");
     auto &sector = *tree.find({3, 0, 0});
     for (uint32_t q = 0; q < 4; ++q) {
-        require(!sector.children[q].ready(), "New target nodes must start unready");
+        require(!tree.ready(sector.children[q].geometry.address()), "New target nodes must start unready");
     }
     selectAndCheckChanges(tree);
     require(renderableKeys(tree) == roots, "Unpublished children must not replace the parent");
@@ -1041,14 +1124,14 @@ void testReadySelection() {
     const auto fourth = sector.children[3].geometry.address();
     require(tree.publish(fourth, testMapping(fourth)), "Publish last sibling");
     selectAndCheckChanges(tree);
-    require(sector.ready() && !sector.renderable && !sector.material.pages.empty(), "Refinement released its ready ancestor");
+    require(tree.ready(sector.geometry.address()) && !tree.findRenderable(sector.geometry.address()), "Refinement released its ready ancestor");
     checkCut(tree, data);
     // Load only one sector deeply. Neighbor roots stay coarse, so selection must
     // retain coarse render nodes despite ready fine resources at the boundary.
     for (uint32_t round = 0; round < 4; ++round) {
         for (const auto &request : tree.requests()) {
             const auto owner = request.ancestor(data.maxTileLevel);
-            if (owner.x == 0 && owner.z == 0 && !tree.find(request)->ready()) {
+            if (owner.x == 0 && owner.z == 0 && !tree.ready(request)) {
                 require(tree.publish(request, testMapping(request)), "Load fine boundary resources");
             }
         }
@@ -1056,7 +1139,7 @@ void testReadySelection() {
         checkCut(tree, data);
         checkStitchedEdges(tree, data);
     }
-    require(tree.find({0, 7, 0})->ready() && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
+    require(tree.ready({0, 7, 0}) && renderableAt(tree, 7, 0).level >= 2, "Selection refined past a coarse neighbor at the sector boundary");
     require(targetKeys(tree) == target, "Resource readiness rewrote the distance target");
     completeTarget(tree, data);
     checkCut(tree, data);
@@ -1064,10 +1147,10 @@ void testReadySelection() {
     require(renderableKeys(tree) == target, "Ready balanced target must retain all requested detail");
     applyView(tree, {});
     selectAndCheckChanges(tree);
-    require(renderableKeys(tree) == roots && !sector.children && sector.ready(), "Coarsening must retain the parent and reclaim descendants");
+    require(renderableKeys(tree) == roots && !sector.children && tree.ready(sector.geometry.address()), "Coarsening must retain the parent and reclaim descendants");
     applyView(tree, near);
     const NodeAddress pending{2, 0, 0};
-    require(tree.find(pending) && !tree.find(pending)->ready(), "Prepare moving-view load");
+    require(tree.find(pending) && !tree.ready(pending), "Prepare moving-view load");
     applyView(tree, {});
     selectAndCheckChanges(tree);
     require(!tree.find(pending) && !tree.publish(pending, testMapping(pending)), "Retired request resurrected an obsolete node");
@@ -1096,7 +1179,7 @@ void testUpdateStages() {
     // selection is needed to request the next generation of resources.
     for (uint32_t level = 0; level < data.maxTileLevel; ++level) {
         for (const auto &request : tree.requests()) {
-            if (!tree.find(request)->ready()) {
+            if (!tree.ready(request)) {
                 require(tree.publish(request, testMapping(request)), "Prepare descendants before selecting draws");
             }
         }
@@ -1110,6 +1193,7 @@ void testUpdateStages() {
     tree.clearChangedNodes();
     tree.updateTarget({0, tree.lodMorphRanges().back().end * 4, 0}, cc::Vec3::ZERO);
     require(tree.changedNodes().empty(), "Target update performed render synchronization");
+    require(renderableKeys(tree) == old, "Target deletion invalidated the committed render snapshot");
     require(tree.selectRenderables(), "Select coarse coverage after target deletion");
     for (const auto key : old) {
         if (!tree.findRenderable(NodeAddress::fromKey(key))) {
@@ -1132,7 +1216,7 @@ void testCommittedVisibility() {
     // The frustum-like box at Y=[1,4] rejects the fine target, not the coarse draw.
     const auto visible = [&](double x0, double z0, double x1, double z1) {
         ccstd::unordered_set<uint64_t> result;
-        selection.cull([&](const Quadtree::Node &treeNode) {
+        selection.traverseRenderNodes([&](const auto &treeNode) {
             const auto n = treeNode.geometry.address();
             const double size = selection.region(n).size;
             const double lowX = n.x * size;
@@ -1163,7 +1247,7 @@ void testCommittedVisibility() {
     require(shadow.size() == 1 && shadow.count(NodeAddress{5, 1, 1}.key()),
             "Pass visibility leaked the main camera's target selection");
     uint32_t visited = 0;
-    selection.cull([&](const Quadtree::Node &treeNode) {
+    selection.traverseRenderNodes([&](const auto &treeNode) {
         const auto n = treeNode.geometry.address();
         ++visited;
         require(n.level == rootAddress(selection).level, "Rejected root still traversed its children");
@@ -1292,22 +1376,25 @@ void testMaterialPublication() {
     completeTarget(tree, data);
     const auto before = renderableKeys(tree);
     const auto address = NodeAddress::fromKey(*before.begin());
-    auto *node = tree.find(address);
+    const auto *node = tree.findRenderable(address);
     const auto oldMaterial = node->material;
     auto replacement = testMapping(address.ancestor(data.maxTileLevel));
-    require(node->ready() && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
+    require(tree.ready(address) && node->material.pages.front().key() == oldMaterial.pages.front().key(), "Prepared mapping changed a drawable node");
     tree.clearChangedNodes();
     require(tree.publish(address, replacement), "Material refresh publication failed");
+    require(node->material.pages.front().key() == oldMaterial.pages.front().key(), "Pending render commit changed the old snapshot");
+    require(tree.selectRenderables(), "Commit refreshed material snapshot");
+    node = tree.findRenderable(address);
     require(renderableKeys(tree) == before && tree.changedNodes().size() == 1 && tree.changedNodes().count(address.key()), "Material refresh changed topology or missed notification");
     require(node->material.pages.front().key() == replacement.pages.front().key(), "New mapping was not published");
     ccstd::unordered_set<uint64_t> refresh;
     for (const auto &request : tree.requests()) {
-        if (tree.find(request)->ready()) {
+        if (tree.ready(request)) {
             require(refresh.insert(request.key()).second, "Duplicate material refresh request");
         }
     }
     auto expectedRefresh = before;
-    tree.forEachNode([&](const Quadtree::Node &entry) {
+    tree.traverse([&](const auto &entry) {
         if (!entry.children) {
             expectedRefresh.insert(entry.geometry.address().key());
         }
@@ -1334,11 +1421,11 @@ void testDistanceTargets() {
         require(tree.selectRenderables(), "Select draws after updating the distance target");
         ccstd::unordered_set<uint64_t> splits;
         for (const auto &candidate : tree.requests()) {
-            if (!tree.find(candidate)->ready()) {
+            if (!tree.ready(candidate)) {
                 splits.insert(candidate.ancestor(data.maxTileLevel).key());
             }
         }
-        tree.forEachRenderable([&](const Quadtree::Node &renderable) {
+        tree.forEachRenderableNode([&](const auto &renderable) {
             const auto node = renderable.geometry.address();
             bool refine = false;
             for (uint32_t q = 0; q < 4; ++q) {
@@ -1759,7 +1846,7 @@ std::string pagingParityTrace() {
                 }
                 uint32_t completed = 0;
                 for (const auto address : tree.requests()) {
-                    if (completed < budget && !tree.find(address)->ready()) {
+                    if (completed < budget && !tree.ready(address)) {
                         require(tree.publish(address, testMapping(address)), "Parity publication failed");
                         ++completed;
                     }
@@ -1770,13 +1857,13 @@ std::string pagingParityTrace() {
                 std::vector<std::string> target;
                 std::vector<std::string> draw;
                 std::vector<std::string> changed;
-                tree.forEachNode([&](const Quadtree::Node &node) {
+                tree.traverse([&](const auto &node) {
                     if (!node.children) {
                         target.push_back(parityAddress(node.geometry.address()));
                     }
                     return true;
                 });
-                tree.forEachRenderable([&](const Quadtree::Node &node) {
+                tree.forEachRenderableNode([&](const auto &node) {
                     draw.push_back(parityAddress(node.geometry.address()) + ":" + std::to_string(node.edgeMask));
                 });
                 for (const auto key : tree.changedNodes()) {
@@ -1785,13 +1872,13 @@ std::string pagingParityTrace() {
                 trace << "frame " << cancelled << ' ' << completed << ' ' << tree.renderSelectionChanged();
                 trace << " target=" << parityList(target) << " draw=" << parityList(draw) << " changed=" << parityList(changed) << " requests=";
                 for (const auto address : tree.requests()) {
-                    trace << parityAddress(address) << ':' << tree.find(address)->ready() << ',';
+                    trace << parityAddress(address) << ':' << tree.ready(address) << ',';
                 }
                 trace << '\n';
             }
         } else if (command == "replace") {
             std::optional<NodeAddress> first;
-            tree.forEachRenderable([&](const Quadtree::Node &node) {
+            tree.forEachRenderableNode([&](const auto &node) {
                 if (!first) {
                     first = node.geometry.address();
                 }

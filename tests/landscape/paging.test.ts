@@ -3,7 +3,7 @@ import { Vec3 } from '../../cocos/core/math';
 import type { LandscapeAsset } from '../../cocos/landscape/Asset';
 import { HeightRange, LandscapeData, NodeAddress, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from '../../cocos/landscape/Data';
 import { LandscapeResidency } from '../../cocos/landscape/Residency';
-import { Quadtree } from '../../cocos/landscape/Quadtree';
+import { TargetTree, RenderTree, RenderTreeNode } from '../../cocos/landscape/Quadtree';
 import { PageState, VTPage, VTCapacityQuery, VTRenderer } from '../../cocos/landscape/VTRenderer';
 
 function requireCondition (condition: boolean, message: string): void {
@@ -229,11 +229,99 @@ test('CPU cliff estimates use height span and region size including gutters', ()
 
 // Independent cell rasterization checks coverage and every neighboring LOD pair.
 // Expected topology and edge masks additionally come from the common native trace.
-function checkCut (tree: Quadtree, data: LandscapeData): void {
+class TreeFixture extends TargetTree {
+    public render = new RenderTree();
+    public readonly materials = new Map<string, VTGridMapping>();
+    private _changed = new Set<string>();
+    private _selectionChanged = false;
+
+    public init (asset: LandscapeAsset): void {
+        super.init(asset);
+        this.render = new RenderTree();
+        this.materials.clear();
+        this._changed.clear();
+    }
+
+    public ready (address: NodeAddress): boolean {
+        return this.materials.has(address.key());
+    }
+
+    public isInTargetTree (address: NodeAddress): boolean {
+        return this.find(address) !== null;
+    }
+
+    public publish (address: NodeAddress, material: VTGridMapping): boolean {
+        if (!this.find(address) || address.level > this.data().maxTileLevel || !material.pages.length) {
+            return false;
+        }
+        if (address.level < this.data().maxTileLevel && !this.ready(address.ancestor(address.level + 1))) {
+            return false;
+        }
+        this.materials.set(address.key(), material);
+        return true;
+    }
+
+    public selectRenderables (): boolean {
+        const changes = this.render.select(this, (address) => this.materials.get(address.key()) ?? null);
+        this._selectionChanged = changes.added.length > 0 || changes.removed.length > 0;
+        for (const key of changes.added.concat(changes.updated, changes.removed)) {
+            this._changed.add(key);
+        }
+        for (const key of this.materials.keys()) {
+            if (!this.find(NodeAddress.fromKey(key))) {
+                this.materials.delete(key);
+            }
+        }
+        return !this.render.empty();
+    }
+
+    public requests (): NodeAddress[] {
+        const missing: NodeAddress[] = [];
+        const refresh: NodeAddress[] = [];
+        this.traverse((node) => {
+            const address = node.geometry.address();
+            if (address.level > this.data().maxTileLevel) {
+                return true;
+            }
+            if (!this.ready(address)) {
+                missing.push(address);
+                return false;
+            }
+            if (this.findRenderable(address) || !node.children) {
+                refresh.push(address);
+            }
+            return node.children !== null;
+        });
+        const priority = (a: NodeAddress, b: NodeAddress): number => a.level - b.level || a.x - b.x || a.z - b.z;
+        return missing.sort(priority).concat(refresh.sort(priority));
+    }
+
+    public findRenderable (address: NodeAddress): RenderTreeNode | null {
+        return this.render.findRenderable(address);
+    }
+
+    public forEachRenderableNode (visit: (node: RenderTreeNode) => void): void {
+        this.render.forEachRenderableNode(visit);
+    }
+
+    public clearChangedNodes (): void {
+        this._changed.clear();
+    }
+
+    public changedNodes (): ReadonlySet<string> {
+        return this._changed;
+    }
+
+    public renderSelectionChanged (): boolean {
+        return this._selectionChanged;
+    }
+}
+
+function checkCut (tree: TreeFixture, data: LandscapeData): void {
     const width = data.sectorsX * 2 ** data.maxTileLevel;
     const depth = data.sectorsZ * 2 ** data.maxTileLevel;
     const cells = new Int32Array(width * depth).fill(-1);
-    tree.forEachRenderable((node) => {
+    tree.forEachRenderableNode((node) => {
         const address = node.geometry.address();
         requireCondition(tree.findRenderable(address) === node, 'Draw lookup differs from traversal');
         const side = 2 ** address.level;
@@ -252,8 +340,9 @@ function checkCut (tree: Quadtree, data: LandscapeData): void {
             requireCondition(z === 0 || Math.abs(level - cells[(z - 1) * width + x]) <= 1, 'Vertical 2:1 violation');
         }
     }
-    tree.forEachRenderable((node) => {
-        if (!node.children || !node.children.every((child) => child.ready())) {
+    tree.forEachRenderableNode((node) => {
+        const target = tree.find(node.geometry.address())!;
+        if (!target.children || !target.children.every((child) => tree.ready(child.geometry.address()))) {
             return;
         }
         const address = node.geometry.address();
@@ -275,9 +364,9 @@ function list (entries: string[]): string {
     return entries.sort().map((entry) => `${entry},`).join('');
 }
 
-function drawKeys (tree: Quadtree): string[] {
+function drawKeys (tree: TreeFixture): string[] {
     const keys: string[] = [];
-    tree.forEachRenderable((node) => keys.push(node.geometry.address().key()));
+    tree.forEachRenderableNode((node) => keys.push(node.geometry.address().key()));
     return keys;
 }
 
@@ -286,7 +375,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
         const lines = PARITY_CASES.trimStart().split(/\r?\n/);
         const trace: string[] = [];
         let data = new LandscapeData();
-        const tree = new Quadtree();
+        const tree = new TreeFixture();
         let pages: ReturnType<typeof pageFixture>;
         for (const line of lines) {
             if (!line || line.startsWith('#')) {
@@ -326,7 +415,7 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                     }
                     let completed = 0;
                     for (const address of tree.requests()) {
-                        if (completed < budget && !tree.find(address)!.ready()) {
+                        if (completed < budget && !tree.ready(address)) {
                             requireCondition(tree.publish(address, mapping(address)), 'Resource publication');
                             ++completed;
                         }
@@ -335,14 +424,14 @@ describe('Landscape shared native/Web CPU paging scenarios', () => {
                     checkCut(tree, data);
                     const target: string[] = [];
                     const draw: string[] = [];
-                    tree.forEachNode((node) => {
+                    tree.traverse((node) => {
                         if (!node.children) {
                             target.push(node.geometry.address().key());
                         }
                         return true;
                     });
-                    tree.forEachRenderable((node) => draw.push(`${node.geometry.address().key()}:${node.edgeMask}`));
-                    const requests = tree.requests().map((address) => `${address.key()}:${Number(tree.find(address)!.ready())},`).join('');
+                    tree.forEachRenderableNode((node) => draw.push(`${node.geometry.address().key()}:${node.edgeMask}`));
+                    const requests = tree.requests().map((address) => `${address.key()}:${Number(tree.ready(address))},`).join('');
                     trace.push(`frame ${cancelled} ${completed} ${Number(tree.renderSelectionChanged())} target=${list(target)} draw=${list(draw)} changed=${list([...tree.changedNodes()])} requests=${requests}`);
                 }
             } else if (command === 'replace') {

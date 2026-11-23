@@ -27,7 +27,7 @@
 #include "core/scene-graph/Node.h"
 #include "scene/Model.h"
 #include <optional>
-// Inspect committed state without exposing mutable Quadtree access in the runtime API.
+// Inspect committed state without exposing mutable tree access in the runtime API.
 #define private public
 #include "landscape/Schedule.h"
 #undef private
@@ -43,7 +43,7 @@
 using namespace cc::landscape;
 
 namespace {
-// Deterministic IO/GPU boundary doubles. Schedule, Quadtree and VT layout are
+// Deterministic IO/GPU boundary doubles. Schedule, TargetTree, RenderTree and VT layout are
 // real; allocation/eviction are independently exercised in paging_test.cpp.
 struct Backend {
     uint32_t sourceCapacity{0};
@@ -121,17 +121,27 @@ DecalRenderer::~DecalRenderer() = default;
 MaterialLibrary::~MaterialLibrary() = default;
 void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &) {}
 void LandscapeRenderer::setViewPosition(const Vec3 &) {}
-void LandscapeRenderer::prepareRenderData(uint32_t, gfx::Texture *, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+void LandscapeRenderer::prepareRenderData(uint32_t, gfx::Texture *, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
     require(backend.preparing, "Tick synchronized draw models");
     for (const auto key : removed) {
         backend.draws.erase(key);
     }
     for (const auto &node : updated) {
+        require(backend.draws.count(node.geometry->address().key()) != 0, "Updated draw does not exist");
+    }
+    const auto updateDraw = [&](const LandscapeRenderNode &node) {
         require(_residency->resolve(node.geometry->address()).layer >= 0, "Renderer received missing geometry");
         for (const auto page : node.material->pages) {
             require(!_vtRenderer->needsComposition(page), "Renderer received incomplete material");
         }
         backend.draws[node.geometry->address().key()] = node.edgeMask;
+    };
+    for (const auto &node : added) {
+        require(backend.draws.count(node.geometry->address().key()) == 0, "Added draw already exists");
+        updateDraw(node);
+    }
+    for (const auto &node : updated) {
+        updateDraw(node);
     }
 }
 bool LandscapeRenderer::collectNodeModels(const QuadNode &, const LandscapeRegion &, bool, const geometry::Frustum &, bool, ccstd::vector<const scene::Model *> &) const {
@@ -334,6 +344,35 @@ std::string readParityBlock(const char *name) {
     return {};
 }
 
+const VTGridMapping *currentMapping(const LandscapeSchedule &schedule, NodeAddress address) {
+    const auto found = schedule._nodes.find(address.key());
+    return found == schedule._nodes.end() || found->second.current.pages.empty() ? nullptr : &found->second.current;
+}
+
+ccstd::vector<NodeAddress> resourceRequests(const LandscapeSchedule &schedule) {
+    ccstd::vector<NodeAddress> missing;
+    ccstd::vector<NodeAddress> refresh;
+    schedule._targetTree->traverse([&](const TargetTree::Node &node) {
+        const auto address = node.geometry.address();
+        if (address.level > schedule._asset.data().maxTileLevel) {
+            return true;
+        }
+        if (!currentMapping(schedule, address)) {
+            missing.push_back(address);
+            return false;
+        }
+        if (schedule._renderTree->findRenderable(address) || !node.children) {
+            refresh.push_back(address);
+        }
+        return node.children != nullptr;
+    });
+    const auto priority = [](NodeAddress a, NodeAddress b) { return a.key() < b.key(); };
+    std::sort(missing.begin(), missing.end(), priority);
+    std::sort(refresh.begin(), refresh.end(), priority);
+    missing.insert(missing.end(), refresh.begin(), refresh.end());
+    return missing;
+}
+
 void testCameraRotation() {
     LandscapeAsset asset;
     auto &data = const_cast<LandscapeData &>(asset.data());
@@ -349,7 +388,27 @@ void testCameraRotation() {
     }
     LandscapeRenderer renderer;
     LandscapeSchedule schedule(asset, renderer, 1.0F);
-    auto &tree = *schedule._quadtree;
+    auto &tree = *schedule._targetTree;
+    auto &render = *schedule._renderTree;
+    RenderTree::Changes changes;
+    const auto publish = [&](NodeAddress address, VTGridMapping material) {
+        if (!tree.find(address)) {
+            return false;
+        }
+        auto &node = schedule._nodes[address.key()];
+        require(node.current.pages.empty(), "Synthetic publication must not overwrite retained resources");
+        renderer.residency().request(address.ancestor(std::max(address.level, data.minTileLevel)));
+        for (const auto page : material.pages) {
+            renderer.vtRenderer().request(page);
+        }
+        node.address = address;
+        node.current = std::move(material);
+        return true;
+    };
+    const auto select = [&]() {
+        changes = render.select(tree, [&](NodeAddress address) { return currentMapping(schedule, address); });
+        return !render.empty();
+    };
     const auto mapping = [](NodeAddress address) {
         VTGridMapping result;
         result.pages = {{address.level, address.x, address.z}};
@@ -358,22 +417,22 @@ void testCameraRotation() {
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
             const NodeAddress address{data.maxTileLevel, x, z};
-            require(tree.publish(address, mapping(address)), "Initialize synthetic sector resources");
+            require(publish(address, mapping(address)), "Initialize synthetic sector resources");
         }
     }
-    const auto targetKeys = [](const Quadtree &value) {
+    const auto targetKeys = [](const TargetTree &value) {
         ccstd::unordered_set<uint64_t> result;
-        value.forEachNode([&](const Quadtree::Node &node) {
-            if (!node.refined) {
+        value.traverse([&](const TargetTree::Node &node) {
+            if (!node.children) {
                 result.insert(node.geometry.address().key());
             }
-            return node.refined;
+            return node.children != nullptr;
         });
         return result;
     };
     const auto renderState = [&]() {
         std::map<uint64_t, uint8_t> result;
-        tree.forEachRenderable([&](const Quadtree::Node &node) {
+        render.forEachRenderableNode([&](const RenderTree::Node &node) {
             result.emplace(node.geometry.address().key(), node.edgeMask);
         });
         return result;
@@ -394,19 +453,19 @@ void testCameraRotation() {
             plane.d = camera.x * plane.n.x + camera.z * plane.n.z;
         }
         tree.updateTarget(camera, cc::Vec3::ZERO);
-        require(tree.selectRenderables(), "Select draws after updating the distance target");
-        const auto requests = tree.requests();
-        const bool selectionChanged = tree.renderSelectionChanged();
-        const auto changed = tree.changedNodes();
-        schedule.beginPasses();
-        schedule.addPass(frustum, true);
+        require(select(), "Select draws after updating the distance target");
+        const auto requests = resourceRequests(schedule);
+        const auto added = changes.added;
+        const auto updated = changes.updated;
+        const auto removed = changes.removed;
+        ccstd::vector<const cc::scene::Model *> models;
+        schedule.collectPassModels(frustum, false, models);
         if (shadow) {
-            schedule.addPass(frustum, false);
+            schedule.collectPassModels(frustum, true, models);
         }
-        schedule.endPasses();
-        const auto after = tree.requests();
+        const auto after = resourceRequests(schedule);
         require(requests.size() == after.size() && std::equal(requests.begin(), requests.end(), after.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Pass collection changed request order");
-        require(tree.renderSelectionChanged() == selectionChanged && tree.changedNodes() == changed, "Pass collection changed committed draws or morph edges");
+        require(changes.added == added && changes.updated == updated && changes.removed == removed, "Pass collection changed committed draws or morph edges");
     };
     update(0, false);
     // Repeat with no fine data, incomplete siblings, and fully loaded detail.
@@ -415,47 +474,47 @@ void testCameraRotation() {
             auto &sector = *tree.find({data.maxTileLevel, 0, 0});
             for (uint32_t q = 0; q < 3; ++q) {
                 const auto address = sector.children[q].geometry.address();
-                require(tree.publish(address, mapping(address)), "Rotation setup could not publish partial siblings");
+                require(publish(address, mapping(address)), "Rotation setup could not publish partial siblings");
             }
-            require(tree.selectRenderables(), "Select partially loaded draws");
+            require(select(), "Select partially loaded draws");
         } else if (phase == 2) {
             bool complete = false;
             for (uint32_t step = 0; step < 4096 && !complete; ++step) {
                 complete = true;
-                for (const auto address : tree.requests()) {
-                    if (!tree.find(address)->ready()) {
-                        require(tree.publish(address, mapping(address)), "Publish ready target nodes");
+                for (const auto address : resourceRequests(schedule)) {
+                    if (!currentMapping(schedule, address)) {
+                        require(publish(address, mapping(address)), "Publish ready target nodes");
                         complete = false;
                     }
                 }
-                require(tree.selectRenderables(), "Select loaded draws");
+                require(select(), "Select loaded draws");
             }
             require(complete, "Target loading did not converge");
         }
         const auto target = targetKeys(tree);
         const auto draws = renderState();
-        ccstd::unordered_map<uint64_t, const Quadtree::Node *> nodes;
+        ccstd::unordered_map<uint64_t, const TargetTree::Node *> nodes;
         ccstd::unordered_set<uint64_t> ready;
-        tree.forEachNode([&](const Quadtree::Node &node) {
+        tree.traverse([&](const TargetTree::Node &node) {
             const auto key = node.geometry.address().key();
             nodes.emplace(key, &node);
-            if (node.ready()) {
+            if (currentMapping(schedule, node.geometry.address())) {
                 ready.insert(key);
             }
             return true;
         });
-        tree.clearChangedNodes();
+        changes = {};
         for (uint32_t direction = 0; direction <= 8; ++direction) {
             update(direction, direction % 2 != 0);
             require(targetKeys(tree) == target, "Camera rotation or shadow pass changed the distance target");
             require(renderState() == draws, "Camera rotation coarsened ready terrain");
-            require(tree.changedNodes().empty(), "Camera rotation changed draw materials or morph edges");
+            require(changes.added.empty() && changes.updated.empty() && changes.removed.empty(), "Camera rotation changed draw materials or morph edges");
             for (const auto &entry : nodes) {
                 const auto *node = tree.find(NodeAddress::fromKey(entry.first));
                 require(node == entry.second, "Camera rotation retired an existing node or pending request");
-                require(node->ready() == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
-                if (node->ready()) {
-                    require(node->material.pages.size() == 1 && node->material.pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
+                require((currentMapping(schedule, node->geometry.address()) != nullptr) == (ready.count(entry.first) != 0), "Camera rotation changed resource readiness");
+                if (currentMapping(schedule, node->geometry.address())) {
+                    require(currentMapping(schedule, node->geometry.address())->pages.size() == 1 && currentMapping(schedule, node->geometry.address())->pages.front().key() == entry.first, "Camera rotation replaced a ready mapping");
                 }
             }
         }
@@ -497,7 +556,8 @@ int main(int argc, char **argv) {
     const bool triplanar = argc == 2 && std::string(argv[1]) == "--triplanar";
     pages.setTriplanarEnabled(triplanar);
     LandscapeSchedule schedule(asset, renderer, 1.0F);
-    const auto &tree = *schedule._quadtree;
+    const auto &tree = *schedule._targetTree;
+    const auto &render = *schedule._renderTree;
     std::ostringstream trace;
     trace << line << '\n';
     uint32_t frame = 0;
@@ -521,12 +581,12 @@ int main(int argc, char **argv) {
         bool extraCamera;
         row >> camera.x >> camera.y >> camera.z >> backend.uploads >> backend.compositions >> extraCamera;
         std::map<uint64_t, uint8_t> committed;
-        tree.forEachRenderable([&](const Quadtree::Node &node) {
+        render.forEachRenderableNode([&](const RenderTree::Node &node) {
             committed.emplace(node.geometry.address().key(), node.edgeMask);
         });
         schedule.update(camera, cc::Vec3::ZERO);
         std::map<uint64_t, uint8_t> afterTick;
-        tree.forEachRenderable([&](const Quadtree::Node &node) {
+        render.forEachRenderableNode([&](const RenderTree::Node &node) {
             afterTick.emplace(node.geometry.address().key(), node.edgeMask);
         });
         require(afterTick == committed, "Tick changed committed draws or morph edges");
@@ -534,7 +594,6 @@ int main(int argc, char **argv) {
         schedule.prepareRenderData(++frame);
         backend.preparing = false;
         const auto updates = backend.updates;
-        schedule.beginPasses();
         for (uint32_t view = 0; view < 1U + static_cast<uint32_t>(extraCamera); ++view) {
             cc::geometry::Frustum frustum;
             for (auto *plane : frustum.planes) {
@@ -542,14 +601,12 @@ int main(int argc, char **argv) {
                 plane->d = 100000.0F + static_cast<float>(view);
             }
             ccstd::vector<const cc::scene::Model *> models;
-            schedule.addPass(frustum, false);
             schedule.collectPassModels(frustum, false, models);
         }
-        schedule.endPasses();
         require(updates == backend.updates, "Camera passes performed resource work");
-        const bool coverage = tree.sectorRootsReady();
+        const bool coverage = !render.empty();
         std::map<uint64_t, uint8_t> selected;
-        tree.forEachRenderable([&](const Quadtree::Node &node) {
+        render.forEachRenderableNode([&](const RenderTree::Node &node) {
             selected.emplace(node.geometry.address().key(), node.edgeMask);
         });
         require(backend.draws == selected, "Renderer draws or morph edges differ from committed state");
@@ -557,11 +614,11 @@ int main(int argc, char **argv) {
         require(!hadCoverage || coverage, "Pending resources removed committed coverage");
         hadCoverage |= coverage;
         std::vector<std::string> nodes;
-        tree.forEachNode([&](const Quadtree::Node &node) {
+        tree.traverse([&](const TargetTree::Node &node) {
             if (node.geometry.level <= data.maxTileLevel) {
-                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(residency.resolve(node.geometry.address()).layer >= 0) + ":" + std::to_string(node.ready()) + ":" + std::to_string(node.renderable));
+                nodes.push_back(addressText(node.geometry.address()) + ":" + std::to_string(residency.resolve(node.geometry.address()).layer >= 0) + ":" + std::to_string(currentMapping(schedule, node.geometry.address()) != nullptr) + ":" + std::to_string(render.findRenderable(node.geometry.address()) != nullptr));
             }
-            if (node.ready()) {
+            if (currentMapping(schedule, node.geometry.address())) {
                 require(residency.resolve(node.geometry.address()).layer >= 0, "Published geometry lost its source");
             }
             return true;

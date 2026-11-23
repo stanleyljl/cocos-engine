@@ -224,12 +224,29 @@ bool VTRenderer::init(const LandscapeAsset &asset, LandscapeResidency &residency
         }
         CC_LOG_WARNING("[Landscape] ASTC 4x4 initialization failed; using RGBA8 VT atlas");
     }
+    _residency = &residency;
+    if (!validateRootCapacity()) {
+        CC_LOG_ERROR("[Landscape] Device capacity cannot compose sector roots");
+        destroy();
+        return false;
+    }
 #if CC_LANDSCAPE_DEBUG
     CC_LOG_INFO("[Landscape] VT atlas: %ux%u %s pages=%zu", atlasSize, atlasSize, _compressor ? "ASTC 4x4" : "RGBA8", _pages.size());
 #endif
-    _residency = &residency;
     _batch.reserve(_pages.size());
     return true;
+}
+
+bool VTRenderer::validateRootCapacity() const {
+    ccstd::vector<VTPageAddress> rootPages;
+    ccstd::vector<NodeAddress> rootSources;
+    for (uint32_t z = 0; z < _data.sectorsZ; ++z) {
+        for (uint32_t x = 0; x < _data.sectorsX; ++x) {
+            rootPages.push_back({_layout.rootLevel(), x, z});
+            rootSources.push_back({_data.maxTileLevel, x, z});
+        }
+    }
+    return capacityQuery().canPrepare(rootPages, rootSources);
 }
 
 void VTRenderer::destroy() {

@@ -28,7 +28,6 @@
 #include <cstdint>
 
 #include "base/Log.h"
-#include "base/std/container/unordered_set.h"
 #include "base/Macros.h"
 #include "core/Root.h"
 #include "core/TypedArray.h"
@@ -181,27 +180,6 @@ bool LandscapeRenderer::init(Node *node, scene::RenderScene *scene, LandscapeAss
         _vtRenderer.reset();
         return false;
     }
-    // Root coverage and worst-case composition inputs must fit before publishing.
-    ccstd::unordered_set<uint64_t> rootKeys;
-    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
-        for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            rootKeys.insert(NodeAddress{data.maxTileLevel, x, z}.key());
-        }
-    }
-    const VTPageLayout layout(data.sectorSize);
-    for (uint32_t z = 0; z < data.sectorsZ; ++z) {
-        for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            ccstd::vector<NodeAddress> inputs;
-            _vtRenderer->selectSources({layout.rootLevel(), x, z}, true, true).appendTo(inputs);
-            const auto additional = std::count_if(inputs.begin(), inputs.end(), [&](NodeAddress source) {
-                return rootKeys.count(source.key()) == 0;
-            });
-            if (rootKeys.size() + additional > layers) {
-                CC_LOG_ERROR("[Landscape] Device capacity cannot compose sector roots");
-                return false;
-            }
-        }
-    }
     _decals->setEnabled(_debugData.decal3DEnabled);
     _decals->setWireframe(_debugData.wireframe);
     _decals->setCastShadow(_castShadow);
@@ -250,7 +228,7 @@ void LandscapeRenderer::destroy() {
     _debugData.unlit = false;
 }
 
-void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
     if (previousMappings != _vtRenderer->pageTable().texture()) {
         bindRuntimeTextures();
     }
@@ -259,8 +237,8 @@ void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previous
         _decals->setEnabled(_debugData.decal3DEnabled);
         _decals->setWireframe(_debugData.wireframe);
     }
-    if (!updated.empty() || !removed.empty()) {
-        syncTerrainModels(updated, removed);
+    if (!added.empty() || !updated.empty() || !removed.empty()) {
+        syncTerrainModels(added, updated, removed);
     }
     if (_materialsDirty) {
         refreshTerrainMaterials();
@@ -289,17 +267,14 @@ bool LandscapeRenderer::collectNodeModels(const QuadNode &node, const LandscapeR
         // Include the bound source's height range (also for shared sources
         // below minTileLevel) and raised decals before pruning a subtree.
         const float top = node.maxY + decalLift;
-        const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x,
-                                    (node.minY + top) * 0.5F + origin.y,
-                                    region.z + region.size * 0.5F + origin.z,
+        const geometry::AABB bounds{region.x + region.size * 0.5F + origin.x, (node.minY + top) * 0.5F + origin.y, region.z + region.size * 0.5F + origin.z,
                                     region.size * 0.5F, (top - node.minY) * 0.5F, region.size * 0.5F};
         return bounds.aabbFrustum(frustum);
     }
     const auto draw = _draws.find(address.key());
-    if (draw == _draws.end() || !draw->second.model) {
-        return false;
-    }
+    CC_ASSERTF(draw != _draws.end(), "[Landscape] Renderable node must have a draw record");
     const auto *model = draw->second.model.get();
+    CC_ASSERTF(model != nullptr, "[Landscape] Renderable node must have a model");
     const auto &bounds = *model->getWorldBounds();
     const bool visible = bounds.aabbFrustum(frustum);
     if (visible && model->isEnabled() && (!shadow || model->isCastShadow())) {
@@ -308,17 +283,18 @@ bool LandscapeRenderer::collectNodeModels(const QuadNode &node, const LandscapeR
     if (_debugData.decal3DEnabled) {
         // Raised decals may enter the frustum while the terrain is outside.
         // Only that case needs a second, expanded bounds test.
-        if (!visible) {
+        bool decalsVisible = visible;
+        if (!decalsVisible) {
             auto decalBounds = bounds;
             decalBounds.center.y += decalLift * 0.5F;
             decalBounds.halfExtents.y += decalLift * 0.5F;
-            if (!decalBounds.aabbFrustum(frustum)) {
-                return false;
-            }
+            decalsVisible = decalBounds.aabbFrustum(frustum);
         }
-        _decals->collectPassModels(node, frustum, shadow, models);
+        if (decalsVisible) {
+            _decals->collectPassModels(node, frustum, shadow, models);
+        }
     }
-    return true;
+    return false;
 }
 
 void LandscapeRenderer::setViewPosition(const Vec3 &position) {
@@ -424,10 +400,10 @@ TextureBase *LandscapeRenderer::getVTAtlas() const {
     return _vtRenderer->atlas();
 }
 
-void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
     // Edge and mapping changes reuse the existing grid model.
     ccstd::vector<uint32_t> changedMappings;
-    changedMappings.reserve(updated.size());
+    changedMappings.reserve(added.size() + updated.size());
     // Release removed owners before assigning their blocks to new LOD nodes.
     for (const auto key : removed) {
         const auto it = _draws.find(key);
@@ -437,16 +413,12 @@ void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNod
         }
         _decals->removeNode(key);
     }
-    for (const auto &renderable : updated) {
+    const auto updateDraw = [&](const LandscapeRenderNode &renderable, GridDraw &draw) {
         const auto key = renderable.geometry->address().key();
-        auto &draw = _draws[key];
         const auto &node = *renderable.geometry;
-        if (draw.mapping < 0) {
-            draw.mapping = static_cast<int>(_vtRenderer->pageTable().allocate());
-        }
-        const auto mapping = static_cast<uint32_t>(draw.mapping);
-        if (_vtRenderer->pageTable().update(mapping, *renderable.material, *_vtRenderer)) {
-            changedMappings.push_back(mapping);
+        const auto pageTableSlot = static_cast<uint32_t>(draw.pageTableSlot);
+        if (_vtRenderer->pageTable().update(pageTableSlot, *renderable.material, *_vtRenderer)) {
+            changedMappings.push_back(pageTableSlot);
         }
         if (!draw.model) {
             if (_pool.empty()) {
@@ -456,23 +428,32 @@ void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNod
                 _pool.pop_back();
             }
         }
-        const auto gridParams = resolveGridParams(node, mapping, renderable.edgeMask);
+        const auto gridParams = resolveGridParams(node, pageTableSlot, renderable.edgeMask);
         draw.params = gridParams;
         if (draw.model) {
             updateModel(draw.model, node, gridParams);
         }
         const auto region = _data.nodeRegion(node.address());
         _decals->updateNode({key, region, node.minY, node.maxY, gridParams});
+    };
+    for (const auto &renderable : added) {
+        auto &draw = _draws[renderable.geometry->address().key()];
+        draw.pageTableSlot = static_cast<int>(_vtRenderer->pageTable().allocate());
+        updateDraw(renderable, draw);
+    }
+    for (const auto &renderable : updated) {
+        auto &draw = _draws.at(renderable.geometry->address().key());
+        updateDraw(renderable, draw);
     }
     _vtRenderer->pageTable().upload(std::move(changedMappings));
 }
 
-LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, uint32_t mapping, uint8_t edgeMask) {
+LandscapeGridParams LandscapeRenderer::resolveGridParams(const QuadNode &node, uint32_t pageTableSlot, uint8_t edgeMask) {
     LandscapeGridParams gridParams;
 
     const auto region = _data.nodeRegion(node.address());
     gridParams.grid = Vec4{region.x, region.z, region.size, static_cast<float>(node.level)};
-    gridParams.mapping = Vec4{static_cast<float>(mapping), static_cast<float>(edgeMask), 0, 0};
+    gridParams.mapping = Vec4{static_cast<float>(pageTableSlot), static_cast<float>(edgeMask), 0, 0};
 
     const auto tile = _residency->resolve(node.address());
     CC_ASSERTF(tile.layer >= 0,
@@ -516,9 +497,9 @@ void LandscapeRenderer::recycleModel(GridDraw &draw) {
         draw.model->setEnabled(false);
         _pool.push_back(std::move(draw.model));
     }
-    if (draw.mapping >= 0) {
-        _vtRenderer->pageTable().release(static_cast<uint32_t>(draw.mapping));
-        draw.mapping = -1;
+    if (draw.pageTableSlot >= 0) {
+        _vtRenderer->pageTable().release(static_cast<uint32_t>(draw.pageTableSlot));
+        draw.pageTableSlot = -1;
     }
 }
 

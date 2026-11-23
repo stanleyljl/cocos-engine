@@ -180,7 +180,7 @@ void shadowCulling(const RenderPipeline *pipeline, const scene::Camera *camera, 
     }
 }
 
-ccstd::vector<landscape::LandscapeInstance *> prepareLandscapes(const ccstd::vector<scene::Camera *> &cameras, bool cullingEnabledOnly) {
+void prepareLandscapes(const ccstd::vector<scene::Camera *> &cameras, bool cullingEnabledOnly) {
     ccstd::vector<landscape::LandscapeInstance *> prepared;
     for (const auto *camera : cameras) {
         const auto *scene = camera->getScene();
@@ -194,7 +194,6 @@ ccstd::vector<landscape::LandscapeInstance *> prepareLandscapes(const ccstd::vec
             }
         }
     }
-    return prepared;
 }
 
 void sceneCulling(const RenderPipeline *pipeline, scene::Camera *camera) {

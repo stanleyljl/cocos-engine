@@ -63,6 +63,18 @@ NodeAddress NodeAddress::child(uint32_t quadrant) const {
     return {level - 1, x * 2 + (quadrant & 1U), z * 2 + (quadrant >> 1U)};
 }
 
+bool VTGridMapping::operator==(const VTGridMapping &other) const {
+    if (cells != other.cells) {
+        return false;
+    }
+    if (pages.size() != other.pages.size()) {
+        return false;
+    }
+    return std::equal(pages.begin(), pages.end(), other.pages.begin(), [](VTPageAddress left, VTPageAddress right) {
+        return left.key() == right.key();
+    });
+}
+
 void VTPageSources::appendTo(ccstd::vector<NodeAddress> &output) const {
     // Return each input once, in sampling order. Base-precision normal entries
     // share one tile, which may also provide the splat data.

@@ -26,17 +26,20 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include "base/std/container/unordered_set.h"
+#include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
-#include "landscape/Config.h"
 #include "landscape/Data.h"
 #include "math/Vec3.h"
+
+namespace cc::geometry {
+class Frustum;
+}
 
 namespace cc::landscape {
 class LandscapeAsset;
 
-// Owns the target hierarchy, published mappings and balanced render selection.
-class Quadtree {
+// Distance-based target topology. Resource readiness never changes this tree.
+class TargetTree {
 public:
     struct MorphRange {
         float start{0.0F};
@@ -44,83 +47,87 @@ public:
     };
     struct Node {
         QuadNode geometry;
-        VTGridMapping material;
         std::unique_ptr<Node[]> children;
-        uint8_t edgeMask{0}; // Left/right/bottom/top: 00 same or boundary, 01 coarser, 10 finer; valid when renderable.
-        bool refined{false}; // Target subdivision; children survive until render selection.
-        bool renderable{false};
-
-        bool ready() const { return !material.pages.empty(); }
     };
 
     void init(const LandscapeAsset &asset, float lodQualityScale = 1.0F);
-
-    // Target and render state.
-    void updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
-    // Missing coverage before refreshes; each group sorts by LOD, then node key.
-    ccstd::vector<NodeAddress> requests() const;
-    // Publish only after the source and complete mapping are ready.
-    bool publish(NodeAddress address, VTGridMapping material);
-    bool selectRenderables();
-
-    // State and changes.
-    bool viewChanged() const { return _viewChanged; }
-    bool sectorRootsReady() const;
-    // Retained until the next selection, independently of changedNodes.
-    bool renderSelectionChanged() const { return _renderSelectionChanged; }
-    const ccstd::unordered_set<uint64_t> &changedNodes() const { return _changedNodes; }
-    void clearChangedNodes() { _changedNodes.clear(); }
-
-    // Node queries.
+    bool updateTarget(const Vec3 &worldCameraPosition, const Vec3 &worldOrigin);
+    const Node &root() const { return *_root; }
+    const LandscapeData &data() const { return _data; }
     const Node *find(NodeAddress address) const;
-    const Node *findRenderable(NodeAddress address) const;
-    bool isInTargetTree(NodeAddress address) const;
-    // Includes management levels above sector roots.
+    bool contains(NodeAddress address) const;
     LandscapeRegion region(NodeAddress address) const;
     const Vec3 &localCameraPosition() const { return _localCameraPosition; }
     const Vec3 &worldOrigin() const { return _worldOrigin; }
     const ccstd::vector<MorphRange> &lodMorphRanges() const { return _lodMorphRanges; }
-
-    // Geometry diagnostics.
+    // Diagnose morph constraints for nodes within their LOD distance range.
     bool morphRangeTooSmall(const QuadNode &node) const;
     float distanceSquared(NodeAddress address) const;
-
-    // Traversal: boolean callbacks return false to prune descendants.
-    void forEachNode(const std::function<bool(const Node &)> &visit) const;
-    void forEachRenderable(const std::function<void(const Node &)> &visit) const;
-    void cull(const std::function<bool(const Node &)> &visit) const;
+    HeightRange heightRange(NodeAddress address) const;
+    // Pre-order traversal of valid nodes from the root, excluding out-of-bounds quadrants.
+    // Returning false skips only this node's descendants; siblings are still visited.
+    void traverse(const std::function<bool(const Node &)> &visit) const;
 
 private:
-    // Hierarchy.
     void initLodMorphRanges(float lodQualityScale);
     void buildRoot(Node &node, NodeAddress address);
     void updateTargetNode(Node &node);
-    Node *findNode(NodeAddress address);
-    bool contains(NodeAddress address) const;
-
-    // Bounds and morph edges.
     QuadNode geometry(NodeAddress address) const;
-    HeightRange heightRange(NodeAddress address) const;
-    NodeAddress renderableAt(uint32_t x, uint32_t z) const;
-    uint8_t computeEdgeMask(NodeAddress address) const;
+    void traverseNode(const Node &node, const std::function<bool(const Node &)> &visit) const;
 
-    void visitNodes(const Node &node, const std::function<bool(const Node &)> &visit) const;
-    void visitNodes(Node &node, const std::function<bool(Node &)> &visit) const;
-
-    // Immutable asset metadata.
     LandscapeData _data;
     ccstd::vector<ccstd::vector<HeightRange>> _heightRanges;
     ccstd::vector<MorphRange> _lodMorphRanges;
-
     std::unique_ptr<Node> _root;
     Vec3 _localCameraPosition;
     Vec3 _worldOrigin;
-    bool _viewChanged{true};
+    bool _needsUpdate{true}; // Force the first target update
+};
 
-    // Previous selection survives target changes until draws are synchronized.
-    ccstd::unordered_set<uint64_t> _renderNodeKeys;
-    bool _needsRenderSelection{true};
-    bool _renderSelectionChanged{false};
-    ccstd::unordered_set<uint64_t> _changedNodes;
+// Committed render snapshot; owns its geometry and mappings independently of the target.
+class RenderTree {
+public:
+    struct Node {
+        QuadNode geometry;
+        VTGridMapping material;
+        std::unique_ptr<Node[]> children;
+        uint8_t edgeMask{0}; // Two bits per edge: same/boundary, coarser, finer.
+        bool valid{false}; // False for out-of-bounds quadrant placeholders.
+        bool renderable{false};
+    };
+    struct Changes {
+        ccstd::vector<uint64_t> added;
+        ccstd::vector<uint64_t> updated;
+        ccstd::vector<uint64_t> removed;
+    };
+    // Borrowed ready mapping, or null while unavailable; select copies it into the snapshot.
+    using MaterialMappingQuery = std::function<const VTGridMapping *(NodeAddress)>;
+
+    // Missing sector coverage leaves the previous snapshot intact.
+    Changes select(const TargetTree &target, const MaterialMappingQuery &queryMaterialMapping);
+    bool empty() const { return !_root; }
+    // Borrowed node; valid until the next committed selection.
+    const Node *findRenderable(NodeAddress address) const;
+    // Pre-order traversal of valid nodes from the root, including internal management nodes.
+    // Returning false skips only this node's descendants; siblings are still visited.
+    void traverse(const std::function<bool(const Node &)> &visit) const;
+    // Visits every renderable leaf in traversal order, without visibility filtering.
+    void forEachRenderableNode(const std::function<void(const Node &)> &visit) const;
+    // Visits renderable leaves whose geometry bounds intersect the frustum, in traversal order.
+    // Passes each leaf's geometry and terrain-local region; internal nodes are only used for pruning.
+    void forEachVisibleNode(const TargetTree &target, const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const;
+
+private:
+    // Diagnose each committed selection regardless of frustum visibility.
+    void checkMorphRanges(const TargetTree &target);
+    void buildRoots(Node &node, const TargetTree::Node &target, const TargetTree &tree, const MaterialMappingQuery &queryMaterialMapping, ccstd::vector<Node *> &roots) const;
+    NodeAddress renderableAt(const Node &root, uint32_t x, uint32_t z) const;
+    uint8_t computeEdgeMask(const Node &root, NodeAddress address, const LandscapeData &data) const;
+    void traverseNode(Node &node, const std::function<bool(Node &)> &visit) const;
+
+    std::unique_ptr<Node> _root;
+    // Rebuilt with each snapshot; pointers are owned by _root.
+    ccstd::unordered_map<uint64_t, const Node *> _renderableNodes;
+    bool _lastMorphRangeWarning{false};
 };
 } // namespace cc::landscape

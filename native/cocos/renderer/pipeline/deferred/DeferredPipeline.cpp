@@ -39,7 +39,6 @@
 #include "gfx-base/GFXDevice.h"
 #include "gfx-base/GFXSwapchain.h"
 #include "gfx-base/states/GFXTextureBarrier.h"
-#include "landscape/LandscapeInstance.h"
 #include "pipeline/ClusterLightCulling.h"
 #include "profiler/Profiler.h"
 #include "scene/RenderWindow.h"
@@ -127,7 +126,7 @@ void DeferredPipeline::render(const ccstd::vector<scene::Camera *> &cameras) {
 
     ensureEnoughSize(cameras);
     decideProfilerCamera(cameras);
-    const auto landscapes = prepareLandscapes(cameras, false);
+    prepareLandscapes(cameras, false);
 
     for (auto *camera : cameras) {
         sceneCulling(this, camera);
@@ -144,9 +143,6 @@ void DeferredPipeline::render(const ccstd::vector<scene::Camera *> &cameras) {
         _fg.reset();
 
         _pipelineUBO->incCameraUBOOffset();
-    }
-    for (auto *terrain : landscapes) {
-        terrain->endPasses();
     }
 
     if (enableOcclusionQuery) {

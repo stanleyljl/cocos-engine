@@ -136,6 +136,18 @@ export class VTGridMapping implements ReadonlyVTGridMapping {
     public static readonly CELL_COUNT = VTGridMapping.SIDE * VTGridMapping.SIDE;
     public readonly cells = new Uint8Array(VTGridMapping.CELL_COUNT);
     public pages: VTPageAddress[] = [];
+
+    public static equals (a: ReadonlyVTGridMapping, b: ReadonlyVTGridMapping): boolean {
+        for (let i = 0; i < a.cells.length; ++i) {
+            if (a.cells[i] !== b.cells[i]) {
+                return false;
+            }
+        }
+        if (a.pages.length !== b.pages.length) {
+            return false;
+        }
+        return a.pages.every((page, i) => page.key() === b.pages[i].key());
+    }
 }
 
 export class VTPageSources {

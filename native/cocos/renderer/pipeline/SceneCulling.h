@@ -31,9 +31,6 @@
 #include "scene/Define.h"
 
 namespace cc {
-namespace landscape {
-class LandscapeInstance;
-}
 class Mat4;
 class Vec4;
 class Vec3;
@@ -52,7 +49,7 @@ RenderObject genRenderObject(const scene::Model *, const scene::Camera *);
 void validPunctualLightsCulling(const RenderPipeline *pipeline, const scene::Camera *camera);
 void shadowCulling(const RenderPipeline *, const scene::Camera *, ShadowTransformInfo *);
 // Native ForwardPipeline can skip camera culling; DeferredPipeline always culls.
-ccstd::vector<landscape::LandscapeInstance *> prepareLandscapes(const ccstd::vector<scene::Camera *> &cameras, bool cullingEnabledOnly);
+void prepareLandscapes(const ccstd::vector<scene::Camera *> &cameras, bool cullingEnabledOnly);
 void sceneCulling(const RenderPipeline *, scene::Camera *);
 } // namespace pipeline
 } // namespace cc
