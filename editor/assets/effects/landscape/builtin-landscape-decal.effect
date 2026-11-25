@@ -48,9 +48,10 @@ CCEffect %{
         cullMode: none
     - vert: landscape-vs
       frag: landscape-fs
-      phase: deferred-forward
+      pass: gbuffer
+      phase: gbuffer
       propertyIndex: 0
-      embeddedMacros: { CC_FORCE_FORWARD_SHADING: true }
+      embeddedMacros: { CC_PIPELINE_TYPE: 1 }
 }%
 
 CCProgram landscape-uniforms %{
@@ -79,8 +80,6 @@ CCProgram landscape-macros %{
   #ifndef LANDSCAPE_SHADOW_PASS
     #define LANDSCAPE_SHADOW_PASS 0
   #endif
-  // VT albedo diagnostic. Disabled by default; switched by LandscapeRenderer.
-  #pragma define-meta LANDSCAPE_DEBUG_UNLIT
   #pragma define-meta LANDSCAPE_WIREFRAME
   #pragma define-meta LANDSCAPE_HEIGHT_UNORM
   #define CC_SURFACES_USE_TANGENT_SPACE 1
@@ -325,18 +324,8 @@ CCProgram landscape-fs %{
   #include <surfaces/includes/common-fs>
   #include <landscape-uniforms>
   #include <landscape-surface>
-  // Effect chunks are included only once, even across conditional branches.
-  // Hoist shared dependencies so both PBR and unlit variants receive them.
-  #include <lighting-models/includes/common>
-  #include <common/lighting/brdf>
-  #include <surfaces/module-functions/debug-view>
-  #if LANDSCAPE_DEBUG_UNLIT
-    #include <lighting-models/includes/unlit>
-    #include <surfaces/includes/unlit-fs>
-  #else
-    #include <lighting-models/includes/standard>
-    #include <surfaces/includes/standard-fs>
-  #endif
+  #include <lighting-models/includes/standard>
+  #include <surfaces/includes/standard-fs>
   #include <shading-entries/main-functions/render-to-scene/fs>
 }%
 

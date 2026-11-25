@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include "base/Ptr.h"
+#include "base/std/container/set.h"
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "landscape/Data.h"
@@ -40,11 +41,22 @@ namespace cc::landscape {
 class LandscapeAsset;
 class VTRenderer;
 
+struct ResourceRequirements {
+    struct AddressLess {
+        bool operator()(NodeAddress a, NodeAddress b) const { return a.key() < b.key(); }
+        bool operator()(VTPageAddress a, VTPageAddress b) const { return a.key() < b.key(); }
+    };
+    // Validated resource demand; does not own resource lifetimes.
+    ccstd::set<NodeAddress, AddressLess> sources;
+    ccstd::set<VTPageAddress, AddressLess> pages;
+};
+
 // Scoped to one admission scan; caches immutable inputs, never capacity decisions.
 class VTCapacityQuery {
 public:
     VTCapacityQuery(const VTRenderer &renderer, const LandscapeResidency &residency);
-    bool canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources);
+    // Candidate lists are unique; retained resources have already passed address validation.
+    bool canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources, const ResourceRequirements &retained = {});
 
 private:
     const VTRenderer &_renderer;
@@ -112,7 +124,8 @@ public:
 
     // Page residency and composition.
     VTCapacityQuery capacityQuery() const { return VTCapacityQuery(*this, *_residency); }
-    bool canFit(const ccstd::vector<VTPageAddress> &pages) const;
+    // retainedCount excludes resources present in the supplied list.
+    bool canFit(const ccstd::vector<VTPageAddress> &pages, size_t retainedCount = 0) const;
     void request(VTPageAddress address);
     void release(VTPageAddress address);
     bool update(uint32_t maxPages);

@@ -75,7 +75,6 @@ Material *createLandscapeMaterial(bool wireframe, bool heightUnorm) {
     info.effectName = ccstd::string{"landscape/builtin-landscape"};
     MacroRecord defines;
     defines["USE_INSTANCING"] = true;
-    defines["LANDSCAPE_DEBUG_UNLIT"] = false;
     defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
     // Compile debug edges out of the normal material entirely.
     defines["LANDSCAPE_WIREFRAME"] = wireframe;
@@ -213,6 +212,7 @@ void LandscapeRenderer::destroy() {
 
     _pool.clear();
     _instanceAttributeScratch = ccstd::monostate{};
+    _boundPageTableTexture = nullptr;
     _vtRenderer.reset();
     _decals.reset();
 
@@ -225,20 +225,18 @@ void LandscapeRenderer::destroy() {
     _node = nullptr;
     _scene = nullptr;
     _heightUnorm = false;
-    _debugData.unlit = false;
 }
 
-void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
-    if (previousMappings != _vtRenderer->pageTable().texture()) {
+void LandscapeRenderer::prepareRenderData(uint32_t frame, const RenderTree &tree, const RenderTree::Changes &changes) {
+    if (_boundPageTableTexture != _vtRenderer->pageTable().texture()) {
         bindRuntimeTextures();
     }
     if (_materialsDirty) {
-        setUnlit(_debugData.unlit);
         _decals->setEnabled(_debugData.decal3DEnabled);
         _decals->setWireframe(_debugData.wireframe);
     }
-    if (!added.empty() || !updated.empty() || !removed.empty()) {
-        syncTerrainModels(added, updated, removed);
+    if (!changes.added.empty() || !changes.updated.empty() || !changes.removed.empty()) {
+        syncTerrainModels(tree, changes);
     }
     if (_materialsDirty) {
         refreshTerrainMaterials();
@@ -257,6 +255,16 @@ void LandscapeRenderer::prepareRenderData(uint32_t frame, gfx::Texture *previous
         }
     }
     _decals->preparePasses(frame);
+}
+
+void LandscapeRenderer::collectPassModels(const RenderTree &tree, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const {
+    tree.traverse([&](const RenderTree::Node &node) {
+        const auto address = node.geometry.address();
+        // Management nodes may cover several sectors above maxTileLevel.
+        const float size = std::ldexp(_data.sectorSize, static_cast<int>(address.level) - static_cast<int>(_data.maxTileLevel));
+        const LandscapeRegion region{address.x * size, address.z * size, size};
+        return collectNodeModels(node.geometry, region, node.renderable, frustum, shadow, models);
+    });
 }
 
 bool LandscapeRenderer::collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const {
@@ -301,9 +309,13 @@ void LandscapeRenderer::setViewPosition(const Vec3 &position) {
     _viewPosition = position;
 }
 
-void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &ranges) {
+void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<TargetTree::MorphRange> &ranges) {
+    ccstd::vector<Vec4> morph(config::MAX_LOD_LEVELS);
+    for (size_t i = 0; i < std::min(ranges.size(), morph.size()); ++i) {
+        morph[i] = Vec4{ranges[i].start, ranges[i].end, 0, 0};
+    }
     for (auto *material : surfaceMaterials()) {
-        material->setPropertyVec4Array("lodMorph", ranges);
+        material->setPropertyVec4Array("lodMorph", morph);
     }
 }
 
@@ -396,16 +408,16 @@ bool LandscapeRenderer::removeDecal(uint32_t id) {
     return true;
 }
 
-TextureBase *LandscapeRenderer::getVTAtlas() const {
+TextureBase *LandscapeRenderer::vtAtlas() const {
     return _vtRenderer->atlas();
 }
 
-void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+void LandscapeRenderer::syncTerrainModels(const RenderTree &tree, const RenderTree::Changes &changes) {
     // Edge and mapping changes reuse the existing grid model.
     ccstd::vector<uint32_t> changedMappings;
-    changedMappings.reserve(added.size() + updated.size());
+    changedMappings.reserve(changes.added.size() + changes.updated.size());
     // Release removed owners before assigning their blocks to new LOD nodes.
-    for (const auto key : removed) {
+    for (const auto key : changes.removed) {
         const auto it = _draws.find(key);
         if (it != _draws.end()) {
             recycleModel(it->second);
@@ -413,11 +425,11 @@ void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNod
         }
         _decals->removeNode(key);
     }
-    const auto updateDraw = [&](const LandscapeRenderNode &renderable, GridDraw &draw) {
-        const auto key = renderable.geometry->address().key();
-        const auto &node = *renderable.geometry;
+    const auto updateDraw = [&](const RenderTree::Node &renderable, GridDraw &draw) {
+        const auto key = renderable.geometry.address().key();
+        const auto &node = renderable.geometry;
         const auto pageTableSlot = static_cast<uint32_t>(draw.pageTableSlot);
-        if (_vtRenderer->pageTable().update(pageTableSlot, *renderable.material, *_vtRenderer)) {
+        if (_vtRenderer->pageTable().update(pageTableSlot, renderable.material, *_vtRenderer)) {
             changedMappings.push_back(pageTableSlot);
         }
         if (!draw.model) {
@@ -436,13 +448,15 @@ void LandscapeRenderer::syncTerrainModels(const ccstd::vector<LandscapeRenderNod
         const auto region = _data.nodeRegion(node.address());
         _decals->updateNode({key, region, node.minY, node.maxY, gridParams});
     };
-    for (const auto &renderable : added) {
-        auto &draw = _draws[renderable.geometry->address().key()];
+    for (const auto key : changes.added) {
+        const auto &renderable = *tree.findRenderable(NodeAddress::fromKey(key));
+        auto &draw = _draws[key];
         draw.pageTableSlot = static_cast<int>(_vtRenderer->pageTable().allocate());
         updateDraw(renderable, draw);
     }
-    for (const auto &renderable : updated) {
-        auto &draw = _draws.at(renderable.geometry->address().key());
+    for (const auto key : changes.updated) {
+        const auto &renderable = *tree.findRenderable(NodeAddress::fromKey(key));
+        auto &draw = _draws.at(key);
         updateDraw(renderable, draw);
     }
     _vtRenderer->pageTable().upload(std::move(changedMappings));
@@ -510,16 +524,18 @@ std::array<Material *, 4> LandscapeRenderer::surfaceMaterials() const {
 
 void LandscapeRenderer::bindRuntimeTextures() {
     auto &vt = *_vtRenderer;
+    auto *pageTableTexture = vt.pageTable().texture();
     for (auto *material : surfaceMaterials()) {
         setRuntimeTexture(material, "holeSplatmap", _residency->splatArray(), _residency->splatSampler());
         setRuntimeTexture(material, "heightmap", _residency->heightArray(), _residency->heightSampler());
         setRuntimeTexture(material, "vtAlbedo", vt.albedo(), vt.sampler());
         setRuntimeTexture(material, "vtNormalRoughness", vt.normalRoughness(), vt.sampler());
-        setRuntimeTexture(material, "vtPageMap", vt.pageTable().texture(), _residency->splatSampler());
+        setRuntimeTexture(material, "vtPageMap", pageTableTexture, _residency->splatSampler());
     }
     for (auto *material : _decals->materials()) {
         setRuntimeTexture(material, "decalHeightMap", _materialLibrary->decalHeight(), _residency->heightSampler());
     }
+    _boundPageTableTexture = pageTableTexture;
 }
 
 void LandscapeRenderer::updateMaterialProperties() {
@@ -569,18 +585,6 @@ void LandscapeRenderer::refreshTerrainMaterials() {
     }
     // Inactive models get fresh instance data when reused.
 }
-
-void LandscapeRenderer::setUnlit(bool enabled) {
-    // These passes belong exclusively to this renderer. Update their shader
-    // variants before refreshing model materials and instance data.
-    for (auto *material : surfaceMaterials()) {
-        for (const auto &pass : *material->getPasses()) {
-            pass->getDefines()["LANDSCAPE_DEBUG_UNLIT"] = enabled;
-            pass->tryCompile();
-        }
-    }
-}
-
 
 } // namespace landscape
 } // namespace cc

@@ -1,21 +1,14 @@
 // Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { Frustum } from '../core/geometry';
-import { Vec3, Vec4 } from '../core/math';
-import type { Model } from '../render-scene/scene/model';
+import { Vec3 } from '../core/math';
 import { assert } from '../core/platform/debug';
 import { LandscapeAsset } from './Asset';
 import { LandscapeResidency } from './Residency';
-import { VTRenderer } from './VTRenderer';
-import { TargetTree, RenderTree, RenderTreeChanges } from './Quadtree';
-import type { LandscapeRenderer, LandscapeRenderNode } from './Renderer';
+import { VTRenderer, ResourceRequirements } from './VTRenderer';
+import { TargetTree, RenderTree, RenderTreeChanges, MorphRange } from './Quadtree';
 import { LandscapeRegion, QuadNode, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout } from './Data';
 import * as config from './Config';
-
-interface ResourceRequirements {
-    sources: NodeAddress[];
-    pages: VTPageAddress[];
-}
 
 interface NodeResources {
     address: NodeAddress;
@@ -23,15 +16,10 @@ interface NodeResources {
     pending: VTGridMapping;
 }
 
-function comparePages (a: VTPageAddress, b: VTPageAddress): number {
-    return a.level - b.level || a.x - b.x || a.z - b.z;
-}
-
 export class LandscapeSchedule {
     private readonly _asset: LandscapeAsset;
     private readonly _residency: LandscapeResidency;
     private readonly _vtRenderer: VTRenderer;
-    private readonly _renderer: LandscapeRenderer;
     private readonly _targetTree = new TargetTree();
     private readonly _renderTree = new RenderTree();
 
@@ -42,15 +30,11 @@ export class LandscapeSchedule {
     private _renderDirty = true;
     // Owns resource lifetimes; RenderTree only owns immutable draw snapshots.
     private readonly _nodes = new Map<NodeKey, NodeResources>();
-    constructor (asset: LandscapeAsset, renderer: LandscapeRenderer, lodQualityScale: number) {
+    constructor (asset: LandscapeAsset, residency: LandscapeResidency, vtRenderer: VTRenderer, lodQualityScale: number) {
         this._asset = asset;
-        this._renderer = renderer;
-        this._residency = renderer.residency();
-        this._vtRenderer = renderer.vtRenderer();
+        this._residency = residency;
+        this._vtRenderer = vtRenderer;
         this._targetTree.init(asset, lodQualityScale);
-        const morph = Array.from({ length: config.MAX_LOD_LEVELS }, () => new Vec4());
-        this._targetTree.lodMorphRanges().forEach((range, i) => morph[i].set(range.start, range.end, 0, 0));
-        renderer.setLodMorphRanges(morph);
     }
 
     public destroy (): void {
@@ -68,33 +52,37 @@ export class LandscapeSchedule {
             this._requestsDirty = true;
             this._renderDirty = true;
         }
-        this._renderer.setViewPosition(camera);
-        this.prepareRequests();
+        if (this._requestsDirty && this.prepareRequests()) {
+            this._requestsDirty = false;
+        }
     }
 
-    public prepareRenderData (frame: number): void {
-        const previousMappings = this._vtRenderer.pageTable().texture();
-        this.prepareResources();
+    public prepareRenderTree (): RenderTreeChanges {
+        const published = this.prepareResources();
         let changes: RenderTreeChanges = { added: [], updated: [], removed: [] };
-        if (this._renderDirty) {
-            changes = this._renderTree.select(this._targetTree, (address) => this.queryMaterialMapping(address));
-            this._renderDirty = this._renderTree.empty();
-            this._requestsDirty = this._requestsDirty || changes.added.length > 0 || changes.removed.length > 0;
+        if (this._renderDirty || published) {
+            changes = this._renderTree.select(this._targetTree, (address) => this.queryMapping(address));
         }
-        const renderNode = (key: NodeKey): LandscapeRenderNode => this._renderTree.findRenderable(NodeAddress.fromKey(key))!;
-        const added = changes.added.map(renderNode);
-        const updated = changes.updated.map(renderNode);
-        this._renderer.prepareRenderData(frame, previousMappings, added, updated, changes.removed);
+        const renderChanged = changes.added.length > 0 || changes.updated.length > 0 || changes.removed.length > 0;
+        this._requestsDirty = this._requestsDirty || published || renderChanged;
+        this._renderDirty = this._renderTree.empty();
+        return changes;
+    }
+
+    // Call after Renderer has synchronized models to the prepared tree.
+    public finishUpdate (): void {
         // Retire resources only after models stop referring to the previous snapshot.
+        let released = false;
         for (const [key, node] of this._nodes) {
             if (!this._targetTree.find(node.address) && !this._renderTree.findRenderable(node.address)) {
                 this.release(node.address, node.current);
                 this.release(node.address, node.pending);
                 this._nodes.delete(key);
-                this._requestsDirty = true;
+                released = true;
             }
         }
-        this._ready = this._ready || this.isRenderStateStable();
+        this._requestsDirty = this._requestsDirty || released;
+        this._ready = this._ready || this.isStable();
         if (EDITOR_NOT_IN_PREVIEW && this.needsUpdate()) {
             // Editor repaint requests must wait until its current tick has ended.
             void Promise.resolve().then(() => {
@@ -105,9 +93,12 @@ export class LandscapeSchedule {
         }
     }
 
-    // Pass collection.
-    public collectPassModels (frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): void {
-        this._renderTree.traverse((node) => this._renderer.collectNodeModels(node.geometry, this._targetTree.region(node.geometry.address()), node.renderable, frustum, shadow, models));
+    public renderTree (): Readonly<RenderTree> {
+        return this._renderTree;
+    }
+
+    public lodMorphRanges (): readonly Readonly<MorphRange>[] {
+        return this._targetTree.lodMorphRanges();
     }
 
     // Latched after the first stable render state.
@@ -116,7 +107,7 @@ export class LandscapeSchedule {
     }
 
     // Current capacity-admitted requests are ready and draw selection is stable.
-    public isRenderStateStable (): boolean {
+    public isStable (): boolean {
         if (this._requestsDirty || this._renderDirty) {
             return false;
         }
@@ -131,7 +122,7 @@ export class LandscapeSchedule {
 
     // Repaint while admitted work or render selection is still pending.
     public needsUpdate (): boolean {
-        return !this.isRenderStateStable();
+        return !this.isStable();
     }
 
     public forEachVisibleNode (frustum: Readonly<Frustum>, origin: Readonly<Vec3>, visit: (node: QuadNode, region: LandscapeRegion) => void): void {
@@ -139,7 +130,7 @@ export class LandscapeSchedule {
     }
 
     // Resource requests.
-    private queryMaterialMapping (address: NodeAddress): ReadonlyVTGridMapping | null {
+    private queryMapping (address: NodeAddress): ReadonlyVTGridMapping | null {
         const node = this._nodes.get(address.key());
         return node && node.current.pages.length ? node.current : null;
     }
@@ -152,7 +143,7 @@ export class LandscapeSchedule {
             if (address.level > this._asset.data().maxTileLevel) {
                 return true;
             }
-            if (!this.queryMaterialMapping(address)) {
+            if (!this.queryMapping(address)) {
                 missing.push(address);
                 return false;
             }
@@ -167,7 +158,8 @@ export class LandscapeSchedule {
         return missing.concat(refresh);
     }
 
-    private prepareRequests (): void {
+    // Returns false while waiting for the admitted source batch; capacity rejection completes the scan.
+    private prepareRequests (): boolean {
         const loaded = this._residency.ready();
         for (const [key, node] of this._nodes) {
             if (!this._targetTree.find(node.address)) {
@@ -178,11 +170,10 @@ export class LandscapeSchedule {
             }
         }
         // Keep an admitted source batch pinned until it loads; target cancellation is immediate.
-        if (!this._requestsDirty || !loaded) {
-            return;
+        if (!loaded) {
+            return false;
         }
-        this._requestsDirty = false;
-        let resources = this.collectResources();
+        const resources = this.collectResources();
         const rootsReady = !this._renderTree.empty();
         const data = this._asset.data();
         const layout = new VTPageLayout(data.sectorSize);
@@ -192,7 +183,7 @@ export class LandscapeSchedule {
             if (existing && existing.pending.pages.length) {
                 continue;
             }
-            const current = this.queryMaterialMapping(address);
+            const current = this.queryMapping(address);
             if (!rootsReady && (current || address.level !== data.maxTileLevel)) {
                 continue;
             }
@@ -206,22 +197,25 @@ export class LandscapeSchedule {
             if (current && VTGridMapping.equals(current, pending)) {
                 continue;
             }
-            const candidate = { sources: resources.sources.slice(), pages: resources.pages.slice() };
-            this.appendResources(candidate, address, pending);
             const mappingCount = this._nodes.size + (existing ? 0 : 1);
-            if (!capacity.canPrepare(candidate.pages, candidate.sources) || !this._vtRenderer.pageTable().canFit(mappingCount)) {
+            if (!this._vtRenderer.pageTable().canFit(mappingCount)) {
                 continue;
             }
-            resources = candidate;
+            const source = address.ancestor(Math.max(address.level, data.minTileLevel));
+            if (!capacity.canPrepare(pending.pages, [source], resources)) {
+                continue;
+            }
+            this.appendResources(resources, address, pending);
             this.retain(address, pending);
             const node = existing ?? { address, current: new VTGridMapping(), pending: new VTGridMapping() };
             node.pending = pending;
             this._nodes.set(address.key(), node);
         }
+        return true;
     }
 
     private collectResources (): ResourceRequirements {
-        const resources: ResourceRequirements = { sources: [], pages: [] };
+        const resources: ResourceRequirements = { sources: new Map(), pages: new Map() };
         for (const node of this._nodes.values()) {
             this.appendResources(resources, node.address, node.current);
             this.appendResources(resources, node.address, node.pending);
@@ -234,15 +228,10 @@ export class LandscapeSchedule {
             return;
         }
         const source = address.ancestor(Math.max(address.level, this._asset.data().minTileLevel));
-        if (!resources.sources.some((entry) => entry.key() === source.key())) {
-            resources.sources.push(source);
-        }
+        resources.sources.set(source.key(), source);
         for (const page of mapping.pages) {
-            if (!resources.pages.some((entry) => entry.key() === page.key())) {
-                resources.pages.push(page);
-            }
+            resources.pages.set(page.key(), page);
         }
-        resources.pages.sort(comparePages);
     }
 
     private retain (address: NodeAddress, mapping: ReadonlyVTGridMapping): void {
@@ -265,15 +254,17 @@ export class LandscapeSchedule {
     }
 
     // Resource preparation.
-    private prepareResources (): void {
+    // Returns whether a pending material mapping was published.
+    private prepareResources (): boolean {
         if (!this._vtRenderer.pageTable().ensureCapacity(this._nodes.size)) {
-            return;
+            return false;
         }
         // VT submits source demand first; newly uploaded inputs compose on the next frame.
         const pagesUpdated = this._vtRenderer.update(config.VT_PAGE_UPDATE_BUDGET);
         assert(pagesUpdated, 'Landscape admitted VT requests must fit');
         const sourcesUpdated = this._residency.update(config.PAGE_UPLOAD_BUDGET);
         assert(sourcesUpdated, 'Landscape admitted sources must fit and load successfully');
+        let published = false;
         // Releases below are applied by the next resource update, after model synchronization.
         // Parent levels precede children; publication never exposes partial mappings.
         const nodes = Array.from(this._nodes.values()).sort((a, b) => b.address.level - a.address.level || b.address.x - a.address.x || b.address.z - a.address.z);
@@ -285,13 +276,13 @@ export class LandscapeSchedule {
                 continue;
             }
             assert(this._targetTree.find(node.address) !== null);
-            assert(node.address.level === this._asset.data().maxTileLevel || this.queryMaterialMapping(node.address.ancestor(node.address.level + 1)) !== null);
+            assert(node.address.level === this._asset.data().maxTileLevel || this.queryMapping(node.address.ancestor(node.address.level + 1)) !== null);
             this.release(node.address, node.current);
             node.current = node.pending;
             node.pending = new VTGridMapping();
-            this._requestsDirty = true;
-            this._renderDirty = true;
+            published = true;
         }
+        return published;
     }
 
 }

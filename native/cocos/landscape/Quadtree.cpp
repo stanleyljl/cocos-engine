@@ -256,19 +256,19 @@ void TargetTree::traverseNode(const Node &node, const std::function<bool(const N
     }
 }
 
-RenderTree::Changes RenderTree::select(const TargetTree &target, const MaterialMappingQuery &queryMaterialMapping) {
+RenderTree::Changes RenderTree::select(const TargetTree &target, const MaterialMappingQuery &queryMapping) {
     Changes changes;
     const auto &data = target.data();
     for (uint32_t z = 0; z < data.sectorsZ; ++z) {
         for (uint32_t x = 0; x < data.sectorsX; ++x) {
-            if (!queryMaterialMapping({data.maxTileLevel, x, z})) {
+            if (!queryMapping({data.maxTileLevel, x, z})) {
                 return changes;
             }
         }
     }
     auto root = std::make_unique<Node>();
     ccstd::vector<Node *> current;
-    buildRoots(*root, target.root(), target, queryMaterialMapping, current);
+    buildRoots(*root, target.root(), target, queryMapping, current);
     while (!current.empty()) {
         ccstd::vector<Node *> next;
         for (auto *node : current) {
@@ -278,7 +278,7 @@ RenderTree::Changes RenderTree::select(const TargetTree &target, const MaterialM
             }
             std::array<const VTGridMapping *, 4> mappings{};
             for (uint32_t q = 0; q < 4; ++q) {
-                mappings[q] = queryMaterialMapping(desired->children[q].geometry.address());
+                mappings[q] = queryMapping(desired->children[q].geometry.address());
             }
             if (std::any_of(mappings.begin(), mappings.end(), [](const VTGridMapping *mapping) { return mapping == nullptr; })) {
                 continue;
@@ -327,7 +327,7 @@ RenderTree::Changes RenderTree::select(const TargetTree &target, const MaterialM
     return changes;
 }
 
-void RenderTree::buildRoots(Node &node, const TargetTree::Node &target, const TargetTree &tree, const MaterialMappingQuery &queryMaterialMapping, ccstd::vector<Node *> &roots) const {
+void RenderTree::buildRoots(Node &node, const TargetTree::Node &target, const TargetTree &tree, const MaterialMappingQuery &queryMapping, ccstd::vector<Node *> &roots) const {
     node.geometry = target.geometry;
     const auto address = node.geometry.address();
     node.valid = tree.contains(address);
@@ -335,14 +335,14 @@ void RenderTree::buildRoots(Node &node, const TargetTree::Node &target, const Ta
         return;
     }
     if (address.level == tree.data().maxTileLevel) {
-        node.material = *queryMaterialMapping(address);
+        node.material = *queryMapping(address);
         node.renderable = true;
         roots.push_back(&node);
         return;
     }
     node.children = std::make_unique<Node[]>(4);
     for (uint32_t q = 0; q < 4; ++q) {
-        buildRoots(node.children[q], target.children[q], tree, queryMaterialMapping, roots);
+        buildRoots(node.children[q], target.children[q], tree, queryMapping, roots);
     }
 }
 

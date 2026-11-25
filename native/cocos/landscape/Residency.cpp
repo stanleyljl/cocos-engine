@@ -93,8 +93,8 @@ void LandscapeResidency::destroy() {
     _device = nullptr;
 }
 
-bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources) const {
-    if (sources.size() > _capacity) {
+bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources, size_t retainedCount) const {
+    if (sources.size() + retainedCount > _capacity) {
         return false;
     }
     for (const auto source : sources) {

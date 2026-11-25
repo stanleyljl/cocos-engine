@@ -11,27 +11,63 @@ import { VTPageComposer, VTPageInstance, VTPageMipGenerator } from './VTPageStag
 import { LandscapeData, LandscapeRegion, NodeAddress, NodeKey, ReadonlyVTGridMapping, VTGridMapping, VTPageAddress, VTPageLayout, VTPageSources } from './Data';
 import * as config from './Config';
 
+export interface ResourceRequirements {
+    // Keyed by address because JS sets compare address objects by identity.
+    sources: Map<NodeKey, NodeAddress>;
+    pages: Map<NodeKey, VTPageAddress>;
+}
+
 // Scoped to one admission scan; caches immutable inputs, never capacity decisions.
 export class VTCapacityQuery {
     private readonly _pageSources = new Map<NodeKey, NodeAddress[]>();
 
     constructor (private readonly _renderer: VTRenderer, private readonly _residency: LandscapeResidency) {}
 
-    public canPrepare (pages: readonly VTPageAddress[], sources: readonly NodeAddress[]): boolean {
-        if (!this._residency.canFit(sources) || !this._renderer.canFit(pages)) {
+    // Candidate lists are unique; retained resources have already passed address validation.
+    public canPrepare (pages: readonly VTPageAddress[], sources: readonly NodeAddress[], retained: ResourceRequirements = { sources: new Map(), pages: new Map() }): boolean {
+        let sharedSources = 0;
+        for (const source of sources) {
+            if (retained.sources.has(source.key())) {
+                ++sharedSources;
+            }
+        }
+        let sharedPages = 0;
+        for (const page of pages) {
+            if (retained.pages.has(page.key())) {
+                ++sharedPages;
+            }
+        }
+        const retainedSourceCount = retained.sources.size - sharedSources;
+        const retainedPageCount = retained.pages.size - sharedPages;
+        if (!this._residency.canFit(sources, retainedSourceCount) || !this._renderer.canFit(pages, retainedPageCount)) {
             return false;
         }
-        const retained = new Set(sources.map((source) => source.key()));
-        // Each page must fit alongside retained node sources, even after detail settings change.
-        for (const page of pages) {
+        const sourceCount = retainedSourceCount + sources.length;
+        const containsSource = (source: NodeAddress): boolean => retained.sources.has(source.key())
+            || sources.some((candidate) => candidate.key() === source.key());
+        const canCompose = (page: VTPageAddress): boolean => {
             let inputs = this._pageSources.get(page.key());
             if (!inputs) {
                 inputs = [];
                 this._renderer.selectSources(page, true, true).appendTo(inputs);
                 this._pageSources.set(page.key(), inputs);
             }
-            const additional = inputs.filter((source) => !retained.has(source.key())).length;
-            if (retained.size + additional > this._residency.layerCount()) {
+            let additional = 0;
+            for (const source of inputs) {
+                if (!containsSource(source)) {
+                    ++additional;
+                }
+            }
+            return sourceCount + additional <= this._residency.layerCount();
+        };
+        // New sources can also exhaust composition headroom for retained pages.
+        for (const page of retained.pages.values()) {
+            if (!canCompose(page)) {
+                return false;
+            }
+        }
+        for (const page of pages) {
+            if (!retained.pages.has(page.key()) && !canCompose(page)) {
                 return false;
             }
         }
@@ -275,8 +311,9 @@ export class VTRenderer {
         return new VTCapacityQuery(this, this._residency);
     }
 
-    public canFit (pages: readonly VTPageAddress[]): boolean {
-        return pages.length <= this._pages.length && pages.every((page) => {
+    // retainedCount excludes resources present in the supplied list.
+    public canFit (pages: readonly VTPageAddress[], retainedCount = 0): boolean {
+        return pages.length + retainedCount <= this._pages.length && pages.every((page) => {
             const side = 2 ** (this._layout.rootLevel() - page.level);
             return page.level >= 0 && page.level <= this._layout.rootLevel() && page.x >= 0 && page.z >= 0
                 && page.x < this._data.sectorsX * side && page.z < this._data.sectorsZ * side;

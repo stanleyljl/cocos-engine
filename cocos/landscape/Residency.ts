@@ -119,8 +119,9 @@ export class LandscapeResidency {
         this._inFlight.clear();
     }
 
-    public canFit (sources: readonly NodeAddress[]): boolean {
-        return sources.length <= this._capacity && sources.every((source) => source.level >= this._data.minTileLevel
+    // retainedCount excludes resources present in the supplied list.
+    public canFit (sources: readonly NodeAddress[], retainedCount = 0): boolean {
+        return sources.length + retainedCount <= this._capacity && sources.every((source) => source.level >= this._data.minTileLevel
             && source.level <= this._data.maxTileLevel && source.x >= 0 && source.z >= 0
             && source.x < this._data.nodesX(source.level) && source.z < this._data.nodesZ(source.level));
     }

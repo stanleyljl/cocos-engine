@@ -98,7 +98,8 @@ void LandscapeInstance::initializeRuntime(uint32_t queryCacheCapacity) {
     if (!renderer->init(_node.get(), _scene, asset.get())) {
         return;
     }
-    auto schedule = std::make_unique<LandscapeSchedule>(*asset, *renderer, _lodQualityScale);
+    auto schedule = std::make_unique<LandscapeSchedule>(*asset, renderer->residency(), renderer->vtRenderer(), _lodQualityScale);
+    renderer->setLodMorphRanges(schedule->lodMorphRanges());
     // Create the empty CPU cache with the other runtime objects. Tile I/O
     // starts when addSource() registers the first reference to a tile.
     auto query = std::make_unique<LandscapeQuery>(asset->data(),
@@ -184,6 +185,7 @@ void LandscapeInstance::update() {
         return;
     }
     camera->update();
+    _renderer->setViewPosition(camera->getPosition());
     _schedule->update(camera->getPosition(), _node->getWorldPosition());
 }
 
@@ -292,7 +294,9 @@ bool LandscapeInstance::isVisible(const scene::Camera &camera) const {
 }
 
 void LandscapeInstance::prepareRenderData() {
-    _schedule->prepareRenderData(Root::getInstance()->getFrameCount());
+    const auto changes = _schedule->prepareRenderTree();
+    _renderer->prepareRenderData(Root::getInstance()->getFrameCount(), _schedule->renderTree(), changes);
+    _schedule->finishUpdate();
 }
 
 void LandscapeInstance::preparePasses(const scene::Camera &camera, const pipeline::PipelineSceneData &sceneData) {
@@ -340,7 +344,7 @@ uint32_t LandscapeInstance::addShadowPasses(const pipeline::PipelineSceneData &s
 void LandscapeInstance::collectPassModels(uint32_t cascadesToDeduplicate) {
     for (size_t i = 0; i < _passCount; ++i) {
         auto &pass = _passes[i];
-        _schedule->collectPassModels(*pass.frustum, pass.shadow, pass.models);
+        _renderer->collectPassModels(_schedule->renderTree(), *pass.frustum, pass.shadow, pass.models);
     }
     removeCSMDuplicates(cascadesToDeduplicate);
 }
@@ -487,7 +491,7 @@ void LandscapeInstance::drawDebugBounds() {
 }
 
 TextureBase *LandscapeInstance::getVTAtlas() const {
-    return _renderer ? _renderer->getVTAtlas() : nullptr;
+    return _renderer ? _renderer->vtAtlas() : nullptr;
 }
 
 } // namespace landscape

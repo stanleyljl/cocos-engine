@@ -31,7 +31,7 @@
 #include "base/std/container/unordered_map.h"
 #include "base/std/container/vector.h"
 #include "core/TypedArray.h"
-#include "landscape/Data.h"
+#include "landscape/Quadtree.h"
 #include "math/Vec3.h"
 #include "math/Vec4.h"
 
@@ -64,13 +64,6 @@ class DecalRenderer;
 class LandscapeAsset;
 class LandscapeResidency;
 
-// Borrowed inputs are consumed synchronously; the renderer retains only GPU data.
-struct LandscapeRenderNode {
-    const QuadNode *geometry;
-    const VTGridMapping *material;
-    uint8_t edgeMask;
-};
-
 class LandscapeRenderer {
 public:
     LandscapeRenderer();
@@ -80,12 +73,12 @@ public:
     void destroy();
 
     // Render data and pass collection.
-    void prepareRenderData(uint32_t frame, gfx::Texture *previousMappings, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
-    bool collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
+    void prepareRenderData(uint32_t frame, const RenderTree &tree, const RenderTree::Changes &changes);
+    void collectPassModels(const RenderTree &tree, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
 
     // Runtime settings.
     void setViewPosition(const Vec3 &position);
-    void setLodMorphRanges(const ccstd::vector<Vec4> &ranges);
+    void setLodMorphRanges(const ccstd::vector<TargetTree::MorphRange> &ranges);
     void setDebugData(const LandscapeDebugData &data);
     void setHoleMode(uint32_t mode);
     void setCastShadow(bool enabled);
@@ -100,18 +93,19 @@ public:
 
     LandscapeResidency &residency() const { return *_residency; }
     VTRenderer &vtRenderer() const { return *_vtRenderer; }
-    TextureBase *getVTAtlas() const;
+    TextureBase *vtAtlas() const;
 
 private:
     struct GridDraw {
-        // GPU state; draw snapshots come from RenderTree, resource mappings from Schedule.
+        // GPU state for a committed RenderTree node.
         int pageTableSlot{-1}; // -1 means unallocated.
         IntrusivePtr<scene::Model> model;
         LandscapeGridParams params; // Uploaded instance data, restored after material variants change.
     };
 
     // Terrain models.
-    void syncTerrainModels(const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed);
+    void syncTerrainModels(const RenderTree &tree, const RenderTree::Changes &changes);
+    bool collectNodeModels(const QuadNode &node, const LandscapeRegion &region, bool renderable, const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
     LandscapeGridParams resolveGridParams(const QuadNode &node, uint32_t pageTableSlot, uint8_t edgeMask);
     void updateModel(scene::Model *model, const QuadNode &node, const LandscapeGridParams &gridParams);
     void updateModelBounds(scene::Model *model, const QuadNode &node);
@@ -124,7 +118,6 @@ private:
     void updateMaterialProperties();
     void updateMorphCameraProperty();
     void refreshTerrainMaterials();
-    void setUnlit(bool enabled);
 
     IntrusivePtr<Node> _node;
     scene::RenderScene *_scene{nullptr};
@@ -139,6 +132,8 @@ private:
     IntrusivePtr<RenderingSubMesh> _mesh;
     IntrusivePtr<Material> _materialSolid;
     IntrusivePtr<Material> _materialWire;
+    // Borrowed binding identity; updated by bindRuntimeTextures() and cleared on destroy().
+    gfx::Texture *_boundPageTableTexture{nullptr};
 
     ccstd::unordered_map<uint64_t, GridDraw> _draws;
     ccstd::vector<IntrusivePtr<scene::Model>> _pool;

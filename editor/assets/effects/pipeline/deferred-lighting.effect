@@ -104,7 +104,7 @@ CCProgram lighting-fs-tiled %{
     color = CCFragOutput(color);
 
 #if CC_USE_DEBUG_VIEW == CC_SURFACES_DEBUG_VIEW_SINGLE
-    color = vec4(albedoMap.rgb, 1.0);
+    color = vec4(albedo.rgb, 1.0);
 #endif
 
     fragColor = color;
@@ -188,7 +188,7 @@ CCProgram lighting-fs %{
     color = CCFragOutput(color);
 
 #if CC_USE_DEBUG_VIEW == CC_SURFACES_DEBUG_VIEW_SINGLE
-    color = vec4(albedoMap.rgb, 1.0);
+    color = vec4(albedo.rgb, 1.0);
 #endif
 
     fragColor = color;

@@ -306,19 +306,19 @@ export class RenderTree {
     private _lastMorphRangeWarning = false;
 
     // Missing sector coverage leaves the previous snapshot intact.
-    public select (target: TargetTree, queryMaterialMapping: MaterialMappingQuery): RenderTreeChanges {
+    public select (target: TargetTree, queryMapping: MaterialMappingQuery): RenderTreeChanges {
         const changes: RenderTreeChanges = { added: [], updated: [], removed: [] };
         const data = target.data();
         for (let z = 0; z < data.sectorsZ; ++z) {
             for (let x = 0; x < data.sectorsX; ++x) {
-                if (!queryMaterialMapping(new NodeAddress(data.maxTileLevel, x, z))) {
+                if (!queryMapping(new NodeAddress(data.maxTileLevel, x, z))) {
                     return changes;
                 }
             }
         }
         const root = new MutableRenderNode();
         let current: MutableRenderNode[] = [];
-        this.buildRoots(root, target.root(), target, queryMaterialMapping, current);
+        this.buildRoots(root, target.root(), target, queryMapping, current);
         while (current.length) {
             const next: MutableRenderNode[] = [];
             for (const node of current) {
@@ -326,7 +326,7 @@ export class RenderTree {
                 if (!desired.children) {
                     continue;
                 }
-                const mappings = desired.children.map((child) => queryMaterialMapping(child.geometry.address()));
+                const mappings = desired.children.map((child) => queryMapping(child.geometry.address()));
                 if (mappings.some((mapping) => mapping === null)) {
                     continue;
                 }
@@ -440,7 +440,7 @@ export class RenderTree {
         }
     }
 
-    private buildRoots (node: MutableRenderNode, target: TargetTreeNode, tree: TargetTree, queryMaterialMapping: MaterialMappingQuery, roots: MutableRenderNode[]): void {
+    private buildRoots (node: MutableRenderNode, target: TargetTreeNode, tree: TargetTree, queryMapping: MaterialMappingQuery, roots: MutableRenderNode[]): void {
         node.geometry = new QuadNode(target.geometry.level, target.geometry.ix, target.geometry.iz, target.geometry.minY, target.geometry.maxY);
         const address = node.geometry.address();
         node.valid = tree.contains(address);
@@ -448,14 +448,14 @@ export class RenderTree {
             return;
         }
         if (address.level === tree.data().maxTileLevel) {
-            this.copyMapping(node.material, queryMaterialMapping(address)!);
+            this.copyMapping(node.material, queryMapping(address)!);
             node.renderable = true;
             roots.push(node);
             return;
         }
         node.children = target.children!.map((entry) => {
             const child = new MutableRenderNode();
-            this.buildRoots(child, entry, tree, queryMaterialMapping, roots);
+            this.buildRoots(child, entry, tree, queryMapping, roots);
             return child;
         });
     }

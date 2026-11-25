@@ -41,7 +41,6 @@ export class LandscapeDebugData {
     public lodColor = false;
     public showRanges = false;
     public showBox = false;
-    public unlit = false;
     public showVTAtlas = false;
     public heightBlendEnabled = true;
     public refineFarDetail = true;

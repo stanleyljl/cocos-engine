@@ -43,9 +43,6 @@ module.exports = {
                     showBox: {
                         tooltip: '绘制主相机当前视野内选中四叉树节点的包围盒。',
                     },
-                    unlit: {
-                        tooltip: '以无光照方式显示地形及立体贴花材质，便于检查表面颜色。',
-                    },
                     showVTAtlas: {
                         tooltip: 'VT 图集预览开关。需由项目调试界面读取此开关，并使用 getVTAtlas() 显示图集。',
                     },

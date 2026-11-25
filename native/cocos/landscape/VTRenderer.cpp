@@ -46,24 +46,42 @@ VTCapacityQuery::VTCapacityQuery(const VTRenderer &renderer, const LandscapeResi
 : _renderer(renderer)
 , _residency(residency) {}
 
-bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources) {
-    if (!_residency.canFit(sources) || !_renderer.canFit(pages)) {
+bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources, const ResourceRequirements &retained) {
+    const auto sharedSources = std::count_if(sources.begin(), sources.end(), [&](NodeAddress source) {
+        return retained.sources.count(source) != 0;
+    });
+    const auto sharedPages = std::count_if(pages.begin(), pages.end(), [&](VTPageAddress page) {
+        return retained.pages.count(page) != 0;
+    });
+    const auto retainedSourceCount = retained.sources.size() - sharedSources;
+    const auto retainedPageCount = retained.pages.size() - sharedPages;
+    if (!_residency.canFit(sources, retainedSourceCount) || !_renderer.canFit(pages, retainedPageCount)) {
         return false;
     }
-    ccstd::unordered_set<uint64_t> retained;
-    for (const auto source : sources) {
-        retained.insert(source.key());
-    }
-    // Each page must fit alongside retained node sources, even after detail settings change.
-    for (const auto page : pages) {
+    const auto sourceCount = retainedSourceCount + sources.size();
+    const auto containsSource = [&](NodeAddress source) {
+        return retained.sources.count(source) != 0 || std::any_of(sources.begin(), sources.end(), [&](NodeAddress candidate) {
+            return candidate.key() == source.key();
+        });
+    };
+    const auto canCompose = [&](VTPageAddress page) {
         const auto [entry, inserted] = _pageSources.try_emplace(page.key());
         if (inserted) {
             _renderer.selectSources(page, true, true).appendTo(entry->second);
         }
         const auto additional = std::count_if(entry->second.begin(), entry->second.end(), [&](NodeAddress source) {
-            return retained.count(source.key()) == 0;
+            return !containsSource(source);
         });
-        if (retained.size() + additional > _residency.layerCount()) {
+        return sourceCount + additional <= _residency.layerCount();
+    };
+    // New sources can also exhaust composition headroom for retained pages.
+    for (const auto page : retained.pages) {
+        if (!canCompose(page)) {
+            return false;
+        }
+    }
+    for (const auto page : pages) {
+        if (retained.pages.count(page) == 0 && !canCompose(page)) {
             return false;
         }
     }
@@ -271,8 +289,8 @@ void VTRenderer::destroy() {
     _refineFarDetail = true;
 }
 
-bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages) const {
-    if (pages.size() > _pages.size()) {
+bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages, size_t retainedCount) const {
+    if (pages.size() + retainedCount > _pages.size()) {
         return false;
     }
     for (const auto p : pages) {

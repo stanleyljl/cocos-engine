@@ -53,7 +53,6 @@ static Material *createDecalMaterial(bool wireframe, bool heightUnorm) {
     info.effectName = ccstd::string{"landscape/builtin-landscape-decal"};
     MacroRecord defines;
     defines["USE_INSTANCING"] = true;
-    defines["LANDSCAPE_DEBUG_UNLIT"] = false;
     defines["LANDSCAPE_HEIGHT_UNORM"] = heightUnorm;
     // Compile debug edges out of the normal material entirely.
     defines["LANDSCAPE_WIREFRAME"] = wireframe;

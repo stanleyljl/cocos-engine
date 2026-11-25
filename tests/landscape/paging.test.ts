@@ -64,7 +64,7 @@ test('reused page sources still check capacity against the current retained set'
         return result;
     });
     const residency = {
-        canFit: (sources: NodeAddress[]): boolean => sources.length <= 2,
+        canFit: (sources: NodeAddress[], retainedCount = 0): boolean => sources.length + retainedCount <= 2,
         layerCount: (): number => 2,
     } as LandscapeResidency;
     const pages = {

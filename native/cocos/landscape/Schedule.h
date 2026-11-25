@@ -5,50 +5,42 @@
 #include <memory>
 #include "base/std/container/vector.h"
 #include "base/std/container/map.h"
-#include "landscape/Data.h"
+#include "landscape/Quadtree.h"
 #include "math/Vec3.h"
 
 namespace cc::geometry {
 class Frustum;
 }
-namespace cc::scene {
-class Model;
-}
 
 namespace cc::landscape {
-class LandscapeRenderer;
 class LandscapeAsset;
 class LandscapeResidency;
 class VTRenderer;
-class TargetTree;
-class RenderTree;
+struct ResourceRequirements;
 
-// Coordinates terrain updates, resource readiness and pass collection.
+// Owns target/render trees and coordinates resource requests and publication.
 class LandscapeSchedule {
 public:
-    LandscapeSchedule(LandscapeAsset &asset, LandscapeRenderer &renderer, float lodQualityScale);
+    LandscapeSchedule(LandscapeAsset &asset, LandscapeResidency &residency, VTRenderer &vtRenderer, float lodQualityScale);
     ~LandscapeSchedule();
 
     // Frame updates.
     void update(const Vec3 &camera, const Vec3 &origin);
-    void prepareRenderData(uint32_t frame);
+    RenderTree::Changes prepareRenderTree();
+    // Call after Renderer has synchronized models to the prepared tree.
+    void finishUpdate();
 
-    // Pass collection.
-    void collectPassModels(const geometry::Frustum &frustum, bool shadow, ccstd::vector<const scene::Model *> &models) const;
+    const RenderTree &renderTree() const { return *_renderTree; }
+    const ccstd::vector<TargetTree::MorphRange> &lodMorphRanges() const { return _targetTree->lodMorphRanges(); }
 
     // Latched after the first stable render state.
     bool isReady() const { return _ready; }
     // Current capacity-admitted requests are ready and draw selection is stable.
-    bool isRenderStateStable() const;
+    bool isStable() const;
 
     void forEachVisibleNode(const geometry::Frustum &frustum, const Vec3 &origin, const std::function<void(const QuadNode &, const LandscapeRegion &)> &visit) const;
 
 private:
-    struct ResourceRequirements {
-        // Temporary capacity query; resource ownership lives in NodeResources.
-        ccstd::vector<NodeAddress> sources;
-        ccstd::vector<VTPageAddress> pages;
-    };
     struct NodeResources {
         NodeAddress address;
         VTGridMapping current;
@@ -56,22 +48,23 @@ private:
     };
 
     // Resource requests.
-    void prepareRequests();
-    ResourceRequirements collectResources() const;
+    // Returns false while waiting for the admitted source batch; capacity rejection completes the scan.
+    bool prepareRequests();
     ccstd::vector<NodeAddress> requests() const;
-    const VTGridMapping *queryMaterialMapping(NodeAddress address) const;
+    const VTGridMapping *queryMapping(NodeAddress address) const;
+    ResourceRequirements collectResources() const;
     void appendResources(ResourceRequirements &resources, NodeAddress address, const VTGridMapping &mapping) const;
     void retain(NodeAddress address, const VTGridMapping &mapping);
     void release(NodeAddress address, VTGridMapping &mapping);
 
     // Resource preparation.
-    void prepareResources();
+    // Returns whether a pending material mapping was published.
+    bool prepareResources();
 
     // Borrowed dependencies outlive Schedule; both trees are owned here.
     LandscapeAsset &_asset;
     LandscapeResidency &_residency;
     VTRenderer &_vtRenderer;
-    LandscapeRenderer &_renderer;
     std::unique_ptr<TargetTree> _targetTree;
     std::unique_ptr<RenderTree> _renderTree;
 

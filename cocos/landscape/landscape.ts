@@ -144,30 +144,24 @@ export class LandscapeDebugData {
     @serializable
     @editable
     @displayOrder(4)
-    @tooltip('i18n:classes.cc.LandscapeDebugData.properties.unlit.tooltip')
-    public unlit = false;
-
-    @serializable
-    @editable
-    @displayOrder(5)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.heightBlendEnabled.tooltip')
     public heightBlendEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(6)
+    @displayOrder(5)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.refineFarDetail.tooltip')
     public refineFarDetail = true;
 
     @serializable
     @editable
-    @displayOrder(7)
+    @displayOrder(6)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.decal3DEnabled.tooltip')
     public decal3DEnabled = true;
 
     @serializable
     @editable
-    @displayOrder(8)
+    @displayOrder(7)
     @tooltip('i18n:classes.cc.LandscapeDebugData.properties.triplanarEnabled.tooltip')
     public triplanarEnabled = true;
 
@@ -528,13 +522,12 @@ export class Landscape extends Component {
             | (Number(data.lodColor) << 1)
             | (Number(data.showRanges) << 2)
             | (Number(data.showBox) << 3)
-            | (Number(data.unlit) << 4)
-            | (Number(data.showVTAtlas) << 5)
-            | (Number(data.heightBlendEnabled) << 6)
-            | (Number(data.refineFarDetail) << 7)
-            | (Number(data.decal3DEnabled) << 8)
-            | (Number(data.triplanarEnabled) << 9)
-            | (Number(data.physicsWireframe) << 10);
+            | (Number(data.showVTAtlas) << 4)
+            | (Number(data.heightBlendEnabled) << 5)
+            | (Number(data.refineFarDetail) << 6)
+            | (Number(data.decal3DEnabled) << 7)
+            | (Number(data.triplanarEnabled) << 8)
+            | (Number(data.physicsWireframe) << 9);
         if (flags === this._appliedDebugFlags) {
             return;
         }

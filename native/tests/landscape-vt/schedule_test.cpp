@@ -119,33 +119,32 @@ LandscapeRenderer::LandscapeRenderer()
 LandscapeRenderer::~LandscapeRenderer() = default;
 DecalRenderer::~DecalRenderer() = default;
 MaterialLibrary::~MaterialLibrary() = default;
-void LandscapeRenderer::setLodMorphRanges(const ccstd::vector<Vec4> &) {}
-void LandscapeRenderer::setViewPosition(const Vec3 &) {}
-void LandscapeRenderer::prepareRenderData(uint32_t, gfx::Texture *, const ccstd::vector<LandscapeRenderNode> &added, const ccstd::vector<LandscapeRenderNode> &updated, const ccstd::vector<uint64_t> &removed) {
+void LandscapeRenderer::prepareRenderData(uint32_t, const RenderTree &tree, const RenderTree::Changes &changes) {
     require(backend.preparing, "Tick synchronized draw models");
-    for (const auto key : removed) {
+    for (const auto key : changes.removed) {
         backend.draws.erase(key);
     }
-    for (const auto &node : updated) {
-        require(backend.draws.count(node.geometry->address().key()) != 0, "Updated draw does not exist");
+    for (const auto key : changes.updated) {
+        require(backend.draws.count(key) != 0, "Updated draw does not exist");
     }
-    const auto updateDraw = [&](const LandscapeRenderNode &node) {
-        require(_residency->resolve(node.geometry->address()).layer >= 0, "Renderer received missing geometry");
-        for (const auto page : node.material->pages) {
+    const auto updateDraw = [&](uint64_t key) {
+        const auto &node = *tree.findRenderable(NodeAddress::fromKey(key));
+        require(_residency->resolve(node.geometry.address()).layer >= 0, "Renderer received missing geometry");
+        for (const auto page : node.material.pages) {
             require(!_vtRenderer->needsComposition(page), "Renderer received incomplete material");
         }
-        backend.draws[node.geometry->address().key()] = node.edgeMask;
+        backend.draws[key] = node.edgeMask;
     };
-    for (const auto &node : added) {
-        require(backend.draws.count(node.geometry->address().key()) == 0, "Added draw already exists");
-        updateDraw(node);
+    for (const auto key : changes.added) {
+        require(backend.draws.count(key) == 0, "Added draw already exists");
+        updateDraw(key);
     }
-    for (const auto &node : updated) {
-        updateDraw(node);
+    for (const auto key : changes.updated) {
+        updateDraw(key);
     }
 }
-bool LandscapeRenderer::collectNodeModels(const QuadNode &, const LandscapeRegion &, bool, const geometry::Frustum &, bool, ccstd::vector<const scene::Model *> &) const {
-    return true;
+void LandscapeRenderer::collectPassModels(const RenderTree &tree, const geometry::Frustum &, bool, ccstd::vector<const scene::Model *> &) const {
+    tree.traverse([](const RenderTree::Node &) { return true; });
 }
 LandscapeAsset::LandscapeAsset() = default;
 LandscapeAsset::~LandscapeAsset() = default;
@@ -154,8 +153,8 @@ LandscapeResidency::LandscapeResidency()
     backend.residency = this;
 }
 LandscapeResidency::~LandscapeResidency() = default;
-bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources) const {
-    return sources.size() <= backend.sourceCapacity;
+bool LandscapeResidency::canFit(const ccstd::vector<NodeAddress> &sources, size_t retainedCount) const {
+    return sources.size() + retainedCount <= backend.sourceCapacity;
 }
 void LandscapeResidency::request(NodeAddress source) {
     const auto [entry, inserted] = _requests.try_emplace(source.key(), Request{source, 0});
@@ -230,22 +229,34 @@ VTRenderer::~VTRenderer() = default;
 VTCapacityQuery::VTCapacityQuery(const VTRenderer &renderer, const LandscapeResidency &residency)
 : _renderer(renderer)
 , _residency(residency) {}
-bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources) {
-    if (!_residency.canFit(sources) || !_renderer.canFit(pages)) {
+bool VTCapacityQuery::canPrepare(const ccstd::vector<VTPageAddress> &pages, const ccstd::vector<NodeAddress> &sources, const ResourceRequirements &retained) {
+    ccstd::vector<VTPageAddress> allPages(retained.pages.begin(), retained.pages.end());
+    ccstd::vector<NodeAddress> allSources(retained.sources.begin(), retained.sources.end());
+    for (const auto page : pages) {
+        if (retained.pages.count(page) == 0) {
+            allPages.push_back(page);
+        }
+    }
+    for (const auto source : sources) {
+        if (retained.sources.count(source) == 0) {
+            allSources.push_back(source);
+        }
+    }
+    if (!_residency.canFit(allSources) || !_renderer.canFit(allPages)) {
         return false;
     }
     // Match the boundary double's single shared composition input.
     const NodeAddress input{2, 0, 0};
-    const bool retained = std::any_of(sources.begin(), sources.end(), [&](NodeAddress source) {
+    const bool containsInput = std::any_of(allSources.begin(), allSources.end(), [&](NodeAddress source) {
         return source.key() == input.key();
     });
-    return pages.empty() || sources.size() + (retained ? 0 : 1) <= _residency.layerCount();
+    return allPages.empty() || allSources.size() + (containsInput ? 0 : 1) <= _residency.layerCount();
 }
 void VTRenderer::setTriplanarEnabled(bool enabled) {
     _triplanarEnabled = enabled;
 }
-bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages) const {
-    return pages.size() <= backend.pageCapacity;
+bool VTRenderer::canFit(const ccstd::vector<VTPageAddress> &pages, size_t retainedCount) const {
+    return pages.size() + retainedCount <= backend.pageCapacity;
 }
 void VTRenderer::request(VTPageAddress address) {
     const auto [entry, inserted] = _requests.try_emplace(address.key(), Request{address, 0});
@@ -387,7 +398,7 @@ void testCameraRotation() {
         ranges[level].assign(static_cast<size_t>(data.nodesX(level)) * data.nodesZ(level), {0, 1});
     }
     LandscapeRenderer renderer;
-    LandscapeSchedule schedule(asset, renderer, 1.0F);
+    LandscapeSchedule schedule(asset, renderer.residency(), renderer.vtRenderer(), 1.0F);
     auto &tree = *schedule._targetTree;
     auto &render = *schedule._renderTree;
     RenderTree::Changes changes;
@@ -459,9 +470,9 @@ void testCameraRotation() {
         const auto updated = changes.updated;
         const auto removed = changes.removed;
         ccstd::vector<const cc::scene::Model *> models;
-        schedule.collectPassModels(frustum, false, models);
+        renderer.collectPassModels(schedule.renderTree(), frustum, false, models);
         if (shadow) {
-            schedule.collectPassModels(frustum, true, models);
+            renderer.collectPassModels(schedule.renderTree(), frustum, true, models);
         }
         const auto after = resourceRequests(schedule);
         require(requests.size() == after.size() && std::equal(requests.begin(), requests.end(), after.begin(), [](NodeAddress a, NodeAddress b) { return a.key() == b.key(); }), "Pass collection changed request order");
@@ -555,7 +566,7 @@ int main(int argc, char **argv) {
     auto &pages = renderer.vtRenderer();
     const bool triplanar = argc == 2 && std::string(argv[1]) == "--triplanar";
     pages.setTriplanarEnabled(triplanar);
-    LandscapeSchedule schedule(asset, renderer, 1.0F);
+    LandscapeSchedule schedule(asset, renderer.residency(), renderer.vtRenderer(), 1.0F);
     const auto &tree = *schedule._targetTree;
     const auto &render = *schedule._renderTree;
     std::ostringstream trace;
@@ -591,7 +602,9 @@ int main(int argc, char **argv) {
         });
         require(afterTick == committed, "Tick changed committed draws or morph edges");
         backend.preparing = true;
-        schedule.prepareRenderData(++frame);
+        const auto changes = schedule.prepareRenderTree();
+        renderer.prepareRenderData(++frame, schedule.renderTree(), changes);
+        schedule.finishUpdate();
         backend.preparing = false;
         const auto updates = backend.updates;
         for (uint32_t view = 0; view < 1U + static_cast<uint32_t>(extraCamera); ++view) {
@@ -601,7 +614,7 @@ int main(int argc, char **argv) {
                 plane->d = 100000.0F + static_cast<float>(view);
             }
             ccstd::vector<const cc::scene::Model *> models;
-            schedule.collectPassModels(frustum, false, models);
+            renderer.collectPassModels(schedule.renderTree(), frustum, false, models);
         }
         require(updates == backend.updates, "Camera passes performed resource work");
         const bool coverage = !render.empty();
@@ -625,7 +638,7 @@ int main(int argc, char **argv) {
         });
         std::sort(nodes.begin(), nodes.end());
         std::ostringstream state;
-        state << "state " << coverage << ' ' << schedule.isRenderStateStable() << " nodes=";
+        state << "state " << coverage << ' ' << schedule.isStable() << " nodes=";
         for (const auto &node : nodes) {
             state << node << ',';
         }
@@ -641,7 +654,7 @@ int main(int argc, char **argv) {
         require(targetState(settledState) == targetState(expectedStates.at(frame - 1)), "Tick/render split changed target topology");
         trace << settledState;
     }
-    require(hadCoverage && schedule.isRenderStateStable(), "Scenario never reached complete stable coverage");
+    require(hadCoverage && schedule.isStable(), "Scenario never reached complete stable coverage");
     if (argc == 2 && std::string(argv[1]) == "--dump-parity") {
         std::cout << trace.str();
         return 0;

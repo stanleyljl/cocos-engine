@@ -143,7 +143,6 @@ struct LandscapeDebugData {
     bool lodColor{false};
     bool showRanges{false};
     bool showBox{false};
-    bool unlit{false};
     bool showVTAtlas{false};
     bool heightBlendEnabled{true};
     bool refineFarDetail{true};

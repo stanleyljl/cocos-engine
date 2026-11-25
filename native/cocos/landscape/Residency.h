@@ -51,7 +51,8 @@ public:
     bool init(gfx::Device *device, LandscapeAsset *asset, uint32_t layerCount, bool heightUnorm);
     void destroy();
     bool valid() const { return _heightArray && _splatArray && _normalArray; }
-    bool canFit(const ccstd::vector<NodeAddress> &sources) const;
+    // retainedCount excludes resources present in the supplied list.
+    bool canFit(const ccstd::vector<NodeAddress> &sources, size_t retainedCount = 0) const;
     bool canRequest(const ccstd::vector<NodeAddress> &sources) const;
     // Each demand contributes one reference; physical work is shared by address.
     void request(NodeAddress source);

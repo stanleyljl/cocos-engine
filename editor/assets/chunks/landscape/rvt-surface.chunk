@@ -50,11 +50,7 @@ void sampleVirtualTexture(vec2 localXZ, vec2 localDX, vec2 localDY, out vec4 cac
   vec2 atlasDY;
   virtualTextureCoordinates(localXZ, localDX, localDY, atlasUV, atlasDX, atlasDY);
   cachedAlbedo = textureGrad(vtAlbedo, atlasUV, atlasDX, atlasDY);
-  #if LANDSCAPE_DEBUG_UNLIT
-    normalRoughness = vec4(0.5, 1.0, 0.5, 1.0);
-  #else
-    normalRoughness = textureGrad(vtNormalRoughness, atlasUV, atlasDX, atlasDY);
-  #endif
+  normalRoughness = textureGrad(vtNormalRoughness, atlasUV, atlasDX, atlasDY);
 }
 #endif
 
@@ -86,11 +82,7 @@ vec3 lodPalette(int lod) {
   return vec3(0.90, 0.90, 0.90);
 }
 
-#if LANDSCAPE_DEBUG_UNLIT
-  #include <surfaces/data-structures/unlit>
-#else
-  #include <surfaces/data-structures/standard>
-#endif
+#include <surfaces/data-structures/standard>
 #define CC_SURFACES_FRAGMENT_MODIFY_SHARED_DATA
 void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
   #if LANDSCAPE_WIREFRAME
@@ -106,17 +98,12 @@ void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
   #include <landscape-surface-discard>
   vec4 cachedAlbedo = vec4(0.0, 0.0, 0.0, 1.0);
   vec4 normalRoughness = vec4(0.5, 1.0, 0.5, 1.0);
-#if !LANDSCAPE_DEBUG_UNLIT
   vec3 localNormal = vec3(0.0, 1.0, 0.0);
-#endif
 #if __VERSION__ >= 300
   sampleVirtualTexture(localXZ, localDX, localDY, cachedAlbedo, normalRoughness);
-  #if !LANDSCAPE_DEBUG_UNLIT
-    localNormal = normalize(normalRoughness.rgb * 2.0 - 1.0);
-  #endif
+  localNormal = normalize(normalRoughness.rgb * 2.0 - 1.0);
 #endif
   surfaceData.baseColor = vec4(cachedAlbedo.rgb * mainColor.rgb, 1.0);
-#if !LANDSCAPE_DEBUG_UNLIT
   // RVT stores albedo RGB + AO and normal XYZ + roughness; opacity stays 1.
   vec3 normal = normalize(FSInput_worldNormal);
   vec3 tangent = normalize(FSInput_worldTangent - normal * dot(normal, FSInput_worldTangent));
@@ -129,7 +116,6 @@ void SurfacesFragmentModifySharedData(inout SurfacesMaterialData surfaceData) {
   surfaceData.metallic = 0.0;
   surfaceData.specularIntensity = 0.5;
   surfaceData.emissive = vec3(0.0);
-#endif
 
   if (terrainParams.z > 0.5) {
     surfaceData.baseColor.rgb = lodPalette(int(v_lod));

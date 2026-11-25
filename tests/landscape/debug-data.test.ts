@@ -25,7 +25,7 @@ describe('Landscape debug data', () => {
         const inherited = new Set((Component as unknown as { __props__: string[] }).__props__);
         const groups = [
             { type: Landscape, name: 'Landscape', count: 9 },
-            { type: LandscapeDebugData, name: 'LandscapeDebugData', count: 9 },
+            { type: LandscapeDebugData, name: 'LandscapeDebugData', count: 8 },
         ];
         for (const { type, name, count } of groups) {
             const attributes = CCClass.Attr.getClassAttrs(type);
@@ -111,13 +111,13 @@ describe('Landscape debug data', () => {
         };
         const internal = terrain as unknown as { _runtime: typeof native; _beforeDraw(): void };
         internal._runtime = native;
-        terrain.debugData.unlit = true;
+        terrain.debugData.wireframe = true;
         terrain.debugData.heightBlendEnabled = false;
         terrain.onEnable();
         expect(native.onEnable).toHaveBeenLastCalledWith(terrain.node, terrain.lodQualityScale, 16);
         expect(native.setGlobalColorMap).toHaveBeenLastCalledWith(null);
         expect(submitted).toHaveLength(1);
-        expect(submitted[0].unlit).toBe(true);
+        expect(submitted[0].wireframe).toBe(true);
         expect(submitted[0].heightBlendEnabled).toBe(false);
         terrain.update();
         terrain.update();

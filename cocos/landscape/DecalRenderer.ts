@@ -100,7 +100,7 @@ export class DecalRenderer {
             const material = new Material();
             material.initialize({
                 effectName: 'landscape/builtin-landscape-decal',
-                defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
+                defines: { USE_INSTANCING: true, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
                 states: wireframe ? { rasterizerState: { cullMode: CullMode.NONE } } : undefined,
             });
             return material;

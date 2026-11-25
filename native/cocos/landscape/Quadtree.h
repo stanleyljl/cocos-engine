@@ -104,7 +104,7 @@ public:
     using MaterialMappingQuery = std::function<const VTGridMapping *(NodeAddress)>;
 
     // Missing sector coverage leaves the previous snapshot intact.
-    Changes select(const TargetTree &target, const MaterialMappingQuery &queryMaterialMapping);
+    Changes select(const TargetTree &target, const MaterialMappingQuery &queryMapping);
     bool empty() const { return !_root; }
     // Borrowed node; valid until the next committed selection.
     const Node *findRenderable(NodeAddress address) const;
@@ -120,7 +120,7 @@ public:
 private:
     // Diagnose each committed selection regardless of frustum visibility.
     void checkMorphRanges(const TargetTree &target);
-    void buildRoots(Node &node, const TargetTree::Node &target, const TargetTree &tree, const MaterialMappingQuery &queryMaterialMapping, ccstd::vector<Node *> &roots) const;
+    void buildRoots(Node &node, const TargetTree::Node &target, const TargetTree &tree, const MaterialMappingQuery &queryMapping, ccstd::vector<Node *> &roots) const;
     NodeAddress renderableAt(const Node &root, uint32_t x, uint32_t z) const;
     uint8_t computeEdgeMask(const Node &root, NodeAddress address, const LandscapeData &data) const;
     void traverseNode(Node &node, const std::function<bool(Node &)> &visit) const;

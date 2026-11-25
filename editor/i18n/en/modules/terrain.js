@@ -43,9 +43,6 @@ module.exports = {
                     showBox: {
                         tooltip: 'Draw bounding boxes for quadtree nodes selected in the current main camera view.',
                     },
-                    unlit: {
-                        tooltip: 'Display terrain and 3D decal materials without lighting to inspect their surface colors.',
-                    },
                     showVTAtlas: {
                         tooltip: 'VT atlas preview switch. A project debug UI must read this switch and display the atlas returned by getVTAtlas().',
                     },

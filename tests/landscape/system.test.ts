@@ -174,7 +174,7 @@ describe('Landscape tick and draw scheduling', () => {
     test('tick does not require a render camera and skips native updates until initialized', async () => {
         const { terrain, native } = await create();
         native.isInitialized.mockReturnValue(false);
-        terrain.debugData.unlit = true;
+        terrain.debugData.wireframe = true;
         director.tick(1 / 60);
         expect(native.setDebugData).toHaveBeenLastCalledWith(terrain.debugData);
         expect(native.addQuerySource).toHaveBeenCalledTimes(1);

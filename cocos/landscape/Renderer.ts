@@ -11,19 +11,14 @@ import { Pass } from '../render-scene/core/pass';
 import { RenderScene } from '../render-scene/core/render-scene';
 import { Node } from '../scene-graph/node';
 import { LandscapeAsset } from './Asset';
-import { LandscapeData, LandscapeDebugData, LandscapeGridParams, LandscapeRegion, NodeKey, QuadNode, ReadonlyVTGridMapping, VTPageLayout } from './Data';
+import { LandscapeData, LandscapeDebugData, LandscapeGridParams, LandscapeRegion, NodeAddress, NodeKey, QuadNode, VTPageLayout } from './Data';
 import { bindLandscapeModelTextures, DecalRenderer, setLandscapeInstanceAttribute } from './DecalRenderer';
 import { GridMesh } from './GridMesh';
 import { MaterialLibrary } from './MaterialLibrary';
 import { LandscapeResidency } from './Residency';
 import { VTRenderer } from './VTRenderer';
+import { MorphRange, RenderTree, RenderTreeChanges, RenderTreeNode } from './Quadtree';
 import * as config from './Config';
-
-export interface LandscapeRenderNode {
-    readonly geometry: Readonly<QuadNode>;
-    readonly material: ReadonlyVTGridMapping;
-    readonly edgeMask: number;
-}
 
 interface GridDraw {
     model: Model;
@@ -41,7 +36,7 @@ function createLandscapeMaterial (wireframe: boolean, heightUnorm: boolean): Mat
     const material = new Material();
     material.initialize({
         effectName: 'landscape/builtin-landscape',
-        defines: { USE_INSTANCING: true, LANDSCAPE_DEBUG_UNLIT: false, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
+        defines: { USE_INSTANCING: true, LANDSCAPE_HEIGHT_UNORM: heightUnorm, LANDSCAPE_WIREFRAME: wireframe },
         states: wireframe ? { rasterizerState: { cullMode: CullMode.NONE } } : undefined,
     });
     return material;
@@ -72,6 +67,8 @@ export class LandscapeRenderer {
     private _mesh: RenderingSubMesh | null = null;
     private _solid: Material | null = null;
     private _wire: Material | null = null;
+    // Borrowed binding identity; updated by bindRuntimeTextures() and cleared on destroy().
+    private _boundPageTableTexture: Texture | null = null;
 
     private readonly _draws = new Map<NodeKey, GridDraw>();
     private readonly _pool: Model[] = [];
@@ -138,6 +135,7 @@ export class LandscapeRenderer {
         });
         this._draws.clear();
         this._pool.length = 0;
+        this._boundPageTableTexture = null;
         this._vt?.destroy();
         this._vt = null;
         this._decals.destroy();
@@ -152,17 +150,16 @@ export class LandscapeRenderer {
     }
 
     // Render data and pass collection.
-    public prepareRenderData (frame: number, previousMappings: Texture, added: readonly LandscapeRenderNode[], updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
-        if (previousMappings !== this._vt!.pageTable().texture()) {
+    public prepareRenderData (frame: number, tree: Readonly<RenderTree>, changes: Readonly<RenderTreeChanges>): void {
+        if (this._boundPageTableTexture !== this._vt!.pageTable().texture()) {
             this.bindRuntimeTextures();
         }
         if (this._materialsDirty) {
-            this.setUnlit(this._debugData.unlit);
             this._decals.setEnabled(this._debugData.decal3DEnabled);
             this._decals.setWireframe(this._debugData.wireframe);
         }
-        if (added.length || updated.length || removed.length) {
-            this.syncTerrainModels(added, updated, removed);
+        if (changes.added.length || changes.updated.length || changes.removed.length) {
+            this.syncTerrainModels(tree, changes);
         }
         if (this._materialsDirty) {
             this.refreshTerrainMaterials();
@@ -180,36 +177,14 @@ export class LandscapeRenderer {
         this._decals.preparePasses(frame);
     }
 
-    public collectNodeModels (node: QuadNode, region: LandscapeRegion, renderable: boolean, frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): boolean {
-        const origin = this._node.worldPosition;
-        const lift = this._debugData.decal3DEnabled ? this._asset.maxDecalHeight() : 0;
-        const address = node.address();
-        if (!renderable) {
-            const top = node.maxY + lift;
-            const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + top) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (top - node.minY) * 0.5, region.size * 0.5);
-            return !!intersect.aabbFrustum(bounds, frustum);
-        }
-        const draw = this._draws.get(address.key());
-        assert(draw !== undefined, '[Landscape] Renderable node must have a draw record');
-        const model = draw.model;
-        assert(model != null, '[Landscape] Renderable node must have a model');
-        const visible = intersect.aabbFrustum(model.worldBounds!, frustum);
-        if (visible && model.enabled && (!shadow || model.castShadow)) {
-            models.push(model);
-        }
-        if (this._debugData.decal3DEnabled) {
-            let decalsVisible = !!visible;
-            if (!decalsVisible) {
-                const bounds = model.worldBounds!.clone();
-                bounds.center.y += lift * 0.5;
-                bounds.halfExtents.y += lift * 0.5;
-                decalsVisible = !!intersect.aabbFrustum(bounds, frustum);
-            }
-            if (decalsVisible) {
-                this._decals.collectPassModels(node, frustum, shadow, models);
-            }
-        }
-        return false;
+    public collectPassModels (tree: Readonly<RenderTree>, frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): void {
+        tree.traverse((node) => {
+            const address = node.geometry.address();
+            // Management nodes may cover several sectors above maxTileLevel.
+            const size = this._data.sectorSize * 2 ** (address.level - this._data.maxTileLevel);
+            const region = { x: address.x * size, z: address.z * size, size };
+            return this.collectNodeModels(node.geometry, region, node.renderable, frustum, shadow, models);
+        });
     }
 
     // Runtime settings.
@@ -217,9 +192,13 @@ export class LandscapeRenderer {
         this._viewPosition.set(position);
     }
 
-    public setLodMorphRanges (ranges: Vec4[]): void {
+    public setLodMorphRanges (ranges: readonly Readonly<MorphRange>[]): void {
+        const morph = Array.from({ length: config.MAX_LOD_LEVELS }, () => new Vec4());
+        for (let i = 0; i < Math.min(ranges.length, morph.length); ++i) {
+            morph[i].set(ranges[i].start, ranges[i].end, 0, 0);
+        }
         for (const material of this.surfaceMaterials()) {
-            material.setProperty('lodMorph', ranges);
+            material.setProperty('lodMorph', morph);
         }
     }
 
@@ -296,15 +275,47 @@ export class LandscapeRenderer {
         return this._vt!;
     }
 
-    public getVTAtlas (): Texture2D {
+    public vtAtlas (): Texture2D {
         return this._vt!.atlas();
     }
 
     // Terrain models.
-    private syncTerrainModels (added: readonly LandscapeRenderNode[], updated: readonly LandscapeRenderNode[], removed: readonly NodeKey[]): void {
+    private collectNodeModels (node: QuadNode, region: LandscapeRegion, renderable: boolean, frustum: Readonly<Frustum>, shadow: boolean, models: Model[]): boolean {
+        const origin = this._node.worldPosition;
+        const lift = this._debugData.decal3DEnabled ? this._asset.maxDecalHeight() : 0;
+        const address = node.address();
+        if (!renderable) {
+            const top = node.maxY + lift;
+            const bounds = new AABB(region.x + region.size * 0.5 + origin.x, (node.minY + top) * 0.5 + origin.y, region.z + region.size * 0.5 + origin.z, region.size * 0.5, (top - node.minY) * 0.5, region.size * 0.5);
+            return !!intersect.aabbFrustum(bounds, frustum);
+        }
+        const draw = this._draws.get(address.key());
+        assert(draw !== undefined, '[Landscape] Renderable node must have a draw record');
+        const model = draw.model;
+        assert(model != null, '[Landscape] Renderable node must have a model');
+        const visible = intersect.aabbFrustum(model.worldBounds!, frustum);
+        if (visible && model.enabled && (!shadow || model.castShadow)) {
+            models.push(model);
+        }
+        if (this._debugData.decal3DEnabled) {
+            let decalsVisible = !!visible;
+            if (!decalsVisible) {
+                const bounds = model.worldBounds!.clone();
+                bounds.center.y += lift * 0.5;
+                bounds.halfExtents.y += lift * 0.5;
+                decalsVisible = !!intersect.aabbFrustum(bounds, frustum);
+            }
+            if (decalsVisible) {
+                this._decals.collectPassModels(node, frustum, shadow, models);
+            }
+        }
+        return false;
+    }
+
+    private syncTerrainModels (tree: Readonly<RenderTree>, changes: Readonly<RenderTreeChanges>): void {
         const table = this._vt!.pageTable();
         const changed: number[] = [];
-        for (const key of removed) {
+        for (const key of changes.removed) {
             const draw = this._draws.get(key);
             if (draw) {
                 this.recycleModel(draw);
@@ -312,7 +323,7 @@ export class LandscapeRenderer {
             }
             this._decals.removeNode(key);
         }
-        const updateDraw = (renderable: LandscapeRenderNode, draw: GridDraw): void => {
+        const updateDraw = (renderable: RenderTreeNode, draw: GridDraw): void => {
             const key = renderable.geometry.address().key();
             if (table.update(draw.pageTableSlot, renderable.material, this._vt!)) {
                 changed.push(draw.pageTableSlot);
@@ -324,14 +335,15 @@ export class LandscapeRenderer {
             const region = this._data.nodeRegion(node.address());
             this._decals.updateNode({ nodeKey: key, region, minY: node.minY, maxY: node.maxY, gridParams: params });
         };
-        for (const renderable of added) {
-            const key = renderable.geometry.address().key();
+        for (const key of changes.added) {
+            const renderable = tree.findRenderable(NodeAddress.fromKey(key))!;
             const draw = { model: this._pool.pop() || this.createModel(), pageTableSlot: table.allocate(), params: new LandscapeGridParams() };
             this._draws.set(key, draw);
             updateDraw(renderable, draw);
         }
-        for (const renderable of updated) {
-            const draw = this._draws.get(renderable.geometry.address().key())!;
+        for (const key of changes.updated) {
+            const renderable = tree.findRenderable(NodeAddress.fromKey(key))!;
+            const draw = this._draws.get(key)!;
             updateDraw(renderable, draw);
         }
         table.upload(changed);
@@ -395,16 +407,18 @@ export class LandscapeRenderer {
 
     private bindRuntimeTextures (): void {
         const vt = this._vt!;
+        const pageTableTexture = vt.pageTable().texture();
         for (const material of this.surfaceMaterials()) {
             setRuntimeTexture(material, 'holeSplatmap', this._residency.splatArray(), this._residency.splatSampler());
             setRuntimeTexture(material, 'heightmap', this._residency.heightArray(), this._residency.heightSampler());
             setRuntimeTexture(material, 'vtAlbedo', vt.albedo(), vt.sampler());
             setRuntimeTexture(material, 'vtNormalRoughness', vt.normalRoughness(), vt.sampler());
-            setRuntimeTexture(material, 'vtPageMap', vt.pageTable().texture(), this._residency.splatSampler());
+            setRuntimeTexture(material, 'vtPageMap', pageTableTexture, this._residency.splatSampler());
         }
         for (const material of this._decals.materials()) {
             setRuntimeTexture(material, 'decalHeightMap', this._materials.decalHeight(), this._residency.heightSampler());
         }
+        this._boundPageTableTexture = pageTableTexture;
     }
 
     private updateMaterialProperties (): void {
@@ -436,16 +450,6 @@ export class LandscapeRenderer {
         });
         for (const draw of this._draws.values()) {
             applyGridParams(draw.model, this._scratch, draw.params);
-        }
-    }
-
-    private setUnlit (enabled: boolean): void {
-        // Update variants before refreshing model materials and instance data.
-        for (const material of this.surfaceMaterials()) {
-            for (const pass of material.passes) {
-                pass.defines.LANDSCAPE_DEBUG_UNLIT = enabled;
-                pass.tryCompile();
-            }
         }
     }
 }

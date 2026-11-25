@@ -371,7 +371,7 @@ export class LandscapeAsset {
             this._decalFarDistance = parsed.decalFarDistance;
             this._heightRanges = parsed.ranges;
             if (config.LANDSCAPE_DEBUG) {
-                log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxTileLevel + 1} minTileLevel=${this._data.minTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
+                log(`[Landscape] Asset: sectors=${this._data.sectorsX}x${this._data.sectorsZ} levels=${this._data.maxTileLevel + 1} minTileLevel=${this._data.minTileLevel} maxTileLevel=${this._data.maxTileLevel} materials=${this._materialLayers.length} decals=${this._decals.length}`);
             }
             return true;
         } catch (cause) {

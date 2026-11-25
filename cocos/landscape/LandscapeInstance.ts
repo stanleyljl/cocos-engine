@@ -127,7 +127,8 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
                 error('[Landscape] Only translation is supported; initialization failed');
                 return false;
             }
-            const schedule = new LandscapeSchedule(asset, renderer, lodQualityScale);
+            const schedule = new LandscapeSchedule(asset, renderer.residency(), renderer.vtRenderer(), lodQualityScale);
+            renderer.setLodMorphRanges(schedule.lodMorphRanges());
             const query = new LandscapeQuery(asset.data(), (x, z, complete) => asset.requestQueryTile(x, z, complete), queryCacheCapacity);
             this.applyRendererSettings(renderer);
             this._node = node;
@@ -193,7 +194,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
         this._assetPath = path;
     }
     public getVTAtlas (): Texture2D | null {
-        return this._renderer ? this._renderer.getVTAtlas() : null;
+        return this._renderer ? this._renderer.vtAtlas() : null;
     }
 
     public setDebugData (data: LandscapeDebugData): void {
@@ -239,6 +240,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
             return;
         }
         camera.update();
+        this._renderer.setViewPosition(camera.position);
         this._schedule!.update(camera.position, this._node!.worldPosition);
     }
 
@@ -258,7 +260,9 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
 
     // Once before all cameras, while the render command buffer is recording.
     public prepareRenderData (): void {
-        this._schedule!.prepareRenderData(director.getTotalFrames());
+        const changes = this._schedule!.prepareRenderTree();
+        this._renderer!.prepareRenderData(director.getTotalFrames(), this._schedule!.renderTree(), changes);
+        this._schedule!.finishUpdate();
     }
 
     // Per camera, after its light frusta are updated. Shared geometry stays unchanged.
@@ -274,7 +278,7 @@ export class LandscapeInstance implements LandscapeInstanceInterface {
 
     private collectPassModels (cascades: number): void {
         for (const pass of this._passes) {
-            this._schedule!.collectPassModels(pass.frustum, pass.shadow, pass.models);
+            this._renderer!.collectPassModels(this._schedule!.renderTree(), pass.frustum, pass.shadow, pass.models);
         }
         if (cascades >= 2) {
             const covered = new Set<Model>();
